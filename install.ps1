@@ -1,0 +1,387 @@
+[CmdletBinding()]
+param (
+    [Parameter(Position = 0)]
+    [string]$TargetDir = $null,
+
+    [Parameter(Position = 1)]
+    [string]$PackChoice = $null,
+
+    [Parameter(Position = 2)]
+    [string]$AdapterChoice = $null,
+
+    [switch]$Force = $false
+)
+
+$RepoUrl = "https://github.com/arifaydogan/ai-team-scaffold.git"
+
+# Define cleanup block
+$Cleanup = {
+    if ($TempDir -and (Test-Path $TempDir)) {
+        Write-Host "Cleaning up temporary directory..." -ForegroundColor Yellow
+        Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+try {
+    Write-Host "=============================================" -ForegroundColor Cyan
+    Write-Host "        AI Team Scaffold Installer           " -ForegroundColor Cyan
+    Write-Host "=============================================" -ForegroundColor Cyan
+
+    # Detect source directory
+    # If we run from a directory that contains core and packs directories
+    $LocalSource = Get-Item -Path "core", "packs" -ErrorAction SilentlyContinue
+    if ($LocalSource -and $LocalSource.Count -eq 2) {
+        $SourceDir = (Get-Location).Path
+        Write-Host "Using local source directory: $SourceDir" -ForegroundColor Green
+        $TempDir = $null
+    } else {
+        # Remote execution: Clone repository to temp directory
+        $TempDir = Join-Path $env:TEMP ("ai-team-scaffold-" + [Guid]::NewGuid().ToString().Substring(0,8))
+        Write-Host "Cloning scaffold repository from $RepoUrl to temporary directory..." -ForegroundColor Yellow
+        
+        # Run git clone
+        & git clone --depth 1 $RepoUrl $TempDir | Out-Null
+        if (-not $?) {
+            Write-Error "Failed to clone repository from $RepoUrl"
+            exit 1
+        }
+        $SourceDir = $TempDir
+    }
+
+# Interactive Inputs
+$Interactive = $false
+if (-not $TargetDir -or -not $PackChoice -or -not $AdapterChoice) {
+    $Interactive = $true
+}
+
+if ($Interactive) {
+    $TargetInput = Read-Host "Enter target project directory (default: .)"
+    if ([string]::IsNullOrWhiteSpace($TargetInput)) {
+        $TargetDir = (Get-Location).Path
+    } else {
+        $TargetDir = Resolve-Path $TargetInput -ErrorAction SilentlyContinue
+        if (-not $TargetDir) {
+            $TargetDir = New-Item -ItemType Directory -Path $TargetInput -Force | Select-Object -ExpandProperty FullName
+        } else {
+            $TargetDir = $TargetDir.Path
+        }
+    }
+} else {
+    $Resolved = Resolve-Path $TargetDir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path
+    if (-not $Resolved) {
+        $TargetDir = New-Item -ItemType Directory -Path $TargetDir -Force | Select-Object -ExpandProperty FullName
+    } else {
+        $TargetDir = $Resolved
+    }
+}
+
+if ($Interactive) {
+    Write-Host "`nSelect Pack Option:"
+    Write-Host "  1) Core (Standard 9 Agents & Rules)"
+    Write-Host "  2) Core + PaceBuild (10 Agents, Overrides & Context)"
+    while ($true) {
+        $PackInput = Read-Host "Choice (1-2)"
+        if ($PackInput -eq "1" -or $PackInput -eq "2") {
+            $PackChoice = $PackInput
+            break
+        }
+        Write-Host "Invalid choice. Please select 1 or 2." -ForegroundColor Red
+    }
+}
+
+if ($Interactive) {
+    Write-Host "`nSelect Target Adapter(s):"
+    Write-Host "  1) Antigravity (.agents/ structure)"
+    Write-Host "  2) Claude Code (CLAUDE.md & .claude/ structure)"
+    Write-Host "  3) GitHub Copilot (.github/copilot-instructions.md)"
+    Write-Host "  4) All Adapters"
+    while ($true) {
+        $AdapterInput = Read-Host "Choice (1-4)"
+        if ($AdapterInput -match "^[1-4]$") {
+            $AdapterChoice = $AdapterInput
+            break
+        }
+        Write-Host "Invalid choice. Please select 1, 2, 3 or 4." -ForegroundColor Red
+    }
+}
+
+$PackName = if ($PackChoice -eq "1") { "Core Only" } else { "Core + PaceBuild" }
+$AdapterName = switch ($AdapterChoice) {
+    "1" { "Antigravity" }
+    "2" { "Claude Code" }
+    "3" { "Copilot" }
+    "4" { "All Adapters" }
+}
+
+Write-Host "`nConfiguration Summary:"
+Write-Host "  - Source: $SourceDir"
+Write-Host "  - Target: $TargetDir"
+Write-Host "  - Pack:   $PackName"
+Write-Host "  - Adapter:$AdapterName"
+
+# Check for existing installations
+$ExistingFiles = @()
+if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+    if (Test-Path (Join-Path $TargetDir ".agents")) { $ExistingFiles += ".agents\" }
+}
+if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+    if (Test-Path (Join-Path $TargetDir "CLAUDE.md")) { $ExistingFiles += "CLAUDE.md" }
+    if (Test-Path (Join-Path $TargetDir ".claude")) { $ExistingFiles += ".claude\" }
+}
+if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
+    if (Test-Path (Join-Path $TargetDir ".github\copilot-instructions.md")) { $ExistingFiles += ".github\copilot-instructions.md" }
+}
+
+if ($ExistingFiles.Count -gt 0 -and -not $Force) {
+    Write-Host "WARNING: The following existing folders/files will be overwritten:" -ForegroundColor Yellow
+    foreach ($f in $ExistingFiles) {
+        Write-Host "  - $f" -ForegroundColor Yellow
+    }
+    if ($Interactive) {
+        $Confirm = Read-Host "Do you want to proceed and overwrite? (y/N)"
+        if ($Confirm -notmatch "^[yY](es)?$") {
+            Write-Host "Installation cancelled." -ForegroundColor Red
+            & $Cleanup
+            exit 0
+        }
+    } else {
+        Write-Error "Target files already exist and -Force was not specified. Aborting."
+        & $Cleanup
+        exit 1
+    }
+}
+
+# Helpers for file copying
+function Copy-RulesAntigravity {
+    param ($src, $dest)
+    $rulesDest = Join-Path $dest "rules"
+    New-Item -ItemType Directory -Path $rulesDest -Force | Out-Null
+    Copy-Item -Path (Join-Path $src "core\rules\*.md") -Destination $rulesDest -Force
+    
+    if ($PackChoice -eq "2") {
+        Copy-Item -Path (Join-Path $src "packs\pacebuild\overrides\rules\demo-reliability-guard.md") -Destination $rulesDest -Force
+        Copy-Item -Path (Join-Path $src "packs\pacebuild\context\jira-protocol.md") -Destination (Join-Path $rulesDest "jira-protocol.md") -Force
+    }
+}
+
+function Copy-SkillsAntigravity {
+    param ($src, $dest)
+    $skillsDest = Join-Path $dest "skills"
+    New-Item -ItemType Directory -Path $skillsDest -Force | Out-Null
+    
+    # Copy core skills
+    $coreAgents = Get-ChildItem -Path (Join-Path $src "core\agents") -Directory
+    foreach ($agent in $coreAgents) {
+        $skillsPath = Join-Path $agent.FullName "skills"
+        if (Test-Path $skillsPath) {
+            $skills = Get-ChildItem -Path $skillsPath -Directory
+            foreach ($skill in $skills) {
+                $skillTarget = Join-Path $skillsDest $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+    }
+    
+    # Copy PaceBuild specific skills & overrides
+    if ($PackChoice -eq "2") {
+        $cvSkillsPath = Join-Path $src "packs\pacebuild\agents\cv-engineer\skills"
+        if (Test-Path $cvSkillsPath) {
+            $cvSkills = Get-ChildItem -Path $cvSkillsPath -Directory
+            foreach ($skill in $cvSkills) {
+                $skillTarget = Join-Path $skillsDest $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+        
+        $beOverridePath = Join-Path $src "packs\pacebuild\overrides\backend-engineer\skills\fastapi-timescale"
+        if (Test-Path $beOverridePath) {
+            $skillTarget = Join-Path $skillsDest "fastapi-timescale"
+            New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+            Copy-Item -Path (Join-Path $beOverridePath "*") -Destination $skillTarget -Recurse -Force
+        }
+    }
+}
+
+function Copy-AgentsAntigravity {
+    param ($src, $dest)
+    $agentsDest = Join-Path $dest "agents"
+    New-Item -ItemType Directory -Path $agentsDest -Force | Out-Null
+    
+    # Copy core agents
+    Copy-Item -Path (Join-Path $src "core\agents\*") -Destination $agentsDest -Recurse -Force
+    Copy-Item -Path (Join-Path $src "AGENTS.md") -Destination (Join-Path $dest "AGENTS.md") -Force
+    
+    # Copy PaceBuild agents and overrides
+    if ($PackChoice -eq "2") {
+        $cvDest = Join-Path $agentsDest "cv-engineer"
+        New-Item -ItemType Directory -Path $cvDest -Force | Out-Null
+        Copy-Item -Path (Join-Path $src "packs\pacebuild\agents\cv-engineer\*") -Destination $cvDest -Recurse -Force
+        Copy-Item -Path (Join-Path $src "packs\pacebuild\overrides\AGENTS.md") -Destination (Join-Path $dest "AGENTS.md") -Force
+    }
+}
+
+# ----------------------------------------------------
+# 1) Install Antigravity Adapter
+# ----------------------------------------------------
+if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+    Write-Host "Installing Antigravity Adapter..."
+    $agentsDir = Join-Path $TargetDir ".agents"
+    New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null
+    Copy-RulesAntigravity $SourceDir $agentsDir
+    Copy-SkillsAntigravity $SourceDir $agentsDir
+    Copy-AgentsAntigravity $SourceDir $agentsDir
+    Write-Host "Antigravity Adapter installed successfully." -ForegroundColor Green
+}
+
+# ----------------------------------------------------
+# 2) Install Claude Code Adapter
+# ----------------------------------------------------
+if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+    Write-Host "Installing Claude Code Adapter..."
+    $claudeDir = Join-Path $TargetDir ".claude"
+    $claudeAgents = Join-Path $claudeDir "agents"
+    $claudeSkills = Join-Path $claudeDir "skills"
+    New-Item -ItemType Directory -Path $claudeAgents -Force | Out-Null
+    New-Item -ItemType Directory -Path $claudeSkills -Force | Out-Null
+    
+    # Copy core agents
+    Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $claudeAgents -Recurse -Force
+    
+    # Copy core skills
+    $coreAgents = Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory
+    foreach ($agent in $coreAgents) {
+        $skillsPath = Join-Path $agent.FullName "skills"
+        if (Test-Path $skillsPath) {
+            $skills = Get-ChildItem -Path $skillsPath -Directory
+            foreach ($skill in $skills) {
+                $skillTarget = Join-Path $claudeSkills $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+    }
+    
+    # PaceBuild modifications
+    if ($PackChoice -eq "2") {
+        $cvDest = Join-Path $claudeAgents "cv-engineer"
+        New-Item -ItemType Directory -Path $cvDest -Force | Out-Null
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\*") -Destination $cvDest -Recurse -Force
+        
+        $cvSkillsPath = Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\skills"
+        if (Test-Path $cvSkillsPath) {
+            $cvSkills = Get-ChildItem -Path $cvSkillsPath -Directory
+            foreach ($skill in $cvSkills) {
+                $skillTarget = Join-Path $claudeSkills $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+        
+        $beOverridePath = Join-Path $SourceDir "packs\pacebuild\overrides\backend-engineer\skills\fastapi-timescale"
+        if (Test-Path $beOverridePath) {
+            $skillTarget = Join-Path $claudeSkills "fastapi-timescale"
+            New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+            Copy-Item -Path (Join-Path $beOverridePath "*") -Destination $skillTarget -Recurse -Force
+        }
+    }
+    
+    # Generate CLAUDE.md
+    $claudeMdPath = Join-Path $TargetDir "CLAUDE.md"
+    $claudeMdContent = @(
+        "# Claude Code System Guidelines",
+        ""
+    )
+    $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "core\rules\global.md") -Raw
+    $claudeMdContent += ""
+    $claudeMdContent += "## Git & Branching Policy"
+    $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "core\rules\git-workflow.md") -Raw
+    
+    if ($PackChoice -eq "2") {
+        $claudeMdContent += ""
+        $claudeMdContent += "## PaceBuild Reliability Rules"
+        $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "packs\pacebuild\overrides\rules\demo-reliability-guard.md") -Raw
+        $claudeMdContent += ""
+        $claudeMdContent += "## Jira Protocol Context"
+        $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "packs\pacebuild\context\jira-protocol.md") -Raw
+    } else {
+        $claudeMdContent += ""
+        $claudeMdContent += "## Jira Protocol"
+        $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "core\rules\jira-protocol.md") -Raw
+    }
+    
+    $claudeMdContent | Set-Content -Path $claudeMdPath -Force
+    Write-Host "Claude Code Adapter installed successfully." -ForegroundColor Green
+}
+
+# ----------------------------------------------------
+# 3) Install Copilot Adapter
+# ----------------------------------------------------
+if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
+    Write-Host "Installing GitHub Copilot Adapter..."
+    $githubDir = Join-Path $TargetDir ".github"
+    New-Item -ItemType Directory -Path $githubDir -Force | Out-Null
+    
+    $copilotInstructionsPath = Join-Path $githubDir "copilot-instructions.md"
+    $copilotContent = @(
+        "# GitHub Copilot Custom Instructions",
+        ""
+    )
+    $copilotContent += Get-Content -Path (Join-Path $SourceDir "core\rules\global.md") -Raw
+    $copilotContent += ""
+    
+    if ($PackChoice -eq "2") {
+        $copilotContent += "## PaceBuild Reliability Guard"
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "packs\pacebuild\overrides\rules\demo-reliability-guard.md") -Raw
+        $copilotContent += ""
+        $copilotContent += "## PaceBuild Jira Protocol"
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "packs\pacebuild\context\jira-protocol.md") -Raw
+        $copilotContent += ""
+        $copilotContent += "## Agent Routing Matrix (PaceBuild)"
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "packs\pacebuild\overrides\AGENTS.md") -Raw
+    } else {
+        $copilotContent += "## Git & Jira Guidelines"
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "core\rules\git-workflow.md") -Raw
+        $copilotContent += ""
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "core\rules\jira-protocol.md") -Raw
+        $copilotContent += ""
+        $copilotContent += "## Agent Routing Matrix"
+        $copilotContent += Get-Content -Path (Join-Path $SourceDir "AGENTS.md") -Raw
+    }
+    
+    $copilotContent | Set-Content -Path $copilotInstructionsPath -Force
+    Write-Host "GitHub Copilot Adapter installed successfully." -ForegroundColor Green
+}
+
+# ----------------------------------------------------
+# Git Hooks Installation (if target is a Git repo)
+# ----------------------------------------------------
+if (Test-Path (Join-Path $TargetDir ".git")) {
+    $InstallHooks = $false
+    if ($Interactive) {
+        $HookConfirm = Read-Host "Git repository detected. Install Git hooks? (Y/n)"
+        if ($HookConfirm -notmatch "^[nN](o)?$") {
+            $InstallHooks = $true
+        }
+    } else {
+        $InstallHooks = $true
+    }
+    
+    if ($InstallHooks) {
+        Write-Host "Installing Git hooks..."
+        $hooksDir = Join-Path $TargetDir ".git\hooks"
+        New-Item -ItemType Directory -Path $hooksDir -Force | Out-Null
+        Copy-Item -Path (Join-Path $SourceDir "hooks\pre-commit") -Destination $hooksDir -Force
+        Copy-Item -Path (Join-Path $SourceDir "hooks\commit-msg") -Destination $hooksDir -Force
+        Copy-Item -Path (Join-Path $SourceDir "hooks\pre-push") -Destination $hooksDir -Force
+        Write-Host "Git hooks installed." -ForegroundColor Green
+    }
+}
+
+    Write-Host "=============================================" -ForegroundColor Green
+    Write-Host "   Installation Completed Successfully!      " -ForegroundColor Green
+    Write-Host "=============================================" -ForegroundColor Green
+} finally {
+    & $Cleanup
+}

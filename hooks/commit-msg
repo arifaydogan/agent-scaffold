@@ -1,0 +1,19 @@
+#!/bin/sh
+# commit-msg hook
+
+commit_msg_file=$1
+commit_msg=$(cat "$commit_msg_file")
+
+PATTERN="^\[(PACE|GH|ISSUE|HOTFIX|CHORE)-[0-9]+\]"
+
+if ! echo "$commit_msg" | grep -Eq "$PATTERN"; then
+  echo "ERROR: Invalid commit message format."
+  echo "Commit message must be prefixed with a valid Issue ID in square brackets."
+  echo "Pattern: ^\\[(PACE|GH|ISSUE|HOTFIX|CHORE)-[0-9]+\\]"
+  echo "Example:"
+  echo "  [PACE-125] chore: repo structure + global rules"
+  echo "  [GH-43] feat: add api client routing"
+  exit 1
+fi
+
+exit 0
