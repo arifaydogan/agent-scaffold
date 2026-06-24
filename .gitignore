@@ -1,0 +1,17 @@
+# Runtime state
+.agent-runtime/
+agent-scaffold.json
+.tmp-*/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python projects using the scaffold
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors and OS
+.DS_Store
+Thumbs.db

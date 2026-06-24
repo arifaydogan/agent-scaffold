@@ -1,70 +1,110 @@
-# PaceBuild Agent Matrix & Routing Rules (Extension Override)
+# PaceBuild Agent Extension
 
-This extension override documents the 10-agent team structure, milestones, and specific routing priorities configured for the PaceBuild project.
+Bu dosya ana `ORCHESTRATION.md` protokolunu degistirmez.
+PaceBuild'e ozel task agent, skill, risk ve faz baglamini ekler.
 
-## PaceBuild Team Structure
+## Zorunlu Calisma Sirasi
 
-```mermaid
-graph TD
-    User([User Request]) --> Orch[Orchestrator]
-    Orch --> Arch[Architect]
-    Orch --> BE[Backend Engineer]
-    Orch --> FE[Frontend Engineer]
-    Orch --> DE[DevOps Engineer]
-    Orch --> QA[QA Engineer]
-    Orch --> PM[PM/Analyst]
-    Orch --> Sec[Security Engineer]
-    Orch --> Data[Data Engineer]
-    Orch --> CV[CV Engineer]
-    
-    classDef orchestrator fill:#9C27B0,color:#fff;
-    classDef builder fill:#2196F3,color:#fff;
-    classDef extension fill:#FF9800,color:#fff;
-    class Orch orchestrator;
-    class Arch,BE,FE,DE,QA,PM,Sec,Data builder;
-    class CV extension;
+1. Ana `ORCHESTRATION.md` dosyasini oku.
+2. Her faz icin tek persona sec.
+3. Gerekli skill'leri birlikte yukle.
+4. En dar kapsamli task agent'i sec.
+5. Zorunlu phase handoff formatini kullan.
+
+## PaceBuild Ek Task Agenti
+
+| Task agent | Scope |
+| --- | --- |
+| `cv-engineer` | YOLO, ByteTrack, OpenCV, frame dedup, bounding box ve MJPEG |
+
+## PaceBuild Skill'leri
+
+- `senior-computer-vision`
+- `cv-pipeline-checks`
+- `yolo-bytetrack`
+- `opencv-patterns`
+- `fastapi-timescale`
+- `demo-reliability-guard`
+
+## Persona Secimi
+
+| Faz | Persona | Gerekce |
+| --- | --- | --- |
+| Jira refinement, acceptance criteria | `product-manager` | Scope ve olculebilir cikti |
+| CV/backend/frontend teknik karar | `startup-cto` | Teknik trade-off ve MVP sadeligi |
+| Docker, CI/CD, servis readiness | `devops-engineer` | Operasyon ve geri alinabilirlik |
+| Demo kapsami ve zaman trade-off'u | `solo-founder` | Tek kisilik ekip ve zaman korumasi |
+
+## Faz A Orchestration Ornegi
+
+### Phase 0 - Walking Skeleton Scope
+
+```text
+Persona: product-manager
+Skills: senior-pm, jira-expert, confluence-expert
+Task agent: pm-analyst
+Output: Net acceptance criteria, dependency sirasi, non-goals
 ```
 
----
+### Phase 1 - Uctan Uca Teknik Tasarim
 
-## Complete Team Matrix
+```text
+Persona: startup-cto
+Skills: senior-architect, senior-backend, senior-computer-vision
+Task agent: architect
+Output: Kamera -> CV -> backend -> TSDB -> frontend kontrati
+```
 
-| Role Name | Agent Key | Default Model | Primary Tools | Scope of Work |
-|:---|:---|:---|:---|:---|
-| **Orchestrator** | `orchestrator` | `claude-opus-4` | `invoke_subagent`, `list_dir` | Overall coordination, task routing, integrations review |
-| **Architect** | `architect` | `claude-sonnet-4` | `view_file`, `write_to_file` | System design, ADR patterns, tech debt limits |
-| **Backend Engineer** | `backend-engineer` | `claude-sonnet-4` | `run_command`, `replace_file_content` | FastAPI APIs, postgres models, test runs |
-| **Frontend Engineer** | `frontend-engineer` | `claude-sonnet-4` | `run_command`, `replace_file_content` | Next.js portal, widgets design, stream viewer UI |
-| **DevOps Engineer** | `devops-engineer` | `claude-sonnet-4` | `run_command`, `write_to_file` | Compose containers, dependent check constraints |
-| **QA Engineer** | `qa-engineer` | `claude-sonnet-4` | `run_command`, `grep_search` | Pytest backend, Jest client E2E integration validations |
-| **PM/Analyst** | `pm-analyst` | `claude-sonnet-4` | `searchConfluence`, `getJiraIssue` | Scope documents, Jira lifecycles, progress reports |
-| **Security Engineer** | `security-engineer` | `claude-sonnet-4` | `grep_search`, `run_command` | Threat reviews, OWASP checks, credentials monitoring |
-| **Data Engineer** | `data-engineer` | `claude-sonnet-4` | `run_command`, `view_file` | TimescaleDB hypertable partitioning, continuous aggregates |
-| **CV Engineer** | `cv-engineer` | `claude-sonnet-4` | `run_command`, `replace_file_content` | YOLOv8 pipeline, ByteTrack tuning, MJPEG server |
+### Phase 2A - CV Uygulama
 
----
+```text
+Persona: startup-cto
+Skills: senior-computer-vision, cv-pipeline-checks, yolo-bytetrack
+Task agent: cv-engineer
+Output: Detection/tracking/event/stream degisiklikleri ve test kaniti
+```
 
-## Project Milestones
+### Phase 2B - Backend ve Data
 
-- **Phase A (Walking Skeleton & MVP):**
-  - Sprint 1: cv-engine mock events → backend → TimescaleDB, frontend hook setup.
-  - Sprint 2: ByteTrack persistence config and MJPEG Streaming implementation.
-  - Sprint 3: TSDB hypertable indexing and Next.js Dashboard widgets integration.
-  - Sprint 4: CI/CD test runs and dry run checks.
-- **Phase B (Backlog / Deep Features):**
-  - GAP 1: Activity Recognition model fine-tuning.
-  - GAP 2: Schedule plan importing (Primavera / MS Project mock integration).
-  - GAP 3: PDF report generation.
-  - GAP 4: Multi-camera/Multi-site management UI.
-  - GAP 5: Safety zone polygon alarm rules engine.
-  - Killer Feature: Subcontractor worker count analysis based on helmet colors.
+```text
+Persona: startup-cto
+Skills: senior-backend, fastapi-timescale, senior-data-engineer
+Task agent: backend-engineer veya data-engineer
+Output: API, migration, dedup ve query degisiklikleri
+```
 
----
+### Phase 2C - Frontend
 
-## Orchestration Active Phase Model (FAZ A)
+```text
+Persona: startup-cto
+Skills: senior-frontend, stream-integration, frontend-testing
+Task agent: frontend-engineer
+Output: Gercek API/stream entegrasyonu ve gorunur hata durumlari
+```
 
-- **Phase:** Demo-Ready MVP
-- **Aktif Persona'lar:** `cv-engineer` + `backend-specialist` + `frontend-specialist`
-- **Skills Yüklü:** `cv-pipeline-checks`, `fastapi-timescale`, `demo-reliability-guard`
-- **Switching Trigger:** Sprint 4 tamamlandığında → `pm-analyst` devreye girer
+### Phase 3 - Demo Reliability Review
 
+```text
+Persona: startup-cto
+Skills: tdd-guide, code-review, demo-reliability-guard
+Task agent: qa-engineer
+Output: Acceptance criteria sonucu, unhappy path ve blocker listesi
+```
+
+### Phase 4 - Jira ve Confluence Handoff
+
+```text
+Persona: product-manager
+Skills: jira-expert, confluence-expert
+Task agent: pm-analyst
+Output: Jira comment, In Review handoff, proje hafizasi guncellemesi
+```
+
+## PaceBuild Kritik Kurallari
+
+- Sessiz mock fallback yasaktir.
+- Eksik config veya model dosyasi baslamadan dogrulanir.
+- Ayni frame/event tekrar yazilamaz; dedup acik olmalidir.
+- Kamera kopmasi, stream gecikmesi ve servis erisilemezligi gorunur olmalidir.
+- Epic, Done ve merge insana aittir.
+- Faz B backlog'u insan onayi olmadan alinmaz.

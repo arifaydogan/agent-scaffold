@@ -20,6 +20,10 @@ The installer merges the following into a single markdown file:
 2. Git Branching & Commit Conventions.
 3. Jira Task Protocol (domain, project keys, status transitions).
 4. Full Agent Routing Matrix (outlining the 9 core or 10 PaceBuild roles to help Copilot route sub-tasks correctly).
+5. Persona/skill/task-agent orchestration protocol and mandatory phase handoff.
+
+Copilot is primarily a builder. Use `ORCHESTRATION.md` to decide the active
+persona and skills before giving Copilot an implementation task.
 
 ## Setup & Usage
 

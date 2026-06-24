@@ -1,0 +1,27 @@
+{
+  "project": {
+    "key": "PACE",
+    "repoPath": "."
+  },
+  "policy": {
+    "allowedProjects": ["PACE"],
+    "requiredLabels": ["agent-ready"],
+    "humanOnlyStatuses": ["Tamam", "Done"],
+    "maxChangedFiles": 30
+  },
+  "worktree": {
+    "root": "../agent-worktrees"
+  },
+  "jira": {
+    "baseUrl": "https://houndvision.atlassian.net",
+    "emailEnv": "ATLASSIAN_EMAIL",
+    "tokenEnv": "ATLASSIAN_API_TOKEN",
+    "writeEnabled": false
+  },
+  "executor": {
+    "codex": {
+      "command": ["codex", "exec", "-C", "{worktree}", "{prompt}"],
+      "timeoutSeconds": 3600
+    }
+  }
+}

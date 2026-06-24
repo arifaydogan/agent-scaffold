@@ -9,7 +9,9 @@ The Claude Code adapter installs files under the root `CLAUDE.md` and the `.clau
 ```
 target-project/
 ├── CLAUDE.md               # Unified System Prompt (Rules & Workflows)
+├── ORCHESTRATION.md         # Canonical phase and handoff protocol
 └── .claude/
+    ├── personas/           # Decision personas
     ├── agents/             # Agent profiles and scoped instructions
     │   ├── orchestrator/
     │   │   └── AGENT.md
@@ -22,9 +24,10 @@ target-project/
 
 ## How It Works
 
-1. **Root Prompt (`CLAUDE.md`)**: Claude Code automatically loads `CLAUDE.md` on startup as its system context. The installer compiles a single unified document combining global instructions, branching rules, and reliability guidelines into `CLAUDE.md`.
-2. **Subagents (`.claude/agents/`)**: When Claude Code needs to spawn subagents, it reads profiles and scopes from `.claude/agents/` to assign roles.
-3. **Skills (`.claude/skills/`)**: Relevant skill folders and guidelines are loaded during execution when triggered.
+1. **Root Prompt (`CLAUDE.md`)**: Includes the orchestration protocol, global instructions, branching rules, and reliability guidelines.
+2. **Personas (`.claude/personas/`)**: Exactly one persona supplies judgment for the active phase.
+3. **Subagents (`.claude/agents/`)**: Scoped task executors.
+4. **Skills (`.claude/skills/`)**: Stack freely within the phase.
 
 ## Setup & Usage
 
