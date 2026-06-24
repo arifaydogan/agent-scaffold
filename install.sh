@@ -310,7 +310,53 @@ fi
 # ----------------------------------------------------
 if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   echo "Installing GitHub Copilot Adapter..."
-  mkdir -p "$TARGET_DIR/.github"
+  mkdir -p \
+    "$TARGET_DIR/.github/agents" \
+    "$TARGET_DIR/.github/skills" \
+    "$TARGET_DIR/.github/personas" \
+    "$TARGET_DIR/.github/task-agents" \
+    "$TARGET_DIR/.vscode"
+
+  cp -r "$SOURCE_DIR/core/personas/." "$TARGET_DIR/.github/personas/"
+  cp -r "$SOURCE_DIR/core/agents/." "$TARGET_DIR/.github/task-agents/"
+  cp "$SOURCE_DIR/adapters/pacebuild-orchestrator.agent.md" \
+    "$TARGET_DIR/.github/agents/pacebuild-orchestrator.agent.md"
+  cp "$SOURCE_DIR/adapters/copilot-mcp.example.json" \
+    "$TARGET_DIR/.vscode/mcp.example.json"
+
+  for agent_dir in "$SOURCE_DIR"/core/agents/*; do
+    if [ -d "$agent_dir/skills" ]; then
+      for skill_dir in "$agent_dir"/skills/*; do
+        if [ -d "$skill_dir" ]; then
+          skill_name=$(basename "$skill_dir")
+          mkdir -p "$TARGET_DIR/.github/skills/$skill_name"
+          cp -r "$skill_dir/." "$TARGET_DIR/.github/skills/$skill_name/"
+        fi
+      done
+    fi
+  done
+
+  if [ "$PACK_CHOICE" = "2" ]; then
+    mkdir -p "$TARGET_DIR/.github/task-agents/cv-engineer"
+    cp -r "$SOURCE_DIR/packs/pacebuild/agents/cv-engineer/." \
+      "$TARGET_DIR/.github/task-agents/cv-engineer/"
+    cp "$SOURCE_DIR/packs/pacebuild/overrides/AGENTS.md" \
+      "$TARGET_DIR/.github/task-agents/AGENTS.md"
+
+    for skill_dir in "$SOURCE_DIR"/packs/pacebuild/agents/cv-engineer/skills/*; do
+      if [ -d "$skill_dir" ]; then
+        skill_name=$(basename "$skill_dir")
+        mkdir -p "$TARGET_DIR/.github/skills/$skill_name"
+        cp -r "$skill_dir/." "$TARGET_DIR/.github/skills/$skill_name/"
+      fi
+    done
+
+    mkdir -p "$TARGET_DIR/.github/skills/fastapi-timescale"
+    cp -r "$SOURCE_DIR/packs/pacebuild/overrides/backend-engineer/skills/fastapi-timescale/." \
+      "$TARGET_DIR/.github/skills/fastapi-timescale/"
+  else
+    cp "$SOURCE_DIR/AGENTS.md" "$TARGET_DIR/.github/task-agents/AGENTS.md"
+  fi
   
   # Generate .github/copilot-instructions.md
   echo "# GitHub Copilot Custom Instructions" > "$TARGET_DIR/.github/copilot-instructions.md"

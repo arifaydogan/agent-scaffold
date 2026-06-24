@@ -339,7 +339,55 @@ if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
 if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
     Write-Host "Installing GitHub Copilot Adapter..."
     $githubDir = Join-Path $TargetDir ".github"
+    $copilotAgentsDir = Join-Path $githubDir "agents"
+    $copilotSkillsDir = Join-Path $githubDir "skills"
+    $copilotPersonasDir = Join-Path $githubDir "personas"
+    $copilotTaskAgentsDir = Join-Path $githubDir "task-agents"
+    $vscodeDir = Join-Path $TargetDir ".vscode"
     New-Item -ItemType Directory -Path $githubDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $copilotAgentsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $copilotSkillsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $copilotPersonasDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $copilotTaskAgentsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $vscodeDir -Force | Out-Null
+
+    Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $copilotPersonasDir -Recurse -Force
+    Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $copilotTaskAgentsDir -Recurse -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\pacebuild-orchestrator.agent.md") -Destination (Join-Path $copilotAgentsDir "pacebuild-orchestrator.agent.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\copilot-mcp.example.json") -Destination (Join-Path $vscodeDir "mcp.example.json") -Force
+
+    $coreAgents = Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory
+    foreach ($agent in $coreAgents) {
+        $skillsPath = Join-Path $agent.FullName "skills"
+        if (Test-Path $skillsPath) {
+            foreach ($skill in Get-ChildItem -Path $skillsPath -Directory) {
+                $skillTarget = Join-Path $copilotSkillsDir $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+    }
+
+    if ($PackChoice -eq "2") {
+        $cvAgentTarget = Join-Path $copilotTaskAgentsDir "cv-engineer"
+        New-Item -ItemType Directory -Path $cvAgentTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\*") -Destination $cvAgentTarget -Recurse -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\overrides\AGENTS.md") -Destination (Join-Path $copilotTaskAgentsDir "AGENTS.md") -Force
+
+        $cvSkillsPath = Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\skills"
+        foreach ($skill in Get-ChildItem -Path $cvSkillsPath -Directory) {
+            $skillTarget = Join-Path $copilotSkillsDir $skill.Name
+            New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+            Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+        }
+
+        $fastApiTimescale = Join-Path $SourceDir "packs\pacebuild\overrides\backend-engineer\skills\fastapi-timescale"
+        $fastApiTimescaleTarget = Join-Path $copilotSkillsDir "fastapi-timescale"
+        New-Item -ItemType Directory -Path $fastApiTimescaleTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $fastApiTimescale "*") -Destination $fastApiTimescaleTarget -Recurse -Force
+    } else {
+        Copy-Item -Path (Join-Path $SourceDir "AGENTS.md") -Destination (Join-Path $copilotTaskAgentsDir "AGENTS.md") -Force
+    }
     
     $copilotInstructionsPath = Join-Path $githubDir "copilot-instructions.md"
     $copilotContent = @(

@@ -1,60 +1,84 @@
 # GitHub Copilot Adapter Guide
 
-This adapter configures the repository for **GitHub Copilot Workspace** and **GitHub Copilot Chat** (VS Code).
+This adapter configures a repository for GitHub Copilot Agent Mode in VS Code.
 
-## Directory Structure
+## Installed Structure
 
-The GitHub Copilot adapter installs a unified instruction file under `.github/`:
-
-```
+```text
 .github/
-└── copilot-instructions.md  # Copilot Custom Workspace Prompt
+|-- copilot-instructions.md
+|-- agents/
+|   `-- pacebuild-orchestrator.agent.md
+|-- skills/
+|-- personas/
+`-- task-agents/
+.vscode/
+`-- mcp.example.json
+ORCHESTRATION.md
 ```
 
-## How It Works
+VS Code automatically discovers:
 
-GitHub Copilot automatically loads instructions from `.github/copilot-instructions.md` to guide its behavior and responses within the workspace.
+- repository instructions from `.github/copilot-instructions.md`;
+- custom agents from `.github/agents/*.agent.md`;
+- Agent Skills from `.github/skills/*/SKILL.md`.
 
-The installer merges the following into a single markdown file:
-1. Global Karpathy Principles & Simplicity Rules.
-2. Git Branching & Commit Conventions.
-3. Jira Task Protocol (domain, project keys, status transitions).
-4. Full Agent Routing Matrix (outlining the 9 core or 10 PaceBuild roles to help Copilot route sub-tasks correctly).
-5. Persona/skill/task-agent orchestration protocol and mandatory phase handoff.
+The persona and task-agent source files are kept under `.github/personas/` and
+`.github/task-agents/` so the orchestrator can load only the files required for
+the active phase.
 
-Copilot is primarily a builder. Use `ORCHESTRATION.md` to decide the active
-persona and skills before giving Copilot an implementation task.
+## Installation
 
-## Setup & Usage
+PowerShell:
 
-### Interactive Installation
-```bash
-./install.sh
-# Select: Target Dir (e.g. .)
-# Select: Pack (e.g. 2 for PaceBuild)
-# Select: Adapter (3 for GitHub Copilot)
+```powershell
+.\install.ps1 C:\path\to\target 2 3
 ```
 
-### Unattended Installation
-```bash
-./install.sh /path/to/target 2 3
-```
+The choices mean:
 
-## VS Code Workspace MCP Settings
+- `2`: Core + PaceBuild pack
+- `3`: GitHub Copilot adapter
 
-If utilizing Atlassian or other MCP servers with Copilot in VS Code, add the following to your local `.vscode/settings.json` configurations:
+## MCP Configuration
+
+Review `.vscode/mcp.example.json`, then copy it to `.vscode/mcp.json`.
+The example uses remote OAuth endpoints and does not contain credentials:
 
 ```json
 {
-  "github.copilot.chat.mcp.servers": {
+  "servers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
     "atlassian": {
-      "command": "npx",
-      "args": ["-y", "@atlassian/mcp-server-jira-confluence"],
-      "env": {
-        "ATLASSIAN_URL": "https://houndvision.atlassian.net"
-      }
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp/authv2"
     }
-  }
+  },
+  "inputs": []
 }
 ```
-*Note: Set the proper environment variables for authentication before launching.*
+
+Start both servers from VS Code and complete their browser OAuth flows. Never
+store access tokens in repository files.
+
+## Manual Orchestration Test
+
+1. Open the target repository in VS Code.
+2. Open Copilot Chat in Agent Mode.
+3. Select `PaceBuild Orchestrator`.
+4. Enter only a Jira issue key, for example:
+
+```text
+PACE-123
+```
+
+The first test must stop after Phase 0. Verify that Copilot:
+
+- reads the Jira issue, parent epic, comments, and acceptance criteria;
+- selects `product-manager` as the active persona;
+- selects the minimum required PM/Jira skills;
+- produces the mandatory phase handoff;
+- does not edit files or write to Jira without approval.
