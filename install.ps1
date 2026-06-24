@@ -379,6 +379,166 @@ if (Test-Path (Join-Path $TargetDir ".git")) {
     }
 }
 
+
+    # === alirezarezvani/claude-skills ===
+    $Alireza = "h"
+    if ($Interactive) {
+        Write-Host ""
+        Write-Host "alirezarezvani/claude-skills skill'leri kurulsun mu?" -ForegroundColor Cyan
+        Write-Host "  (production-grade skill'ler: architect, backend, frontend, devops, QA, CV vb.)" -ForegroundColor Cyan
+        $Alireza = Read-Host "[e/h]"
+    } else {
+        $Alireza = "e"
+    }
+
+    if ($Alireza -eq "e") {
+        $SkillsHome = Join-Path $HOME "claude-skills"
+        if (Test-Path $SkillsHome) {
+            $SkillsSrc = $SkillsHome
+            Write-Host "  [OK] Local klon bulundu: $SkillsSrc" -ForegroundColor Green
+        } else {
+            Write-Host "  [INFO] Klonlaniyor..." -ForegroundColor Yellow
+            & git clone --depth 1 https://github.com/alirezarezvani/claude-skills.git $SkillsHome | Out-Null
+            if ($?) {
+                $SkillsSrc = $SkillsHome
+            } else {
+                Write-Host "  [WARN] Klonlama basarisiz oldu. Git yuklu mu?" -ForegroundColor Red
+                $SkillsSrc = $null
+            }
+        }
+
+        if ($SkillsSrc) {
+            # Core engineer skill'leri
+            $RoleMaps = @(
+                "architect:engineering-team/skills/senior-architect",
+                "backend-engineer:engineering-team/skills/senior-backend",
+                "frontend-engineer:engineering-team/skills/senior-frontend",
+                "devops-engineer:engineering-team/skills/senior-devops",
+                "qa-engineer:engineering-team/skills/tdd-guide",
+                "security-engineer:engineering-team/skills/security-pen-testing",
+                "data-engineer:engineering-team/skills/senior-data-engineer"
+            )
+
+            foreach ($roleMap in $RoleMaps) {
+                $parts = $roleMap -split ":"
+                $role = $parts[0]
+                $srcSub = $parts[1]
+                $skillName = Split-Path $srcSub -Leaf
+                $srcPath = Join-Path $SkillsSrc $srcSub
+
+                if (Test-Path $srcPath) {
+                    # 1. Copy to core/agents/ in target project
+                    $destCore = Join-Path $TargetDir "core\agents\$role\skills\$skillName"
+                    New-Item -ItemType Directory -Path $destCore -Force | Out-Null
+                    Copy-Item -Path (Join-Path $srcPath "*") -Destination $destCore -Recurse -Force | Out-Null
+                    Write-Host "  [OK] core/agents/$role -> $skillName" -ForegroundColor Green
+
+                    # 2. Copy to Antigravity adapter (.agents/) if installed
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                        $destAnti = Join-Path $TargetDir ".agents\skills\$skillName"
+                        New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
+                    }
+
+                    # 3. Copy to Claude Code adapter (.claude/) if installed
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                        $destClaude = Join-Path $TargetDir ".claude\skills\$skillName"
+                        New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                } else {
+                    Write-Host "  [WARN] $srcSub bulunamadi, atlandi" -ForegroundColor Yellow
+                }
+            }
+
+            # PM skill'leri
+            $PmSkills = @("senior-pm", "confluence-expert", "jira-expert")
+            foreach ($pmSkill in $PmSkills) {
+                $srcPath = Join-Path $SkillsSrc "project-management\skills\$pmSkill"
+                if (Test-Path $srcPath) {
+                    # 1. Copy to core/agents/
+                    $destCore = Join-Path $TargetDir "core\agents\pm-analyst\skills\$pmSkill"
+                    New-Item -ItemType Directory -Path $destCore -Force | Out-Null
+                    Copy-Item -Path (Join-Path $srcPath "*") -Destination $destCore -Recurse -Force | Out-Null
+                    Write-Host "  [OK] pm-analyst -> $pmSkill" -ForegroundColor Green
+
+                    # 2. Copy to Antigravity adapter
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                        $destAnti = Join-Path $TargetDir ".agents\skills\$pmSkill"
+                        New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
+                    }
+
+                    # 3. Copy to Claude Code adapter
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                        $destClaude = Join-Path $TargetDir ".claude\skills\$pmSkill"
+                        New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                } else {
+                    Write-Host "  [WARN] $pmSkill atlandi" -ForegroundColor Yellow
+                }
+            }
+
+            # PaceBuild pack: CV Engineer → senior-computer-vision
+            if ($PackChoice -eq "2") {
+                $srcPath = Join-Path $SkillsSrc "engineering-team\skills\senior-computer-vision"
+                if (Test-Path $srcPath) {
+                    # 1. Copy to packs/
+                    $destPack = Join-Path $TargetDir "packs\pacebuild\agents\cv-engineer\skills\senior-computer-vision"
+                    New-Item -ItemType Directory -Path $destPack -Force | Out-Null
+                    Copy-Item -Path (Join-Path $srcPath "*") -Destination $destPack -Recurse -Force | Out-Null
+                    Write-Host "  [OK] cv-engineer -> senior-computer-vision" -ForegroundColor Green
+
+                    # 2. Copy to Antigravity adapter
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                        $destAnti = Join-Path $TargetDir ".agents\skills\senior-computer-vision"
+                        New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
+                    }
+
+                    # 3. Copy to Claude Code adapter
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                        $destClaude = Join-Path $TargetDir ".claude\skills\senior-computer-vision"
+                        New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                } else {
+                    Write-Host "  [WARN] senior-computer-vision atlandi" -ForegroundColor Yellow
+                }
+            }
+
+            Write-Host "  [OK] alirezarezvani skill'leri kuruldu" -ForegroundColor Green
+        }
+    }
+
+    # === Caveman — token tasarrufu ===
+    $Caveman = "h"
+    if ($Interactive) {
+        Write-Host ""
+        Write-Host "Caveman kurulsun mu? (Opus gibi pahalı modellerde ~%65 output token azalması)" -ForegroundColor Cyan
+        $Caveman = Read-Host "[e/h]"
+    } else {
+        $Caveman = "e"
+    }
+
+    if ($Caveman -eq "e") {
+        Write-Host "  [INFO] Caveman kuruluyor..." -ForegroundColor Yellow
+        Push-Location $TargetDir
+        try {
+            & npx -y github:JuliusBrussee/caveman -- --with-init
+            if ($?) {
+                Write-Host "  [OK] Caveman kuruldu" -ForegroundColor Green
+            } else {
+                Write-Host "  [WARN] Caveman kurulumu basarisiz (node ve git gereklidir)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  [WARN] Caveman kurulumu sirasinda bir hata olustu: $($_.Exception.Message)" -ForegroundColor Yellow
+        } finally {
+            Pop-Location
+        }
+    }
+
     Write-Host "=============================================" -ForegroundColor Green
     Write-Host "   Installation Completed Successfully!      " -ForegroundColor Green
     Write-Host "=============================================" -ForegroundColor Green

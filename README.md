@@ -32,6 +32,17 @@ The scaffold includes 9 core roles designed to coordinate and develop software s
 | **Security Engineer** | `core/agents/security-engineer` | `claude-sonnet-4` | Security review, OWASP checklist, secret scanning |
 | **Data Engineer** | `core/agents/data-engineer` | `claude-sonnet-4` | Time-series databases, data pipelines, aggregation queries |
 
-## Extension Packs
-
 The scaffold is extensible through packs. The **PaceBuild Extension Pack** (`packs/pacebuild/`) extends the core with a **CV Engineer** agent role and project-specific overrides.
+
+## Installation Options
+
+When you run the installer (`install.sh` or `install.ps1`), you will be prompted for two optional add-ons:
+
+1. **Production-grade Skills (`alirezarezvani/claude-skills`)**:
+   - Integrates rich, production-grade agent skills (e.g., `senior-architect`, `senior-backend`, `senior-frontend`, `senior-devops`, `tdd-guide`, `security-pen-testing`, `senior-data-engineer`, `senior-pm`, `confluence-expert`, `jira-expert`, and `senior-computer-vision` for PaceBuild).
+   - Clones `https://github.com/alirezarezvani/claude-skills.git` locally and copies relevant skills into your target project's `core/agents/`, `.agents/`, and/or `.claude/` structures.
+
+2. **Caveman Token Optimizer**:
+   - Installs JuliusBrussee's **Caveman** tool (`npx -y github:JuliusBrussee/caveman -- --with-init`).
+   - Optimizes and reduces output tokens by up to ~65% for expensive models like Claude 3 Opus, saving cost and context window space.
+

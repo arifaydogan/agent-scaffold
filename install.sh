@@ -320,6 +320,131 @@ if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   echo "GitHub Copilot Adapter installed successfully."
 fi
 
+# === alirezarezvani/claude-skills ===
+ALIREZA="h"
+if [ "$INTERACTIVE" = true ]; then
+  echo ""
+  echo "alirezarezvani/claude-skills skill'leri kurulsun mu?"
+  echo "  (production-grade skill'ler: architect, backend, frontend, devops, QA, CV vb.)"
+  read -rp "[e/h]: " ALIREZA
+else
+  # In unattended mode, default to 'e' (önerilen)
+  ALIREZA="e"
+fi
+
+if [ "$ALIREZA" = "e" ]; then
+  if [ -d "$HOME/claude-skills" ]; then
+    SKILLS_SRC="$HOME/claude-skills"
+    echo "  ✓ Local klon bulundu: $SKILLS_SRC"
+  else
+    echo "  ▶ Klonlanıyor..."
+    git clone --depth 1 https://github.com/alirezarezvani/claude-skills.git \
+      "$HOME/claude-skills" --quiet
+    SKILLS_SRC="$HOME/claude-skills"
+  fi
+
+  # Core engineer skill'leri
+  for role_map in \
+    "architect:engineering-team/skills/senior-architect" \
+    "backend-engineer:engineering-team/skills/senior-backend" \
+    "frontend-engineer:engineering-team/skills/senior-frontend" \
+    "devops-engineer:engineering-team/skills/senior-devops" \
+    "qa-engineer:engineering-team/skills/tdd-guide" \
+    "security-engineer:engineering-team/skills/security-pen-testing" \
+    "data-engineer:engineering-team/skills/senior-data-engineer"
+  do
+    role="${role_map%%:*}"
+    src="${role_map#*:}"
+    skill_name=$(basename "$src")
+    
+    # 1. Copy to core/agents/ in target project
+    dest_core="$TARGET_DIR/core/agents/$role/skills/$skill_name"
+    mkdir -p "$dest_core"
+    cp -r "$SKILLS_SRC/$src/"* "$dest_core/" 2>/dev/null && \
+      echo "  ✓ core/agents/$role → $skill_name" || \
+      echo "  ⚠ $src bulunamadı, atlandı"
+
+    # 2. Copy to Antigravity adapter (.agents/) if installed
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_anti="$TARGET_DIR/.agents/skills/$skill_name"
+      mkdir -p "$dest_anti"
+      cp -r "$SKILLS_SRC/$src/"* "$dest_anti/" 2>/dev/null
+    fi
+
+    # 3. Copy to Claude Code adapter (.claude/) if installed
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_claude="$TARGET_DIR/.claude/skills/$skill_name"
+      mkdir -p "$dest_claude"
+      cp -r "$SKILLS_SRC/$src/"* "$dest_claude/" 2>/dev/null
+    fi
+  done
+
+  # PM skill'leri
+  for pm_skill in "senior-pm" "confluence-expert" "jira-expert"; do
+    # 1. Copy to core/agents/
+    dest_core="$TARGET_DIR/core/agents/pm-analyst/skills/$pm_skill"
+    mkdir -p "$dest_core"
+    cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_core/" 2>/dev/null && \
+      echo "  ✓ pm-analyst → $pm_skill" || echo "  ⚠ $pm_skill atlandı"
+
+    # 2. Copy to Antigravity adapter
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_anti="$TARGET_DIR/.agents/skills/$pm_skill"
+      mkdir -p "$dest_anti"
+      cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_anti/" 2>/dev/null
+    fi
+
+    # 3. Copy to Claude Code adapter
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_claude="$TARGET_DIR/.claude/skills/$pm_skill"
+      mkdir -p "$dest_claude"
+      cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_claude/" 2>/dev/null
+    fi
+  done
+
+  # PaceBuild pack: CV Engineer → senior-computer-vision
+  if [ "$PACK_CHOICE" = "2" ]; then
+    # 1. Copy to packs/
+    dest_pack="$TARGET_DIR/packs/pacebuild/agents/cv-engineer/skills/senior-computer-vision"
+    mkdir -p "$dest_pack"
+    cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_pack/" 2>/dev/null && \
+      echo "  ✓ cv-engineer → senior-computer-vision" || echo "  ⚠ senior-computer-vision atlandı"
+
+    # 2. Copy to Antigravity adapter
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_anti="$TARGET_DIR/.agents/skills/senior-computer-vision"
+      mkdir -p "$dest_anti"
+      cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_anti/" 2>/dev/null
+    fi
+
+    # 3. Copy to Claude Code adapter
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+      dest_claude="$TARGET_DIR/.claude/skills/senior-computer-vision"
+      mkdir -p "$dest_claude"
+      cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_claude/" 2>/dev/null
+    fi
+  fi
+
+  echo "  ✓ alirezarezvani skill'leri kuruldu"
+fi
+
+# === Caveman — token tasarrufu ===
+CAVEMAN="h"
+if [ "$INTERACTIVE" = true ]; then
+  echo ""
+  echo "Caveman kurulsun mu? (Opus gibi pahalı modellerde ~%65 output token azalması)"
+  read -rp "[e/h]: " CAVEMAN
+else
+  # In unattended mode, default to 'e'
+  CAVEMAN="e"
+fi
+
+if [ "$CAVEMAN" = "e" ]; then
+  echo "  ▶ Caveman kuruluyor..."
+  npx -y github:JuliusBrussee/caveman -- --with-init && \
+    echo "  ✓ Caveman kuruldu" || echo "  ⚠ Caveman kurulumu başarısız (node ve git gereklidir)"
+fi
+
 # ----------------------------------------------------
 # Git Hooks Installation (if target is a Git repo)
 # ----------------------------------------------------
