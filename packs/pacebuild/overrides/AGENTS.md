@@ -58,3 +58,13 @@ graph TD
   - GAP 4: Multi-camera/Multi-site management UI.
   - GAP 5: Safety zone polygon alarm rules engine.
   - Killer Feature: Subcontractor worker count analysis based on helmet colors.
+
+---
+
+## Orchestration Active Phase Model (FAZ A)
+
+- **Phase:** Demo-Ready MVP
+- **Aktif Persona'lar:** `cv-engineer` + `backend-specialist` + `frontend-specialist`
+- **Skills Yüklü:** `cv-pipeline-checks`, `fastapi-timescale`, `demo-reliability-guard`
+- **Switching Trigger:** Sprint 4 tamamlandığında → `pm-analyst` devreye girer
+
