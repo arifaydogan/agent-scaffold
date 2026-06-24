@@ -352,7 +352,11 @@ if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
     New-Item -ItemType Directory -Path $vscodeDir -Force | Out-Null
 
     Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $copilotPersonasDir -Recurse -Force
-    Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $copilotTaskAgentsDir -Recurse -Force
+    foreach ($agent in Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory) {
+        $agentTarget = Join-Path $copilotTaskAgentsDir $agent.Name
+        New-Item -ItemType Directory -Path $agentTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $agent.FullName "AGENT.md") -Destination (Join-Path $agentTarget "AGENT.md") -Force
+    }
     Copy-Item -Path (Join-Path $SourceDir "adapters\pacebuild-orchestrator.agent.md") -Destination (Join-Path $copilotAgentsDir "pacebuild-orchestrator.agent.md") -Force
     Copy-Item -Path (Join-Path $SourceDir "adapters\copilot-mcp.example.json") -Destination (Join-Path $vscodeDir "mcp.example.json") -Force
 
@@ -371,7 +375,8 @@ if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
     if ($PackChoice -eq "2") {
         $cvAgentTarget = Join-Path $copilotTaskAgentsDir "cv-engineer"
         New-Item -ItemType Directory -Path $cvAgentTarget -Force | Out-Null
-        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\*") -Destination $cvAgentTarget -Recurse -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\AGENT.md") -Destination (Join-Path $cvAgentTarget "AGENT.md") -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\rules.md") -Destination (Join-Path $cvAgentTarget "rules.md") -Force
         Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\overrides\AGENTS.md") -Destination (Join-Path $copilotTaskAgentsDir "AGENTS.md") -Force
 
         $cvSkillsPath = Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\skills"

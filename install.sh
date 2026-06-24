@@ -318,7 +318,14 @@ if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
     "$TARGET_DIR/.vscode"
 
   cp -r "$SOURCE_DIR/core/personas/." "$TARGET_DIR/.github/personas/"
-  cp -r "$SOURCE_DIR/core/agents/." "$TARGET_DIR/.github/task-agents/"
+  for agent_dir in "$SOURCE_DIR"/core/agents/*; do
+    if [ -d "$agent_dir" ]; then
+      agent_name=$(basename "$agent_dir")
+      mkdir -p "$TARGET_DIR/.github/task-agents/$agent_name"
+      cp "$agent_dir/AGENT.md" \
+        "$TARGET_DIR/.github/task-agents/$agent_name/AGENT.md"
+    fi
+  done
   cp "$SOURCE_DIR/adapters/pacebuild-orchestrator.agent.md" \
     "$TARGET_DIR/.github/agents/pacebuild-orchestrator.agent.md"
   cp "$SOURCE_DIR/adapters/copilot-mcp.example.json" \
@@ -338,8 +345,10 @@ if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
 
   if [ "$PACK_CHOICE" = "2" ]; then
     mkdir -p "$TARGET_DIR/.github/task-agents/cv-engineer"
-    cp -r "$SOURCE_DIR/packs/pacebuild/agents/cv-engineer/." \
-      "$TARGET_DIR/.github/task-agents/cv-engineer/"
+    cp "$SOURCE_DIR/packs/pacebuild/agents/cv-engineer/AGENT.md" \
+      "$TARGET_DIR/.github/task-agents/cv-engineer/AGENT.md"
+    cp "$SOURCE_DIR/packs/pacebuild/agents/cv-engineer/rules.md" \
+      "$TARGET_DIR/.github/task-agents/cv-engineer/rules.md"
     cp "$SOURCE_DIR/packs/pacebuild/overrides/AGENTS.md" \
       "$TARGET_DIR/.github/task-agents/AGENTS.md"
 
