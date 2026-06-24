@@ -1,44 +1,38 @@
 #!/bin/sh
-# pre-commit hook
 
-# 1. Hardcoded Secret Scanner
 SECRETS_PATTERN="password=|api_key=|private_key=|client_secret=|db_password="
 changed_files=$(git diff --cached --name-only)
+
 for file in $changed_files; do
-  if [ -f "$file" ]; then
-    if grep -E -iq "$SECRETS_PATTERN" "$file"; then
-      echo "BLOCKER: Hardcoded secret candidate found in $file!"
+  if git cat-file -e ":$file" 2>/dev/null; then
+    if git show ":$file" | grep -E -iq "$SECRETS_PATTERN"; then
+      echo "BLOCKER: Hardcoded secret candidate found in $file"
       exit 1
     fi
   fi
 done
 
-# 2. Python Checks
 python_files=$(git diff --cached --name-only | grep '\.py$')
 if [ -n "$python_files" ]; then
-  echo "Running Python Ruff check & MyPy type check..."
-  if command -v ruff >/dev/null 2>&1; then
-    ruff check $python_files || exit 1
-  else
-    echo "Warning: ruff is not installed. Skipping."
-  fi
-  if command -v mypy >/dev/null 2>&1; then
-    mypy $python_files || exit 1
-  else
-    echo "Warning: mypy is not installed. Skipping."
-  fi
+  command -v ruff >/dev/null 2>&1 || {
+    echo "BLOCKER: ruff is required for staged Python files."
+    exit 1
+  }
+  command -v mypy >/dev/null 2>&1 || {
+    echo "BLOCKER: mypy is required for staged Python files."
+    exit 1
+  }
+  ruff check $python_files || exit 1
+  mypy $python_files || exit 1
 fi
 
-# 3. TypeScript Checks
 ts_files=$(git diff --cached --name-only | grep -E '\.ts$|\.tsx$')
 if [ -n "$ts_files" ]; then
-  echo "Running TypeScript checks..."
-  if command -v tsc >/dev/null 2>&1; then
-    tsc --noEmit || exit 1
-  else
-    echo "Warning: tsc is not installed. Skipping."
-  fi
+  command -v tsc >/dev/null 2>&1 || {
+    echo "BLOCKER: tsc is required for staged TypeScript files."
+    exit 1
+  }
+  tsc --noEmit || exit 1
 fi
 
-echo "✓ Pre-commit checks passed"
-exit 0
+echo "Pre-commit checks passed"

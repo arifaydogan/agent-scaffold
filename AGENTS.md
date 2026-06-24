@@ -1,48 +1,73 @@
-# Core Agent Matrix & Routing Rules
+# Agent Operating Rules
 
-This document outlines the core AI agent team structure, model specifications, tools, and routing priorities for the standard scaffold operating environment.
+Before any multi-step task, read and follow [ORCHESTRATION.md](ORCHESTRATION.md).
+That document is the canonical persona, skill, task-agent, phase, and handoff
+protocol.
 
-## Team Structure
+## Objective
 
-```mermaid
-graph TD
-    User([User Request]) --> Orch[Orchestrator]
-    Orch --> Arch[Architect]
-    Orch --> BE[Backend Engineer]
-    Orch --> FE[Frontend Engineer]
-    Orch --> DE[DevOps Engineer]
-    Orch --> QA[QA Engineer]
-    Orch --> PM[PM/Analyst]
-    Orch --> Sec[Security Engineer]
-    Orch --> Data[Data Engineer]
-    
-    classDef orchestrator fill:#9C27B0,color:#fff;
-    classDef builder fill:#2196F3,color:#fff;
-    class Orch orchestrator;
-    class Arch,BE,FE,DE,QA,PM,Sec,Data builder;
+This repository builds a reusable autonomous software-delivery scaffold. The
+current MVP uses Codex and isolated Git worktrees. Provider-specific execution
+must remain behind adapters so the runtime can later use API models, local LLMs,
+or a LangGraph-style control plane.
+
+## Orchestration First
+
+Every task is evaluated by the Orchestrator before implementation:
+
+1. Read the Jira issue, comments, parent, links, labels, and acceptance criteria.
+2. Apply eligibility and human-approval policy.
+3. Select exactly one active persona and the required skill stack.
+4. Decide whether work is sequential or safe to parallelize.
+5. Assign one task agent with explicit scope and verification.
+6. Run test, review, and security gates.
+7. Produce a Jira/PR handoff. Never merge or transition to Done.
+
+## Persona And Task-Agent Separation
+
+- Personas live under `core/personas/` and define judgment.
+- Task agents live under `core/agents/` and `packs/*/agents/`.
+- Skills live below each agent and define execution.
+- Never blend multiple personas in one phase.
+- Skills may stack freely.
+- Persona-free skill chains are allowed for procedural tasks.
+
+## Persona, Skill, Task
+
+- Persona defines judgment and priorities.
+- Skill defines a repeatable execution method.
+- Task agent performs one bounded unit of work.
+- Do not load every persona or skill into every run.
+- Use [scaffold-manifest.json](scaffold-manifest.json) as the canonical inventory.
+- Use the mandatory phase handoff format from `ORCHESTRATION.md`.
+
+## Safety Boundaries
+
+- Only issues with the configured `agent-ready` label may be claimed.
+- Epics, Done transitions, merges, deletions, and production credential changes
+  require human approval.
+- One issue may have only one active run lock.
+- Never silently fall back to mock data or swallow an error.
+- A blocker must become a recorded run state and a Jira handoff.
+
+## Engineering Rules
+
+- Make the smallest change that satisfies explicit acceptance criteria.
+- Reproduce bugs with a failing test before fixing them when practical.
+- Keep changes inside the assigned issue scope.
+- Run repository-specific lint, type, test, and security checks.
+- Missing required verification tools are failures, not warnings.
+- Preserve user changes and do not perform destructive Git operations.
+
+## Handoff
+
+Each completed phase reports:
+
+```text
+Phase [N] complete.
+Decisions: [...]
+Artifacts: [...]
+Verification: [...]
+Open items: [...]
+Next: [persona] + [skills]
 ```
-
----
-
-## Routing Matrix
-
-| Role Name | Agent Key | Default Model | Primary Tools | Scope of Work |
-|:---|:---|:---|:---|:---|
-| **Orchestrator** | `orchestrator` | `claude-opus-4` | `invoke_subagent`, `list_dir`, `grep_search` | Subagent delegation, task status tracking, cross-agent review |
-| **Architect** | `architect` | `claude-sonnet-4` | `view_file`, `write_to_file`, `grep_search` | System design, architectural decision records (ADRs), tech debt monitoring |
-| **Backend Engineer** | `backend-engineer` | `claude-sonnet-4` | `run_command`, `replace_file_content` | API structure, database operations, background tasks, unit testing |
-| **Frontend Engineer** | `frontend-engineer` | `claude-sonnet-4` | `run_command`, `replace_file_content` | UI components, streaming/playback players, state management, styling |
-| **DevOps Engineer** | `devops-engineer` | `claude-sonnet-4` | `run_command`, `write_to_file` | Dockerization, CI/CD pipelines, container orchestration, environment setups |
-| **QA Engineer** | `qa-engineer` | `claude-sonnet-4` | `run_command`, `grep_search` | Test plans, end-to-end testing, bug reproduction, code coverage validation |
-| **PM/Analyst** | `pm-analyst` | `claude-sonnet-4` | `searchConfluence`, `getJiraIssue` | Requirements gathering, Jira ticket management, documentation |
-| **Security Engineer** | `security-engineer` | `claude-sonnet-4` | `grep_search`, `run_command` | Threat modeling, credential scanning, compliance validation, OWASP checks |
-| **Data Engineer** | `data-engineer` | `claude-sonnet-4` | `run_command`, `view_file` | Timeseries database optimization, query metrics, ETL pipelines |
-
----
-
-## Routing Principles
-
-1. **Orchestrator First:** All incoming tasks must first be evaluated by the `orchestrator`.
-2. **Surgical Scope:** Tasks must be delegated to the agent with the narrowest scope matching the domain.
-3. **No Overlaps:** Do not allocate database migration work to the Frontend Engineer or Next.js styling work to the Backend Engineer.
-4. **Escalation Protocol:** If an builder agent hits a blocker (e.g., security check fails or architecture style mismatch), they must yield back to the `orchestrator` for review rather than performing a silent workaround.

@@ -2,18 +2,26 @@
 set -e
 
 # Repository URL for remote cloning
-REPO_URL="https://github.com/arifaydogan/ai-team-scaffold.git"
+REPO_URL="https://github.com/arifaydogan/agent-scaffold.git"
 
 # Parse arguments
 TARGET_DIR="${1:-}"
 PACK_CHOICE="${2:-}"
 ADAPTER_CHOICE="${3:-}"
 FORCE=false
+WITH_UPSTREAM_SKILLS=false
+WITH_CAVEMAN=false
 
 # Check for --force flag anywhere in args
 for arg in "$@"; do
   if [ "$arg" = "--force" ] || [ "$arg" = "-f" ]; then
     FORCE=true
+  fi
+  if [ "$arg" = "--with-upstream-skills" ]; then
+    WITH_UPSTREAM_SKILLS=true
+  fi
+  if [ "$arg" = "--with-caveman" ]; then
+    WITH_CAVEMAN=true
   fi
 done
 
@@ -35,7 +43,7 @@ if [ -d "core" ] && [ -d "packs" ]; then
   TEMP_DIR=""
 else
   # Remote execution: Clone repository to temporary directory
-  TEMP_DIR=$(mktemp -d /tmp/ai-team-scaffold.XXXXXX)
+  TEMP_DIR=$(mktemp -d /tmp/agent-scaffold.XXXXXX)
   echo "Cloning scaffold repository from $REPO_URL to temporary directory..."
   git clone --depth 1 "$REPO_URL" "$TEMP_DIR" > /dev/null 2>&1
   SOURCE_DIR="$TEMP_DIR"
@@ -106,6 +114,7 @@ echo ""
 
 # Check for existing files and prompt for confirmation
 EXISTING_FILES=()
+[ -f "$TARGET_DIR/ORCHESTRATION.md" ] && EXISTING_FILES+=("ORCHESTRATION.md")
 # We check a few key files/dirs to detect existing installations
 if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   [ -d "$TARGET_DIR/.agents" ] && EXISTING_FILES+=(".agents/")
@@ -135,6 +144,9 @@ if [ ${#EXISTING_FILES[@]} -ne 0 ] && [ "$FORCE" = false ]; then
   fi
 fi
 
+# The orchestration protocol is shared by every adapter.
+cp "$SOURCE_DIR/ORCHESTRATION.md" "$TARGET_DIR/ORCHESTRATION.md"
+
 # Helper function to copy rules
 copy_rules_antigravity() {
   local src="$1"
@@ -161,7 +173,7 @@ copy_skills_antigravity() {
         if [ -d "$skill_dir" ]; then
           local skill_name=$(basename "$skill_dir")
           mkdir -p "$dest/skills/$skill_name"
-          cp "$skill_dir"/* "$dest/skills/$skill_name/"
+          cp -r "$skill_dir"/* "$dest/skills/$skill_name/"
         fi
       done
     fi
@@ -191,10 +203,13 @@ copy_agents_antigravity() {
   local src="$1"
   local dest="$2"
   mkdir -p "$dest/agents"
+  mkdir -p "$dest/personas"
   
   # Copy core agents
   cp -r "$src"/core/agents/* "$dest/agents/"
+  cp -r "$src"/core/personas/* "$dest/personas/"
   cp "$src"/AGENTS.md "$dest/AGENTS.md"
+  cp "$src"/ORCHESTRATION.md "$dest/ORCHESTRATION.md"
   
   # Copy PaceBuild agents and AGENTS override
   if [ "$PACK_CHOICE" = "2" ]; then
@@ -223,9 +238,11 @@ if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   echo "Installing Claude Code Adapter..."
   mkdir -p "$TARGET_DIR/.claude/agents"
   mkdir -p "$TARGET_DIR/.claude/skills"
+  mkdir -p "$TARGET_DIR/.claude/personas"
   
   # Copy agents
   cp -r "$SOURCE_DIR"/core/agents/* "$TARGET_DIR/.claude/agents/"
+  cp -r "$SOURCE_DIR"/core/personas/* "$TARGET_DIR/.claude/personas/"
   
   # Copy core skills
   for agent_dir in "$SOURCE_DIR"/core/agents/*; do
@@ -234,7 +251,7 @@ if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
         if [ -d "$skill_dir" ]; then
           local skill_name=$(basename "$skill_dir")
           mkdir -p "$TARGET_DIR/.claude/skills/$skill_name"
-          cp "$skill_dir"/* "$TARGET_DIR/.claude/skills/$skill_name/"
+          cp -r "$skill_dir"/* "$TARGET_DIR/.claude/skills/$skill_name/"
         fi
       done
     fi
@@ -263,6 +280,9 @@ if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   
   # Create CLAUDE.md combined prompt
   echo "# Claude Code System Guidelines" > "$TARGET_DIR/CLAUDE.md"
+  echo "" >> "$TARGET_DIR/CLAUDE.md"
+  echo "## Orchestration Protocol" >> "$TARGET_DIR/CLAUDE.md"
+  cat "$SOURCE_DIR/ORCHESTRATION.md" >> "$TARGET_DIR/CLAUDE.md"
   echo "" >> "$TARGET_DIR/CLAUDE.md"
   cat "$SOURCE_DIR/core/rules/global.md" >> "$TARGET_DIR/CLAUDE.md"
   echo "" >> "$TARGET_DIR/CLAUDE.md"
@@ -295,6 +315,9 @@ if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   # Generate .github/copilot-instructions.md
   echo "# GitHub Copilot Custom Instructions" > "$TARGET_DIR/.github/copilot-instructions.md"
   echo "" >> "$TARGET_DIR/.github/copilot-instructions.md"
+  echo "## Orchestration Protocol" >> "$TARGET_DIR/.github/copilot-instructions.md"
+  cat "$SOURCE_DIR/ORCHESTRATION.md" >> "$TARGET_DIR/.github/copilot-instructions.md"
+  echo "" >> "$TARGET_DIR/.github/copilot-instructions.md"
   cat "$SOURCE_DIR/core/rules/global.md" >> "$TARGET_DIR/.github/copilot-instructions.md"
   echo "" >> "$TARGET_DIR/.github/copilot-instructions.md"
   
@@ -324,12 +347,11 @@ fi
 ALIREZA="h"
 if [ "$INTERACTIVE" = true ]; then
   echo ""
-  echo "alirezarezvani/claude-skills skill'leri kurulsun mu?"
-  echo "  (production-grade skill'ler: architect, backend, frontend, devops, QA, CV vb.)"
+  echo "Bundled upstream skill'ler en son alirezarezvani/claude-skills surumunden yenilensin mi?"
+  echo "  (Normal kurulumda repo icindeki tam kopyalar zaten kurulur.)"
   read -rp "[e/h]: " ALIREZA
 else
-  # In unattended mode, default to 'e' (önerilen)
-  ALIREZA="e"
+  if [ "$WITH_UPSTREAM_SKILLS" = true ]; then ALIREZA="e"; fi
 fi
 
 if [ "$ALIREZA" = "e" ]; then
@@ -435,8 +457,7 @@ if [ "$INTERACTIVE" = true ]; then
   echo "Caveman kurulsun mu? (Opus gibi pahalı modellerde ~%65 output token azalması)"
   read -rp "[e/h]: " CAVEMAN
 else
-  # In unattended mode, default to 'e'
-  CAVEMAN="e"
+  if [ "$WITH_CAVEMAN" = true ]; then CAVEMAN="e"; fi
 fi
 
 if [ "$CAVEMAN" = "e" ]; then

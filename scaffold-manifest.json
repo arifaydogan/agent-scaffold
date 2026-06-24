@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "core_agents": [
+    "orchestrator",
+    "architect",
+    "backend-engineer",
+    "frontend-engineer",
+    "devops-engineer",
+    "qa-engineer",
+    "pm-analyst",
+    "security-engineer",
+    "data-engineer"
+  ],
+  "personas": [
+    "core/personas/product-manager.md",
+    "core/personas/startup-cto.md",
+    "core/personas/devops-engineer.md",
+    "core/personas/solo-founder.md"
+  ],
+  "core_skills": [
+    "core/agents/orchestrator/skills/routing/SKILL.md",
+    "core/agents/orchestrator/skills/conflict-resolution/SKILL.md",
+    "core/agents/orchestrator/skills/code-review/SKILL.md",
+    "core/agents/architect/skills/system-design/SKILL.md",
+    "core/agents/architect/skills/adr-patterns/SKILL.md",
+    "core/agents/architect/skills/tech-debt/SKILL.md",
+    "core/agents/backend-engineer/skills/api-design/SKILL.md",
+    "core/agents/backend-engineer/skills/database-patterns/SKILL.md",
+    "core/agents/backend-engineer/skills/backend-testing/SKILL.md",
+    "core/agents/frontend-engineer/skills/component-design/SKILL.md",
+    "core/agents/frontend-engineer/skills/stream-integration/SKILL.md",
+    "core/agents/frontend-engineer/skills/frontend-testing/SKILL.md",
+    "core/agents/devops-engineer/skills/docker-patterns/SKILL.md",
+    "core/agents/devops-engineer/skills/ci-cd-patterns/SKILL.md",
+    "core/agents/devops-engineer/skills/monitoring/SKILL.md",
+    "core/agents/qa-engineer/skills/test-strategy/SKILL.md",
+    "core/agents/qa-engineer/skills/tdd-patterns/SKILL.md",
+    "core/agents/qa-engineer/skills/e2e-testing/SKILL.md",
+    "core/agents/pm-analyst/skills/prd-writing/SKILL.md",
+    "core/agents/pm-analyst/skills/jira-management/SKILL.md",
+    "core/agents/pm-analyst/skills/confluence-docs/SKILL.md",
+    "core/agents/security-engineer/skills/security-review/SKILL.md",
+    "core/agents/security-engineer/skills/owasp-checklist/SKILL.md",
+    "core/agents/data-engineer/skills/tsdb-patterns/SKILL.md",
+    "core/agents/data-engineer/skills/data-pipeline/SKILL.md",
+    "core/agents/data-engineer/skills/analytics-query/SKILL.md"
+  ],
+  "upstream_core_skills": [
+    "core/agents/architect/skills/senior-architect/SKILL.md",
+    "core/agents/backend-engineer/skills/senior-backend/SKILL.md",
+    "core/agents/frontend-engineer/skills/senior-frontend/SKILL.md",
+    "core/agents/devops-engineer/skills/senior-devops/SKILL.md",
+    "core/agents/qa-engineer/skills/tdd-guide/SKILL.md",
+    "core/agents/pm-analyst/skills/senior-pm/SKILL.md",
+    "core/agents/pm-analyst/skills/jira-expert/SKILL.md",
+    "core/agents/pm-analyst/skills/confluence-expert/SKILL.md",
+    "core/agents/security-engineer/skills/security-pen-testing/SKILL.md",
+    "core/agents/data-engineer/skills/senior-data-engineer/SKILL.md"
+  ],
+  "pacebuild_skills": [
+    "packs/pacebuild/agents/cv-engineer/skills/cv-pipeline-checks/SKILL.md",
+    "packs/pacebuild/agents/cv-engineer/skills/yolo-bytetrack/SKILL.md",
+    "packs/pacebuild/agents/cv-engineer/skills/opencv-patterns/SKILL.md",
+    "packs/pacebuild/overrides/backend-engineer/skills/fastapi-timescale/SKILL.md"
+  ],
+  "upstream_pacebuild_skills": [
+    "packs/pacebuild/agents/cv-engineer/skills/senior-computer-vision/SKILL.md"
+  ]
+}

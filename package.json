@@ -1,0 +1,18 @@
+{
+  "name": "agent-scaffold",
+  "version": "0.1.0",
+  "description": "Provider-neutral autonomous software agent runtime scaffold",
+  "type": "module",
+  "bin": {
+    "agentctl": "./bin/agentctl.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "validate": "node scripts/validate-scaffold.js",
+    "check": "npm run validate && npm test"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "license": "MIT"
+}

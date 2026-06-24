@@ -9,6 +9,8 @@ The Antigravity adapter installs files under the `.agents/` directory in the tar
 ```
 .agents/
 ├── AGENTS.md               # Root Agent Matrix & Routing Rules
+├── ORCHESTRATION.md         # Persona + skill + task-agent phase protocol
+├── personas/                # One active decision persona per phase
 ├── agents/                 # Role Definitions
 │   ├── orchestrator/
 │   │   └── AGENT.md
@@ -31,6 +33,9 @@ The Antigravity adapter installs files under the `.agents/` directory in the tar
 ## Setup & Usage
 
 Antigravity automatically discovers and parses configurations from the `.agents/` directory.
+
+Start multi-phase work by reading `.agents/ORCHESTRATION.md`, then activate one
+persona from `.agents/personas/` and load the required skills.
 
 ### Interactive Installation
 ```bash

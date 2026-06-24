@@ -1,23 +1,27 @@
 #!/bin/sh
-# pre-push hook
 
 echo "Running pre-push verification tests..."
 
-# 1. Backend tests
 if [ -d "backend" ] || [ -d "tests" ]; then
-  if command -v pytest >/dev/null 2>&1; then
-    echo "Running Backend tests..."
-    python -m pytest tests/ -q || { echo "Backend tests failed. Push blocked."; exit 1; }
-  fi
+  command -v python >/dev/null 2>&1 || {
+    echo "Python is required to run backend tests. Push blocked."
+    exit 1
+  }
+  python -m pytest tests/ -q || {
+    echo "Backend tests failed. Push blocked."
+    exit 1
+  }
 fi
 
-# 2. Frontend tests
 if [ -f "package.json" ]; then
-  if command -v npm >/dev/null 2>&1; then
-    echo "Running Frontend tests..."
-    npm test -- --passWithNoTests || { echo "Frontend tests failed. Push blocked."; exit 1; }
-  fi
+  command -v npm >/dev/null 2>&1 || {
+    echo "npm is required to run frontend tests. Push blocked."
+    exit 1
+  }
+  npm test || {
+    echo "Frontend tests failed. Push blocked."
+    exit 1
+  }
 fi
 
-echo "✓ Pre-push checks passed"
-exit 0
+echo "Pre-push checks passed"

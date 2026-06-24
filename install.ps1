@@ -9,10 +9,14 @@ param (
     [Parameter(Position = 2)]
     [string]$AdapterChoice = $null,
 
-    [switch]$Force = $false
+    [switch]$Force = $false,
+
+    [switch]$WithUpstreamSkills = $false,
+
+    [switch]$WithCaveman = $false
 )
 
-$RepoUrl = "https://github.com/arifaydogan/ai-team-scaffold.git"
+$RepoUrl = "https://github.com/arifaydogan/agent-scaffold.git"
 
 # Define cleanup block
 $Cleanup = {
@@ -36,7 +40,7 @@ try {
         $TempDir = $null
     } else {
         # Remote execution: Clone repository to temp directory
-        $TempDir = Join-Path $env:TEMP ("ai-team-scaffold-" + [Guid]::NewGuid().ToString().Substring(0,8))
+        $TempDir = Join-Path $env:TEMP ("agent-scaffold-" + [Guid]::NewGuid().ToString().Substring(0,8))
         Write-Host "Cloning scaffold repository from $RepoUrl to temporary directory..." -ForegroundColor Yellow
         
         # Run git clone
@@ -121,6 +125,7 @@ Write-Host "  - Adapter:$AdapterName"
 
 # Check for existing installations
 $ExistingFiles = @()
+if (Test-Path (Join-Path $TargetDir "ORCHESTRATION.md")) { $ExistingFiles += "ORCHESTRATION.md" }
 if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
     if (Test-Path (Join-Path $TargetDir ".agents")) { $ExistingFiles += ".agents\" }
 }
@@ -150,6 +155,9 @@ if ($ExistingFiles.Count -gt 0 -and -not $Force) {
         exit 1
     }
 }
+
+# The orchestration protocol is shared by every adapter.
+Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
 
 # Helpers for file copying
 function Copy-RulesAntigravity {
@@ -207,11 +215,15 @@ function Copy-SkillsAntigravity {
 function Copy-AgentsAntigravity {
     param ($src, $dest)
     $agentsDest = Join-Path $dest "agents"
+    $personasDest = Join-Path $dest "personas"
     New-Item -ItemType Directory -Path $agentsDest -Force | Out-Null
+    New-Item -ItemType Directory -Path $personasDest -Force | Out-Null
     
     # Copy core agents
     Copy-Item -Path (Join-Path $src "core\agents\*") -Destination $agentsDest -Recurse -Force
+    Copy-Item -Path (Join-Path $src "core\personas\*") -Destination $personasDest -Recurse -Force
     Copy-Item -Path (Join-Path $src "AGENTS.md") -Destination (Join-Path $dest "AGENTS.md") -Force
+    Copy-Item -Path (Join-Path $src "ORCHESTRATION.md") -Destination (Join-Path $dest "ORCHESTRATION.md") -Force
     
     # Copy PaceBuild agents and overrides
     if ($PackChoice -eq "2") {
@@ -243,11 +255,14 @@ if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
     $claudeDir = Join-Path $TargetDir ".claude"
     $claudeAgents = Join-Path $claudeDir "agents"
     $claudeSkills = Join-Path $claudeDir "skills"
+    $claudePersonas = Join-Path $claudeDir "personas"
     New-Item -ItemType Directory -Path $claudeAgents -Force | Out-Null
     New-Item -ItemType Directory -Path $claudeSkills -Force | Out-Null
+    New-Item -ItemType Directory -Path $claudePersonas -Force | Out-Null
     
     # Copy core agents
     Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $claudeAgents -Recurse -Force
+    Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $claudePersonas -Recurse -Force
     
     # Copy core skills
     $coreAgents = Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory
@@ -291,8 +306,11 @@ if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
     $claudeMdPath = Join-Path $TargetDir "CLAUDE.md"
     $claudeMdContent = @(
         "# Claude Code System Guidelines",
-        ""
+        "",
+        "## Orchestration Protocol"
     )
+    $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Raw
+    $claudeMdContent += ""
     $claudeMdContent += Get-Content -Path (Join-Path $SourceDir "core\rules\global.md") -Raw
     $claudeMdContent += ""
     $claudeMdContent += "## Git & Branching Policy"
@@ -326,8 +344,11 @@ if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
     $copilotInstructionsPath = Join-Path $githubDir "copilot-instructions.md"
     $copilotContent = @(
         "# GitHub Copilot Custom Instructions",
-        ""
+        "",
+        "## Orchestration Protocol"
     )
+    $copilotContent += Get-Content -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Raw
+    $copilotContent += ""
     $copilotContent += Get-Content -Path (Join-Path $SourceDir "core\rules\global.md") -Raw
     $copilotContent += ""
     
@@ -384,11 +405,11 @@ if (Test-Path (Join-Path $TargetDir ".git")) {
     $Alireza = "h"
     if ($Interactive) {
         Write-Host ""
-        Write-Host "alirezarezvani/claude-skills skill'leri kurulsun mu?" -ForegroundColor Cyan
-        Write-Host "  (production-grade skill'ler: architect, backend, frontend, devops, QA, CV vb.)" -ForegroundColor Cyan
+        Write-Host "Bundled upstream skill'ler en son alirezarezvani/claude-skills surumunden yenilensin mi?" -ForegroundColor Cyan
+        Write-Host "  (Normal kurulumda repo icindeki tam kopyalar zaten kurulur.)" -ForegroundColor Cyan
         $Alireza = Read-Host "[e/h]"
     } else {
-        $Alireza = "e"
+        if ($WithUpstreamSkills) { $Alireza = "e" }
     }
 
     if ($Alireza -eq "e") {
@@ -519,7 +540,7 @@ if (Test-Path (Join-Path $TargetDir ".git")) {
         Write-Host "Caveman kurulsun mu? (Opus gibi pahalı modellerde ~%65 output token azalması)" -ForegroundColor Cyan
         $Caveman = Read-Host "[e/h]"
     } else {
-        $Caveman = "e"
+        if ($WithCaveman) { $Caveman = "e" }
     }
 
     if ($Caveman -eq "e") {

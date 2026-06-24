@@ -1,48 +1,96 @@
-# ai-team-scaffold
+# agent-scaffold
 
-Reusable AI Agent operating environment scaffold including rules, worktrees, and skills. This project provides a standardized structure for deploying and managing an AI-driven development team on any project.
+Provider-neutral scaffold for an autonomous software delivery team.
+
+Turkish documentation:
+[README.tr.md](README.tr.md) and
+[docs/KULLANIM_KILAVUZU.tr.md](docs/KULLANIM_KILAVUZU.tr.md).
+
+The primary operating model is the lightweight persona + skill + task-agent
+protocol in [ORCHESTRATION.md](ORCHESTRATION.md). It works without a framework.
+The JavaScript runtime is an optional automation layer for Jira polling, locks,
+worktrees, and Codex execution.
+
+## What It Provides
+
+- One active persona per phase, freely stacked skills, scoped task agents.
+- Mandatory phase handoffs that carry decisions and artifacts forward.
+- Four relevant upstream personas copied into `core/personas/`.
+- Eleven complete upstream skills copied with scripts, references, and assets.
+- Jira eligibility rules and human-only action boundaries.
+- SQLite run history and exclusive issue locks.
+- Worktree planning and Codex executor adapter.
+- Antigravity, Claude Code, and GitHub Copilot instruction adapters.
+- PaceBuild-specific CV, TimescaleDB, and demo reliability rules.
 
 ## Quick Install
 
-To install the core agent scaffold in your project, run the following command in your terminal:
+Linux/macOS/WSL:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/arifaydogan/ai-team-scaffold/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/arifaydogan/agent-scaffold/master/install.sh | bash
 ```
 
-For Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/arifaydogan/ai-team-scaffold/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/arifaydogan/agent-scaffold/master/install.ps1 | iex
 ```
 
-## Agent Team Matrix
+## Orchestration Quick Start
 
-The scaffold includes 9 core roles designed to coordinate and develop software systems:
+1. Read `ORCHESTRATION.md`.
+2. State the objective, constraints, and success criteria.
+3. Select one persona for the current phase.
+4. Load the required skills.
+5. Assign one scoped task agent.
+6. Finish with the mandatory phase handoff.
 
-| Role | Directory | Primary Model | Scope & Focus |
-|------|-----------|---------------|---------------|
-| **Orchestrator** | `core/agents/orchestrator` | `claude-opus-4` | Task routing, review coordination, conflict resolution |
-| **Architect** | `core/agents/architect` | `claude-sonnet-4` | System design, ADR patterns, tech debt management |
-| **Backend Engineer** | `core/agents/backend-engineer` | `claude-sonnet-4` | API design, database patterns, backend testing |
-| **Frontend Engineer** | `core/agents/frontend-engineer` | `claude-sonnet-4` | Component design, stream integration, frontend testing |
-| **DevOps Engineer** | `core/agents/devops-engineer` | `claude-sonnet-4` | Docker patterns, CI/CD pipelines, monitoring systems |
-| **QA Engineer** | `core/agents/qa-engineer` | `claude-sonnet-4` | Test strategy, TDD, end-to-end testing |
-| **PM/Analyst** | `core/agents/pm-analyst` | `claude-sonnet-4` | PRD writing, Jira tracking, Confluence documentation |
-| **Security Engineer** | `core/agents/security-engineer` | `claude-sonnet-4` | Security review, OWASP checklist, secret scanning |
-| **Data Engineer** | `core/agents/data-engineer` | `claude-sonnet-4` | Time-series databases, data pipelines, aggregation queries |
+## Optional Runtime Quick Start
 
-The scaffold is extensible through packs. The **PaceBuild Extension Pack** (`packs/pacebuild/`) extends the core with a **CV Engineer** agent role and project-specific overrides.
+```powershell
+Copy-Item agent-scaffold.example.json agent-scaffold.json
+node bin/agentctl.js --config agent-scaffold.json doctor
+node bin/agentctl.js --config agent-scaffold.json plan PACE-123
+node bin/agentctl.js --config agent-scaffold.json run PACE-123
+```
 
-## Installation Options
+`run` is dry-run by default. Pass `--execute` only after reviewing the generated
+route, worktree path, persona, and skill selection.
 
-When you run the installer (`install.sh` or `install.ps1`), you will be prompted for two optional add-ons:
+Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`. Jira writes remain
+disabled until `jira.write_enabled = true` is set explicitly.
 
-1. **Production-grade Skills (`alirezarezvani/claude-skills`)**:
-   - Integrates rich, production-grade agent skills (e.g., `senior-architect`, `senior-backend`, `senior-frontend`, `senior-devops`, `tdd-guide`, `security-pen-testing`, `senior-data-engineer`, `senior-pm`, `confluence-expert`, `jira-expert`, and `senior-computer-vision` for PaceBuild).
-   - Clones `https://github.com/alirezarezvani/claude-skills.git` locally and copies relevant skills into your target project's `core/agents/`, `.agents/`, and/or `.claude/` structures.
+## Operating Model
 
-2. **Caveman Token Optimizer**:
-   - Installs JuliusBrussee's **Caveman** tool (`npx -y github:JuliusBrussee/caveman -- --with-init`).
-   - Optimizes and reduces output tokens by up to ~65% for expensive models like Claude 3 Opus, saving cost and context window space.
+| Runtime role | Responsibility |
+| --- | --- |
+| Orchestrator | Eligibility, routing, task lock, sequencing, retry, handoff |
+| PM/Analyst | Requirement quality, acceptance criteria, Jira and Confluence |
+| Builder | Scoped implementation using task-specific engineering skills |
+| Reviewer/QA | Tests, diff review, security and acceptance gates |
 
+Architect, Backend, Frontend, DevOps, Security, Data, and CV profiles remain in
+the catalog. They are selected by the Orchestrator instead of running
+continuously.
+
+## Validation
+
+```powershell
+node scripts/validate-scaffold.js
+node --test
+```
+
+The canonical inventory is [scaffold-manifest.json](scaffold-manifest.json).
+Copied upstream content is documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Human-Only Actions
+
+Agents must not:
+
+- Modify or transition epics.
+- Transition Jira work to Done.
+- Merge pull requests.
+- Ingest unlabeled backlog work.
+- Bypass failing tests or security gates.
