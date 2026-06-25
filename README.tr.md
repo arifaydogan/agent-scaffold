@@ -134,6 +134,35 @@ Kurulum secenekleri:
 - Antigravity, Claude Code, Copilot veya tum adapter'lar
 - Git hook kurulumu
 
+## Guncelleme
+
+Kurulumdan sonra hedef projede `.agent-scaffold/update.ps1` ve
+`.agent-scaffold/update.sh` dosyalari birakilir.
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -PullIfChanged
+```
+
+Linux/macOS/WSL:
+
+```bash
+bash ./.agent-scaffold/update.sh --pull-if-changed
+```
+
+Uzak repoda yeni commit var mi sadece kontrol etmek icin:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -CheckOnly
+```
+
+Repo degistiginde otomatik takip edip belirli araliklarla guncellemek icin:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -Watch -IntervalSeconds 300
+```
+
 ## JavaScript Dosyalari Ne Yapiyor?
 
 `bin/`, `lib/`, `package.json` ve `test/` altindaki dosyalar opsiyonel otomasyon

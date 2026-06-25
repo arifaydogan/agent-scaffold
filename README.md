@@ -37,6 +37,35 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/arifaydogan/agent-scaffold/master/install.ps1 | iex
 ```
 
+## Updating
+
+After installation, the target project receives `.agent-scaffold/update.ps1`
+and `.agent-scaffold/update.sh`.
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -PullIfChanged
+```
+
+Linux/macOS/WSL:
+
+```bash
+bash ./.agent-scaffold/update.sh --pull-if-changed
+```
+
+To only check whether the remote repo has a newer commit:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -CheckOnly
+```
+
+To keep watching the repo and auto-apply updates on an interval:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.agent-scaffold\update.ps1 -Watch -IntervalSeconds 300
+```
+
 ## Orchestration Quick Start
 
 1. Read `ORCHESTRATION.md`.
