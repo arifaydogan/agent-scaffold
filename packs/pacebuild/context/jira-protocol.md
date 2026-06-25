@@ -12,7 +12,10 @@ This context override restricts issue tracking and management specifically to th
 - All worktree branches must be named in the format `pace-[0-9]+-short-description` (e.g. `pace-129-pacebuild-extension`).
 
 ## Status Transitions
-- Before starting work on any `PACE-XX` issue, transition the issue to **Devam Ediyor** (In Progress) on `houndvision.atlassian.net`.
+- Phase 0 and Phase 1 are read-only. Do not transition or comment on Jira
+  during intake or technical planning.
+- Before Phase 2 implementation, transition the issue to **Devam Ediyor**
+  only after the user explicitly approves external writes.
 - When work is finished and ready for review:
   - Transition the issue to **İncelemede** (In Review).
   - Add a comprehensive progress comment explaining the changes made, the files touched, and the testing steps performed.

@@ -228,6 +228,11 @@ if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   copy_rules_antigravity "$SOURCE_DIR" "$TARGET_DIR/.agents"
   copy_skills_antigravity "$SOURCE_DIR" "$TARGET_DIR/.agents"
   copy_agents_antigravity "$SOURCE_DIR" "$TARGET_DIR/.agents"
+  mkdir -p "$TARGET_DIR/.agents/skills/pacebuild-orchestrator"
+  cp "$SOURCE_DIR/adapters/antigravity/pacebuild-orchestrator/SKILL.md" \
+    "$TARGET_DIR/.agents/skills/pacebuild-orchestrator/SKILL.md"
+  cp "$SOURCE_DIR/adapters/antigravity/orchestration-gates.md" \
+    "$TARGET_DIR/.agents/rules/orchestration-gates.md"
   echo "Antigravity Adapter installed successfully."
 fi
 

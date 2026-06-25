@@ -257,6 +257,10 @@ if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
     Copy-RulesAntigravity $SourceDir $agentsDir
     Copy-SkillsAntigravity $SourceDir $agentsDir
     Copy-AgentsAntigravity $SourceDir $agentsDir
+    $orchestratorSkill = Join-Path $agentsDir "skills\pacebuild-orchestrator"
+    New-Item -ItemType Directory -Path $orchestratorSkill -Force | Out-Null
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\pacebuild-orchestrator\SKILL.md") -Destination (Join-Path $orchestratorSkill "SKILL.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\orchestration-gates.md") -Destination (Join-Path $agentsDir "rules\orchestration-gates.md") -Force
     Write-Host "Antigravity Adapter installed successfully." -ForegroundColor Green
 }
 

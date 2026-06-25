@@ -5,11 +5,13 @@ PaceBuild'e ozel task agent, skill, risk ve faz baglamini ekler.
 
 ## Zorunlu Calisma Sirasi
 
-1. Ana `ORCHESTRATION.md` dosyasini oku.
-2. Her faz icin tek persona sec.
-3. Gerekli skill'leri birlikte yukle.
-4. En dar kapsamli task agent'i sec.
-5. Zorunlu phase handoff formatini kullan.
+1. Istek `PACE-XX` iceriyorsa once `pacebuild-orchestrator` skill'ini yukle.
+2. Ana `ORCHESTRATION.md` dosyasini oku.
+3. Her faz icin tek persona sec.
+4. Gerekli skill'leri birlikte yukle.
+5. En dar kapsamli task agent'i sec.
+6. Zorunlu phase handoff formatini kullan.
+7. Skill'deki exact approval token olmadan sonraki faza gecme.
 
 ## PaceBuild Ek Task Agenti
 

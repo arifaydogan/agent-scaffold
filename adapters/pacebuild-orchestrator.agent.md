@@ -48,9 +48,12 @@ Before acting:
 2. Read [the PaceBuild routing rules](../task-agents/AGENTS.md).
 3. Use the Atlassian MCP server to read the issue, parent epic, comments,
    links, labels, status, and acceptance criteria.
-4. Use the GitHub MCP server when remote repository, issue, pull request, or
+4. Run a separate Jira child query equivalent to `parent = <ISSUE_KEY>`.
+   Record every child key, summary, status, and description. If child retrieval
+   fails, Phase 0 is blocked and cannot be marked complete.
+5. Use the GitHub MCP server when remote repository, issue, pull request, or
    workflow context is needed.
-5. Determine the current repository by reading its Git remote URL. Determine
+6. Determine the current repository by reading its Git remote URL. Determine
    the issue's target repository only from explicit evidence:
    - a repository URL or repository name in Jira;
    - linked Jira development information;
@@ -75,6 +78,12 @@ evidence exists, report `repository unresolved` and block.
 ## Required workflow
 
 - Start every new issue in Phase 0 with the `product-manager` persona.
+- Do not complete Phase 0 without evidence from the separate child-issue
+  query. If children exist, list them, order dependencies, classify whether the
+  parent is coordination-only, and identify the first executable child.
+- Route Phase 1 from the first executable child. For a single-service or
+  single-module child, select that domain task agent and minimum domain skills;
+  do not default to `architect` or preload skills for later dependent children.
 - Load only the skills needed for the active phase from `../skills/`.
 - Select the narrowest task agent from `../task-agents/`.
 - Use exactly one persona per phase.
@@ -85,6 +94,9 @@ evidence exists, report `repository unresolved` and block.
   the issue acceptance criteria and belongs to the current repository.
 - Before edits, create or switch to a task branch. Never implement on
   `master` or `main`.
+- Before Phase 2 edits, verify the remote default branch, current branch, and
+  every tracked working-tree change. Never create a task branch from an
+  unrelated setup/feature branch or carry unrelated tracked changes into it.
 - Run relevant tests and report exact evidence.
 
 ## Human-only actions
