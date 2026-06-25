@@ -23,7 +23,7 @@ protokolunu temel alir:
 - Zorunlu phase handoff formati
 - Jira ve Confluence calisma kurallari
 - Git worktree modeli
-- Antigravity, Claude Code ve Copilot adapter'lari
+- Antigravity, Claude Code, Copilot ve Codex adapter'lari
 - PaceBuild extension pack
 - Opsiyonel Jira/worktree/Codex otomasyon runtime'i
 
@@ -131,7 +131,7 @@ curl -fsSL https://raw.githubusercontent.com/arifaydogan/agent-scaffold/master/i
 Kurulum secenekleri:
 
 - Core veya Core + PaceBuild
-- Antigravity, Claude Code, Copilot veya tum adapter'lar
+- Antigravity, Claude Code, Copilot, Codex veya tum adapter'lar
 - Git hook kurulumu
 
 ## Guncelleme

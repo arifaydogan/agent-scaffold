@@ -225,7 +225,33 @@ Load senior-pm and jira-expert.
 Stop after Phase 0 handoff.
 ```
 
-## 6. Copilot Kullanimi
+## 6. Codex Kurulumu
+
+Codex adapter'i:
+
+```text
+AGENTS.md
+.codex/agents/
+.codex/personas/
+.codex/skills/
+.codex/rules/
+```
+
+olusturur.
+
+Codex icin beklenen baslangic akisi:
+
+```text
+Read AGENTS.md and ORCHESTRATION.md.
+Objective: PACE-123 taskini refine et ve teknik faza hazirla.
+Start with product-manager persona.
+Load only the needed files from .codex/.
+Stop after Phase 0 handoff.
+```
+
+`AGENTS.md` giris noktasi, `.codex/` ise secmeli inventory klasorudur.
+
+## 7. Copilot Kullanimi
 
 Copilot adapter'i `.github/copilot-instructions.md` olusturur.
 
@@ -239,7 +265,7 @@ Skills: senior-backend, backend-testing
 Scope: PACE-123
 ```
 
-## 7. Opsiyonel agentctl Runtime
+## 8. Opsiyonel agentctl Runtime
 
 ### Gereksinim
 
@@ -298,7 +324,7 @@ Bu nedenle ilk pilotlarda:
 2. Persona ve skill secimi `ORCHESTRATION.md` ile karsilastirilir.
 3. Sonra `--execute` kullanilir.
 
-## 8. Yeni Projeye Uyarlama
+## 9. Yeni Projeye Uyarlama
 
 1. Core scaffold'u kur.
 2. Projeye ozel `packs/<proje>/` olustur.
@@ -307,7 +333,7 @@ Bu nedenle ilk pilotlarda:
 5. Persona katalogunu gereksiz yere buyutme.
 6. Ilk pilotu dusuk riskli bes task ile yap.
 
-## 9. Sik Yapilan Hatalar
+## 10. Sik Yapilan Hatalar
 
 - Ayni promptta iki persona kullanmak
 - Persona ile task agent'i ayni sanmak
@@ -317,7 +343,7 @@ Bu nedenle ilk pilotlarda:
 - Runtime'i orchestration protokolunun kendisi sanmak
 - Agent'a merge veya Done yetkisi vermek
 
-## 10. Scaffold Guncelleme
+## 11. Scaffold Guncelleme
 
 Installer hedef projeye yerel bir kurulum profili ve updater kopyalar:
 

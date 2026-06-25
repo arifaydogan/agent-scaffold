@@ -96,14 +96,15 @@ if [ "$INTERACTIVE" = true ]; then
   echo "  1) Antigravity (.agents/ structure)"
   echo "  2) Claude Code (CLAUDE.md & .claude/ structure)"
   echo "  3) GitHub Copilot (.github/copilot-instructions.md)"
-  echo "  4) All Adapters"
+  echo "  4) Codex (AGENTS.md & .codex/ structure)"
+  echo "  5) All Adapters"
   while true; do
-    read -p "Choice (1-4): " ADAPTER_INPUT
-    if [[ "$ADAPTER_INPUT" =~ ^[1-4]$ ]]; then
+    read -p "Choice (1-5): " ADAPTER_INPUT
+    if [[ "$ADAPTER_INPUT" =~ ^[1-5]$ ]]; then
       ADAPTER_CHOICE="$ADAPTER_INPUT"
       break
     fi
-    echo "Invalid choice. Please select 1, 2, 3 or 4."
+    echo "Invalid choice. Please select 1, 2, 3, 4 or 5."
   done
 fi
 
@@ -113,22 +114,26 @@ echo "Configuration Summary:"
 echo "  - Source: $SOURCE_DIR"
 echo "  - Target: $TARGET_DIR"
 echo "  - Pack:   $( [ "$PACK_CHOICE" = "1" ] && echo "Core Only" || echo "Core + PaceBuild" )"
-echo "  - Adapter:$( [ "$ADAPTER_CHOICE" = "1" ] && echo "Antigravity" ; [ "$ADAPTER_CHOICE" = "2" ] && echo "Claude Code" ; [ "$ADAPTER_CHOICE" = "3" ] && echo "Copilot" ; [ "$ADAPTER_CHOICE" = "4" ] && echo "All Adapters" )"
+echo "  - Adapter:$( [ "$ADAPTER_CHOICE" = "1" ] && echo "Antigravity" ; [ "$ADAPTER_CHOICE" = "2" ] && echo "Claude Code" ; [ "$ADAPTER_CHOICE" = "3" ] && echo "Copilot" ; [ "$ADAPTER_CHOICE" = "4" ] && echo "Codex" ; [ "$ADAPTER_CHOICE" = "5" ] && echo "All Adapters" )"
 echo ""
 
 # Check for existing files and prompt for confirmation
 EXISTING_FILES=()
 [ -f "$TARGET_DIR/ORCHESTRATION.md" ] && EXISTING_FILES+=("ORCHESTRATION.md")
 # We check a few key files/dirs to detect existing installations
-if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   [ -d "$TARGET_DIR/.agents" ] && EXISTING_FILES+=(".agents/")
 fi
-if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   [ -f "$TARGET_DIR/CLAUDE.md" ] && EXISTING_FILES+=("CLAUDE.md")
   [ -d "$TARGET_DIR/.claude" ] && EXISTING_FILES+=(".claude/")
 fi
-if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   [ -f "$TARGET_DIR/.github/copilot-instructions.md" ] && EXISTING_FILES+=(".github/copilot-instructions.md")
+fi
+if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
+  [ -f "$TARGET_DIR/AGENTS.md" ] && EXISTING_FILES+=("AGENTS.md")
+  [ -d "$TARGET_DIR/.codex" ] && EXISTING_FILES+=(".codex/")
 fi
 
 if [ ${#EXISTING_FILES[@]} -ne 0 ] && [ "$FORCE" = false ]; then
@@ -226,7 +231,7 @@ copy_agents_antigravity() {
 # ----------------------------------------------------
 # 1) Install Antigravity Adapter
 # ----------------------------------------------------
-if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   echo "Installing Antigravity Adapter..."
   mkdir -p "$TARGET_DIR/.agents"
   copy_rules_antigravity "$SOURCE_DIR" "$TARGET_DIR/.agents"
@@ -243,7 +248,7 @@ fi
 # ----------------------------------------------------
 # 2) Install Claude Code Adapter
 # ----------------------------------------------------
-if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   echo "Installing Claude Code Adapter..."
   mkdir -p "$TARGET_DIR/.claude/agents"
   mkdir -p "$TARGET_DIR/.claude/skills"
@@ -317,7 +322,7 @@ fi
 # ----------------------------------------------------
 # 3) Install Copilot Adapter
 # ----------------------------------------------------
-if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   echo "Installing GitHub Copilot Adapter..."
   mkdir -p \
     "$TARGET_DIR/.github/agents" \
@@ -407,6 +412,74 @@ if [ "$ADAPTER_CHOICE" = "3" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
   echo "GitHub Copilot Adapter installed successfully."
 fi
 
+# ----------------------------------------------------
+# 4) Install Codex Adapter
+# ----------------------------------------------------
+if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
+  echo "Installing Codex Adapter..."
+  mkdir -p \
+    "$TARGET_DIR/.codex/agents" \
+    "$TARGET_DIR/.codex/skills" \
+    "$TARGET_DIR/.codex/personas" \
+    "$TARGET_DIR/.codex/rules"
+
+  cp -r "$SOURCE_DIR"/core/agents/* "$TARGET_DIR/.codex/agents/"
+  cp -r "$SOURCE_DIR"/core/personas/* "$TARGET_DIR/.codex/personas/"
+  cp "$SOURCE_DIR"/core/rules/*.md "$TARGET_DIR/.codex/rules/"
+
+  for agent_dir in "$SOURCE_DIR"/core/agents/*; do
+    if [ -d "$agent_dir/skills" ]; then
+      for skill_dir in "$agent_dir"/skills/*; do
+        if [ -d "$skill_dir" ]; then
+          skill_name=$(basename "$skill_dir")
+          mkdir -p "$TARGET_DIR/.codex/skills/$skill_name"
+          cp -r "$skill_dir/." "$TARGET_DIR/.codex/skills/$skill_name/"
+        fi
+      done
+    fi
+  done
+
+  if [ "$PACK_CHOICE" = "2" ]; then
+    mkdir -p "$TARGET_DIR/.codex/agents/cv-engineer"
+    cp -r "$SOURCE_DIR"/packs/pacebuild/agents/cv-engineer/* "$TARGET_DIR/.codex/agents/cv-engineer/"
+
+    for skill_dir in "$SOURCE_DIR"/packs/pacebuild/agents/cv-engineer/skills/*; do
+      if [ -d "$skill_dir" ]; then
+        skill_name=$(basename "$skill_dir")
+        mkdir -p "$TARGET_DIR/.codex/skills/$skill_name"
+        cp -r "$skill_dir/." "$TARGET_DIR/.codex/skills/$skill_name/"
+      fi
+    done
+
+    mkdir -p "$TARGET_DIR/.codex/skills/fastapi-timescale"
+    cp -r "$SOURCE_DIR"/packs/pacebuild/overrides/backend-engineer/skills/fastapi-timescale/. \
+      "$TARGET_DIR/.codex/skills/fastapi-timescale/"
+    cp "$SOURCE_DIR/packs/pacebuild/overrides/rules/demo-reliability-guard.md" \
+      "$TARGET_DIR/.codex/rules/"
+    cp "$SOURCE_DIR/packs/pacebuild/context/jira-protocol.md" \
+      "$TARGET_DIR/.codex/rules/jira-protocol.md"
+    cp "$SOURCE_DIR/packs/pacebuild/overrides/AGENTS.md" "$TARGET_DIR/AGENTS.md"
+  else
+    cp "$SOURCE_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
+  fi
+
+  cp "$SOURCE_DIR/ORCHESTRATION.md" "$TARGET_DIR/ORCHESTRATION.md"
+  cat > "$TARGET_DIR/.codex/README.md" <<'EOF'
+# Codex Adapter Layout
+
+- `AGENTS.md`: repository-root instructions Codex reads first.
+- `ORCHESTRATION.md`: canonical phase and handoff protocol.
+- `.codex/personas/`: decision personas for the active phase.
+- `.codex/agents/`: scoped task-agent definitions.
+- `.codex/skills/`: reusable skill workflows with scripts and references.
+- `.codex/rules/`: global and pack-specific operating rules.
+
+Start each run from `AGENTS.md`, then load only the persona, task agent, and skills needed for the current phase.
+EOF
+
+  echo "Codex Adapter installed successfully."
+fi
+
 # === alirezarezvani/claude-skills ===
 ALIREZA="h"
 if [ "$INTERACTIVE" = true ]; then
@@ -451,17 +524,22 @@ if [ "$ALIREZA" = "e" ]; then
       echo "  ⚠ $src bulunamadı, atlandı"
 
     # 2. Copy to Antigravity adapter (.agents/) if installed
-    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_anti="$TARGET_DIR/.agents/skills/$skill_name"
       mkdir -p "$dest_anti"
       cp -r "$SKILLS_SRC/$src/"* "$dest_anti/" 2>/dev/null
     fi
 
     # 3. Copy to Claude Code adapter (.claude/) if installed
-    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_claude="$TARGET_DIR/.claude/skills/$skill_name"
       mkdir -p "$dest_claude"
       cp -r "$SKILLS_SRC/$src/"* "$dest_claude/" 2>/dev/null
+    fi
+    if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
+      dest_codex="$TARGET_DIR/.codex/skills/$skill_name"
+      mkdir -p "$dest_codex"
+      cp -r "$SKILLS_SRC/$src/"* "$dest_codex/" 2>/dev/null
     fi
   done
 
@@ -474,17 +552,22 @@ if [ "$ALIREZA" = "e" ]; then
       echo "  ✓ pm-analyst → $pm_skill" || echo "  ⚠ $pm_skill atlandı"
 
     # 2. Copy to Antigravity adapter
-    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_anti="$TARGET_DIR/.agents/skills/$pm_skill"
       mkdir -p "$dest_anti"
       cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_anti/" 2>/dev/null
     fi
 
     # 3. Copy to Claude Code adapter
-    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_claude="$TARGET_DIR/.claude/skills/$pm_skill"
       mkdir -p "$dest_claude"
       cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_claude/" 2>/dev/null
+    fi
+    if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
+      dest_codex="$TARGET_DIR/.codex/skills/$pm_skill"
+      mkdir -p "$dest_codex"
+      cp -r "$SKILLS_SRC/project-management/skills/$pm_skill/"* "$dest_codex/" 2>/dev/null
     fi
   done
 
@@ -497,17 +580,22 @@ if [ "$ALIREZA" = "e" ]; then
       echo "  ✓ cv-engineer → senior-computer-vision" || echo "  ⚠ senior-computer-vision atlandı"
 
     # 2. Copy to Antigravity adapter
-    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_anti="$TARGET_DIR/.agents/skills/senior-computer-vision"
       mkdir -p "$dest_anti"
       cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_anti/" 2>/dev/null
     fi
 
     # 3. Copy to Claude Code adapter
-    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "4" ]; then
+    if [ "$ADAPTER_CHOICE" = "2" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
       dest_claude="$TARGET_DIR/.claude/skills/senior-computer-vision"
       mkdir -p "$dest_claude"
       cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_claude/" 2>/dev/null
+    fi
+    if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
+      dest_codex="$TARGET_DIR/.codex/skills/senior-computer-vision"
+      mkdir -p "$dest_codex"
+      cp -r "$SKILLS_SRC/engineering-team/skills/senior-computer-vision/"* "$dest_codex/" 2>/dev/null
     fi
   fi
 
@@ -566,8 +654,8 @@ if [ -f "$PROFILE_PATH" ]; then
   EXISTING_ADAPTERS=$(grep '^ADAPTER_CHOICES=' "$PROFILE_PATH" | cut -d= -f2- || true)
 fi
 
-if [ "$ADAPTER_CHOICE" = "4" ]; then
-  NEW_ADAPTERS="1,2,3"
+if [ "$ADAPTER_CHOICE" = "5" ]; then
+  NEW_ADAPTERS="1,2,3,4"
 else
   NEW_ADAPTERS="$ADAPTER_CHOICE"
 fi

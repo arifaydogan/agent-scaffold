@@ -20,7 +20,7 @@ worktrees, and Codex execution.
 - Jira eligibility rules and human-only action boundaries.
 - SQLite run history and exclusive issue locks.
 - Worktree planning and Codex executor adapter.
-- Antigravity, Claude Code, and GitHub Copilot instruction adapters.
+- Antigravity, Claude Code, GitHub Copilot, and Codex instruction adapters.
 - PaceBuild-specific CV, TimescaleDB, and demo reliability rules.
 
 ## Quick Install

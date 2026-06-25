@@ -115,14 +115,15 @@ if ($Interactive) {
     Write-Host "  1) Antigravity (.agents/ structure)"
     Write-Host "  2) Claude Code (CLAUDE.md & .claude/ structure)"
     Write-Host "  3) GitHub Copilot (.github/copilot-instructions.md)"
-    Write-Host "  4) All Adapters"
+    Write-Host "  4) Codex (AGENTS.md & .codex/ structure)"
+    Write-Host "  5) All Adapters"
     while ($true) {
-        $AdapterInput = Read-Host "Choice (1-4)"
-        if ($AdapterInput -match "^[1-4]$") {
+        $AdapterInput = Read-Host "Choice (1-5)"
+        if ($AdapterInput -match "^[1-5]$") {
             $AdapterChoice = $AdapterInput
             break
         }
-        Write-Host "Invalid choice. Please select 1, 2, 3 or 4." -ForegroundColor Red
+        Write-Host "Invalid choice. Please select 1, 2, 3, 4 or 5." -ForegroundColor Red
     }
 }
 
@@ -131,7 +132,8 @@ $AdapterName = switch ($AdapterChoice) {
     "1" { "Antigravity" }
     "2" { "Claude Code" }
     "3" { "Copilot" }
-    "4" { "All Adapters" }
+    "4" { "Codex" }
+    "5" { "All Adapters" }
 }
 
 Write-Host "`nConfiguration Summary:"
@@ -143,15 +145,19 @@ Write-Host "  - Adapter:$AdapterName"
 # Check for existing installations
 $ExistingFiles = @()
 if (Test-Path (Join-Path $TargetDir "ORCHESTRATION.md")) { $ExistingFiles += "ORCHESTRATION.md" }
-if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     if (Test-Path (Join-Path $TargetDir ".agents")) { $ExistingFiles += ".agents\" }
 }
-if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "5") {
     if (Test-Path (Join-Path $TargetDir "CLAUDE.md")) { $ExistingFiles += "CLAUDE.md" }
     if (Test-Path (Join-Path $TargetDir ".claude")) { $ExistingFiles += ".claude\" }
 }
-if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "5") {
     if (Test-Path (Join-Path $TargetDir ".github\copilot-instructions.md")) { $ExistingFiles += ".github\copilot-instructions.md" }
+}
+if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
+    if (Test-Path (Join-Path $TargetDir "AGENTS.md")) { $ExistingFiles += "AGENTS.md" }
+    if (Test-Path (Join-Path $TargetDir ".codex")) { $ExistingFiles += ".codex\" }
 }
 
 if ($ExistingFiles.Count -gt 0 -and -not $Force) {
@@ -254,7 +260,7 @@ function Copy-AgentsAntigravity {
 # ----------------------------------------------------
 # 1) Install Antigravity Adapter
 # ----------------------------------------------------
-if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     Write-Host "Installing Antigravity Adapter..."
     $agentsDir = Join-Path $TargetDir ".agents"
     New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null
@@ -271,7 +277,7 @@ if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
 # ----------------------------------------------------
 # 2) Install Claude Code Adapter
 # ----------------------------------------------------
-if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "5") {
     Write-Host "Installing Claude Code Adapter..."
     $claudeDir = Join-Path $TargetDir ".claude"
     $claudeAgents = Join-Path $claudeDir "agents"
@@ -357,7 +363,7 @@ if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
 # ----------------------------------------------------
 # 3) Install Copilot Adapter
 # ----------------------------------------------------
-if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
+if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "5") {
     Write-Host "Installing GitHub Copilot Adapter..."
     $githubDir = Join-Path $TargetDir ".github"
     $copilotAgentsDir = Join-Path $githubDir "agents"
@@ -450,6 +456,77 @@ if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
 }
 
 # ----------------------------------------------------
+# 4) Install Codex Adapter
+# ----------------------------------------------------
+if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
+    Write-Host "Installing Codex Adapter..."
+    $codexDir = Join-Path $TargetDir ".codex"
+    $codexAgentsDir = Join-Path $codexDir "agents"
+    $codexSkillsDir = Join-Path $codexDir "skills"
+    $codexPersonasDir = Join-Path $codexDir "personas"
+    $codexRulesDir = Join-Path $codexDir "rules"
+    New-Item -ItemType Directory -Path $codexAgentsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $codexSkillsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $codexPersonasDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $codexRulesDir -Force | Out-Null
+
+    Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $codexAgentsDir -Recurse -Force
+    Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $codexPersonasDir -Recurse -Force
+    Copy-Item -Path (Join-Path $SourceDir "core\rules\*.md") -Destination $codexRulesDir -Force
+
+    $coreAgents = Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory
+    foreach ($agent in $coreAgents) {
+        $skillsPath = Join-Path $agent.FullName "skills"
+        if (Test-Path $skillsPath) {
+            foreach ($skill in Get-ChildItem -Path $skillsPath -Directory) {
+                $skillTarget = Join-Path $codexSkillsDir $skill.Name
+                New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+                Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+            }
+        }
+    }
+
+    if ($PackChoice -eq "2") {
+        $cvAgentTarget = Join-Path $codexAgentsDir "cv-engineer"
+        New-Item -ItemType Directory -Path $cvAgentTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\*") -Destination $cvAgentTarget -Recurse -Force
+
+        $cvSkillsPath = Join-Path $SourceDir "packs\pacebuild\agents\cv-engineer\skills"
+        foreach ($skill in Get-ChildItem -Path $cvSkillsPath -Directory) {
+            $skillTarget = Join-Path $codexSkillsDir $skill.Name
+            New-Item -ItemType Directory -Path $skillTarget -Force | Out-Null
+            Copy-Item -Path (Join-Path $skill.FullName "*") -Destination $skillTarget -Recurse -Force
+        }
+
+        $fastApiTimescale = Join-Path $SourceDir "packs\pacebuild\overrides\backend-engineer\skills\fastapi-timescale"
+        $fastApiTimescaleTarget = Join-Path $codexSkillsDir "fastapi-timescale"
+        New-Item -ItemType Directory -Path $fastApiTimescaleTarget -Force | Out-Null
+        Copy-Item -Path (Join-Path $fastApiTimescale "*") -Destination $fastApiTimescaleTarget -Recurse -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\overrides\rules\demo-reliability-guard.md") -Destination $codexRulesDir -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\context\jira-protocol.md") -Destination (Join-Path $codexRulesDir "jira-protocol.md") -Force
+        Copy-Item -Path (Join-Path $SourceDir "packs\pacebuild\overrides\AGENTS.md") -Destination (Join-Path $TargetDir "AGENTS.md") -Force
+    } else {
+        Copy-Item -Path (Join-Path $SourceDir "AGENTS.md") -Destination (Join-Path $TargetDir "AGENTS.md") -Force
+    }
+
+    Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
+    @(
+        "# Codex Adapter Layout",
+        "",
+        "- `AGENTS.md`: repository-root instructions Codex reads first.",
+        "- `ORCHESTRATION.md`: canonical phase and handoff protocol.",
+        "- `.codex/personas/`: decision personas for the active phase.",
+        "- `.codex/agents/`: scoped task-agent definitions.",
+        "- `.codex/skills/`: reusable skill workflows with scripts and references.",
+        "- `.codex/rules/`: global and pack-specific operating rules.",
+        "",
+        "Start each run from `AGENTS.md`, then load only the persona, task agent, and skills needed for the current phase."
+    ) | Set-Content -Path (Join-Path $codexDir "README.md") -Force
+
+    Write-Host "Codex Adapter installed successfully." -ForegroundColor Green
+}
+
+# ----------------------------------------------------
 # Git Hooks Installation (if target is a Git repo)
 # ----------------------------------------------------
 if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
@@ -529,17 +606,22 @@ if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
                     Write-Host "  [OK] core/agents/$role -> $skillName" -ForegroundColor Green
 
                     # 2. Copy to Antigravity adapter (.agents/) if installed
-                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
                         $destAnti = Join-Path $TargetDir ".agents\skills\$skillName"
                         New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
                     }
 
                     # 3. Copy to Claude Code adapter (.claude/) if installed
-                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "5") {
                         $destClaude = Join-Path $TargetDir ".claude\skills\$skillName"
                         New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                    if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
+                        $destCodex = Join-Path $TargetDir ".codex\skills\$skillName"
+                        New-Item -ItemType Directory -Path $destCodex -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destCodex -Recurse -Force | Out-Null
                     }
                 } else {
                     Write-Host "  [WARN] $srcSub bulunamadi, atlandi" -ForegroundColor Yellow
@@ -558,17 +640,22 @@ if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
                     Write-Host "  [OK] pm-analyst -> $pmSkill" -ForegroundColor Green
 
                     # 2. Copy to Antigravity adapter
-                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
                         $destAnti = Join-Path $TargetDir ".agents\skills\$pmSkill"
                         New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
                     }
 
                     # 3. Copy to Claude Code adapter
-                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "5") {
                         $destClaude = Join-Path $TargetDir ".claude\skills\$pmSkill"
                         New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                    if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
+                        $destCodex = Join-Path $TargetDir ".codex\skills\$pmSkill"
+                        New-Item -ItemType Directory -Path $destCodex -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destCodex -Recurse -Force | Out-Null
                     }
                 } else {
                     Write-Host "  [WARN] $pmSkill atlandi" -ForegroundColor Yellow
@@ -586,17 +673,22 @@ if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
                     Write-Host "  [OK] cv-engineer -> senior-computer-vision" -ForegroundColor Green
 
                     # 2. Copy to Antigravity adapter
-                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
                         $destAnti = Join-Path $TargetDir ".agents\skills\senior-computer-vision"
                         New-Item -ItemType Directory -Path $destAnti -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destAnti -Recurse -Force | Out-Null
                     }
 
                     # 3. Copy to Claude Code adapter
-                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "4") {
+                    if ($AdapterChoice -eq "2" -or $AdapterChoice -eq "5") {
                         $destClaude = Join-Path $TargetDir ".claude\skills\senior-computer-vision"
                         New-Item -ItemType Directory -Path $destClaude -Force | Out-Null
                         Copy-Item -Path (Join-Path $srcPath "*") -Destination $destClaude -Recurse -Force | Out-Null
+                    }
+                    if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
+                        $destCodex = Join-Path $TargetDir ".codex\skills\senior-computer-vision"
+                        New-Item -ItemType Directory -Path $destCodex -Force | Out-Null
+                        Copy-Item -Path (Join-Path $srcPath "*") -Destination $destCodex -Recurse -Force | Out-Null
                     }
                 } else {
                     Write-Host "  [WARN] senior-computer-vision atlandi" -ForegroundColor Yellow
@@ -647,8 +739,8 @@ if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
             }
         }
     }
-    if ($AdapterChoice -eq "4") {
-        $InstalledAdapters += @("1", "2", "3")
+    if ($AdapterChoice -eq "5") {
+        $InstalledAdapters += @("1", "2", "3", "4")
     } else {
         $InstalledAdapters += $AdapterChoice
     }
