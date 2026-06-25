@@ -6,6 +6,10 @@ yonetmek icin tasarlanmis, tekrar kullanilabilir AI ekip scaffold'u.
 Bu reponun ana fikri JavaScript runtime degildir. Ana calisma modeli:
 [ORCHESTRATION.md](ORCHESTRATION.md).
 
+PaceBuild Jira yurutme akisi tek kaynak olarak
+[PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md) icinde tutulur.
+Adapterlar bu sozlesmeyi kendi ortamlarinda kesfettiren ince baglayicilardir.
+
 Model, `alirezarezvani/claude-skills` reposundaki hafif orchestration
 protokolunu temel alir:
 

@@ -7,6 +7,7 @@ This adapter configures a repository for Codex CLI and Codex coding-agent runs.
 ```text
 AGENTS.md
 ORCHESTRATION.md
+PACEBUILD_ORCHESTRATOR.md
 .codex/
 |-- README.md
 |-- rules/
@@ -18,6 +19,10 @@ ORCHESTRATION.md
 Codex reads repository instructions from `AGENTS.md`. The `.codex/` directory
 stores the persona, task-agent, skill, and rule inventory so a run can load
 only the files needed for the active phase.
+
+`PACEBUILD_ORCHESTRATOR.md` is shared with the other adapters. Codex discovers
+it through `AGENTS.md` and the thin `.codex/skills/pacebuild-orchestrator`
+wrapper.
 
 ## Installation
 
@@ -40,22 +45,20 @@ The choices mean:
 
 ## Usage
 
-Start the run from the target repository root and tell Codex to read `AGENTS.md`
-first, then `ORCHESTRATION.md`, then only the required files from `.codex/`.
+Start the run from the target repository root. For Jira work, provide only an
+issue key, exact issue title, or epic.
 
 Example prompt:
 
 ```text
-Read AGENTS.md and ORCHESTRATION.md.
-Objective: PACE-123 issue kapsam ve acceptance criteria netlestir.
-Start with product-manager persona.
-Load only the needed PM files from .codex/.
-Stop after the Phase 0 handoff.
+PACE-123
 ```
 
 ## Notes
 
 - `AGENTS.md` is the Codex entry point.
+- `PACEBUILD_ORCHESTRATOR.md` selects the first executable child when the input
+  is an epic or coordination issue.
 - `.codex/skills/` preserves full skill folders, including `scripts/`,
   `references/`, `profiles/`, and `assets/`.
 - PaceBuild-specific overrides are copied into `.codex/` when that pack is

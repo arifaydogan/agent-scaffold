@@ -1,5 +1,9 @@
 {
   "version": 1,
+  "orchestration_contracts": [
+    "ORCHESTRATION.md",
+    "PACEBUILD_ORCHESTRATOR.md"
+  ],
   "core_agents": [
     "orchestrator",
     "architect",

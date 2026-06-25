@@ -15,6 +15,7 @@ This adapter configures a repository for GitHub Copilot Agent Mode in VS Code.
 .vscode/
 `-- mcp.example.json
 ORCHESTRATION.md
+PACEBUILD_ORCHESTRATOR.md
 ```
 
 VS Code automatically discovers:
@@ -26,6 +27,9 @@ VS Code automatically discovers:
 The persona and task-agent source files are kept under `.github/personas/` and
 `.github/task-agents/` so the orchestrator can load only the files required for
 the active phase.
+
+The custom agent is a thin adapter. Jira workflow, epic decomposition, approval
+gates, and review behavior come from `PACEBUILD_ORCHESTRATOR.md`.
 
 ## Installation
 

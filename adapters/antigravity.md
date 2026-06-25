@@ -37,6 +37,10 @@ Antigravity automatically discovers and parses configurations from the `.agents/
 Start multi-phase work by reading `.agents/ORCHESTRATION.md`, then activate one
 persona from `.agents/personas/` and load the required skills.
 
+For Jira work, the `pacebuild-orchestrator` skill loads the repository-root
+`PACEBUILD_ORCHESTRATOR.md`. Epic decomposition and executable-child selection
+are defined there, not in the adapter.
+
 ### Interactive Installation
 ```bash
 ./install.sh

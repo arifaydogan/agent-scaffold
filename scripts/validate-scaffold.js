@@ -3,6 +3,25 @@ import fs from "node:fs";
 const manifest = JSON.parse(fs.readFileSync("scaffold-manifest.json", "utf8"));
 const errors = [];
 
+for (const file of manifest.orchestration_contracts ?? []) {
+  if (!fs.existsSync(file)) errors.push(`Missing orchestration contract: ${file}`);
+}
+
+for (const file of [
+  "adapters/antigravity/pacebuild-orchestrator/SKILL.md",
+  "adapters/codex/pacebuild-orchestrator/SKILL.md",
+  "adapters/pacebuild-orchestrator.agent.md"
+]) {
+  if (!fs.existsSync(file)) {
+    errors.push(`Missing orchestrator adapter: ${file}`);
+    continue;
+  }
+  const content = fs.readFileSync(file, "utf8");
+  if (!content.includes("PACEBUILD_ORCHESTRATOR.md")) {
+    errors.push(`Orchestrator adapter does not load canonical contract: ${file}`);
+  }
+}
+
 for (const role of manifest.core_agents) {
   const file = `core/agents/${role}/AGENT.md`;
   if (!fs.existsSync(file)) errors.push(`Missing agent: ${file}`);
@@ -68,6 +87,7 @@ if (errors.length) {
   console.log(
     `OK: ${manifest.core_agents.length} agents, ` +
       `${manifest.personas.length} personas, ` +
+      `${manifest.orchestration_contracts?.length ?? 0} orchestration contracts, ` +
       `${manifest.core_skills.length} core skills, ` +
       `${manifest.upstream_core_skills.length} upstream core skills, ` +
       `${manifest.pacebuild_skills.length} PaceBuild skills, ` +

@@ -4,6 +4,11 @@ Before any multi-step task, read and follow [ORCHESTRATION.md](ORCHESTRATION.md)
 That document is the canonical persona, skill, task-agent, phase, and handoff
 protocol.
 
+For PaceBuild Jira work, including a `PACE-XX` key, exact Jira issue title, or
+epic, also read and follow
+[PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md). It is the
+provider-neutral Jira execution contract.
+
 ## Objective
 
 This repository builds a reusable autonomous software-delivery scaffold. The

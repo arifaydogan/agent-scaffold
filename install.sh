@@ -120,6 +120,7 @@ echo ""
 # Check for existing files and prompt for confirmation
 EXISTING_FILES=()
 [ -f "$TARGET_DIR/ORCHESTRATION.md" ] && EXISTING_FILES+=("ORCHESTRATION.md")
+[ -f "$TARGET_DIR/PACEBUILD_ORCHESTRATOR.md" ] && EXISTING_FILES+=("PACEBUILD_ORCHESTRATOR.md")
 # We check a few key files/dirs to detect existing installations
 if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   [ -d "$TARGET_DIR/.agents" ] && EXISTING_FILES+=(".agents/")
@@ -153,8 +154,9 @@ if [ ${#EXISTING_FILES[@]} -ne 0 ] && [ "$FORCE" = false ]; then
   fi
 fi
 
-# The orchestration protocol is shared by every adapter.
+# The orchestration contracts are shared by every adapter.
 cp "$SOURCE_DIR/ORCHESTRATION.md" "$TARGET_DIR/ORCHESTRATION.md"
+cp "$SOURCE_DIR/PACEBUILD_ORCHESTRATOR.md" "$TARGET_DIR/PACEBUILD_ORCHESTRATOR.md"
 
 # Helper function to copy rules
 copy_rules_antigravity() {
@@ -426,6 +428,9 @@ if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   cp -r "$SOURCE_DIR"/core/agents/* "$TARGET_DIR/.codex/agents/"
   cp -r "$SOURCE_DIR"/core/personas/* "$TARGET_DIR/.codex/personas/"
   cp "$SOURCE_DIR"/core/rules/*.md "$TARGET_DIR/.codex/rules/"
+  mkdir -p "$TARGET_DIR/.codex/skills/pacebuild-orchestrator"
+  cp "$SOURCE_DIR/adapters/codex/pacebuild-orchestrator/SKILL.md" \
+    "$TARGET_DIR/.codex/skills/pacebuild-orchestrator/SKILL.md"
 
   for agent_dir in "$SOURCE_DIR"/core/agents/*; do
     if [ -d "$agent_dir/skills" ]; then
@@ -464,17 +469,19 @@ if [ "$ADAPTER_CHOICE" = "4" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
   fi
 
   cp "$SOURCE_DIR/ORCHESTRATION.md" "$TARGET_DIR/ORCHESTRATION.md"
+  cp "$SOURCE_DIR/PACEBUILD_ORCHESTRATOR.md" "$TARGET_DIR/PACEBUILD_ORCHESTRATOR.md"
   cat > "$TARGET_DIR/.codex/README.md" <<'EOF'
 # Codex Adapter Layout
 
 - `AGENTS.md`: repository-root instructions Codex reads first.
 - `ORCHESTRATION.md`: canonical phase and handoff protocol.
+- `PACEBUILD_ORCHESTRATOR.md`: provider-neutral Jira execution contract.
 - `.codex/personas/`: decision personas for the active phase.
 - `.codex/agents/`: scoped task-agent definitions.
 - `.codex/skills/`: reusable skill workflows with scripts and references.
 - `.codex/rules/`: global and pack-specific operating rules.
 
-Start each run from `AGENTS.md`, then load only the persona, task agent, and skills needed for the current phase.
+For Jira work, start from `AGENTS.md`, load `PACEBUILD_ORCHESTRATOR.md`, then load only the persona, task agent, and skills needed for the current phase.
 EOF
 
   echo "Codex Adapter installed successfully."

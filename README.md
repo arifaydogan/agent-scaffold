@@ -8,6 +8,9 @@ Turkish documentation:
 
 The primary operating model is the lightweight persona + skill + task-agent
 protocol in [ORCHESTRATION.md](ORCHESTRATION.md). It works without a framework.
+PaceBuild Jira execution is defined once in
+[PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md); adapters only expose it
+to their host.
 The JavaScript runtime is an optional automation layer for Jira polling, locks,
 worktrees, and Codex execution.
 

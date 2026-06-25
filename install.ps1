@@ -145,6 +145,7 @@ Write-Host "  - Adapter:$AdapterName"
 # Check for existing installations
 $ExistingFiles = @()
 if (Test-Path (Join-Path $TargetDir "ORCHESTRATION.md")) { $ExistingFiles += "ORCHESTRATION.md" }
+if (Test-Path (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md")) { $ExistingFiles += "PACEBUILD_ORCHESTRATOR.md" }
 if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     if (Test-Path (Join-Path $TargetDir ".agents")) { $ExistingFiles += ".agents\" }
 }
@@ -179,8 +180,9 @@ if ($ExistingFiles.Count -gt 0 -and -not $Force) {
     }
 }
 
-# The orchestration protocol is shared by every adapter.
+# The orchestration contracts are shared by every adapter.
 Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
+Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_ORCHESTRATOR.md") -Destination (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md") -Force
 
 # Helpers for file copying
 function Copy-RulesAntigravity {
@@ -473,6 +475,9 @@ if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
     Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $codexAgentsDir -Recurse -Force
     Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $codexPersonasDir -Recurse -Force
     Copy-Item -Path (Join-Path $SourceDir "core\rules\*.md") -Destination $codexRulesDir -Force
+    $codexOrchestratorSkill = Join-Path $codexSkillsDir "pacebuild-orchestrator"
+    New-Item -ItemType Directory -Path $codexOrchestratorSkill -Force | Out-Null
+    Copy-Item -Path (Join-Path $SourceDir "adapters\codex\pacebuild-orchestrator\SKILL.md") -Destination (Join-Path $codexOrchestratorSkill "SKILL.md") -Force
 
     $coreAgents = Get-ChildItem -Path (Join-Path $SourceDir "core\agents") -Directory
     foreach ($agent in $coreAgents) {
@@ -510,17 +515,19 @@ if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
     }
 
     Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_ORCHESTRATOR.md") -Destination (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md") -Force
     @(
         "# Codex Adapter Layout",
         "",
         "- `AGENTS.md`: repository-root instructions Codex reads first.",
         "- `ORCHESTRATION.md`: canonical phase and handoff protocol.",
+        "- `PACEBUILD_ORCHESTRATOR.md`: provider-neutral Jira execution contract.",
         "- `.codex/personas/`: decision personas for the active phase.",
         "- `.codex/agents/`: scoped task-agent definitions.",
         "- `.codex/skills/`: reusable skill workflows with scripts and references.",
         "- `.codex/rules/`: global and pack-specific operating rules.",
         "",
-        "Start each run from `AGENTS.md`, then load only the persona, task agent, and skills needed for the current phase."
+        "For Jira work, start from `AGENTS.md`, load `PACEBUILD_ORCHESTRATOR.md`, then load only the persona, task agent, and skills needed for the current phase."
     ) | Set-Content -Path (Join-Path $codexDir "README.md") -Force
 
     Write-Host "Codex Adapter installed successfully." -ForegroundColor Green

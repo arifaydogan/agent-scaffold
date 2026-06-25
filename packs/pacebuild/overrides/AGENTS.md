@@ -5,13 +5,16 @@ PaceBuild'e ozel task agent, skill, risk ve faz baglamini ekler.
 
 ## Zorunlu Calisma Sirasi
 
-1. Istek `PACE-XX` iceriyorsa once `pacebuild-orchestrator` skill'ini yukle.
-2. Ana `ORCHESTRATION.md` dosyasini oku.
-3. Her faz icin tek persona sec.
-4. Gerekli skill'leri birlikte yukle.
-5. En dar kapsamli task agent'i sec.
-6. Zorunlu phase handoff formatini kullan.
-7. Skill'deki exact approval token olmadan sonraki faza gecme.
+1. Istek bir `PACE-XX`, Jira task/epic basligi veya Jira isi iceriyorsa
+   repository kokundeki `PACEBUILD_ORCHESTRATOR.md` dosyasini oku ve uygula.
+2. Adapter destekliyorsa `pacebuild-orchestrator` wrapper skill/agent'ini
+   yukle; workflow kurallarini wrapper'dan degil kanonik dosyadan al.
+3. Ana `ORCHESTRATION.md` dosyasini oku.
+4. Her faz icin tek persona sec.
+5. Gerekli skill'leri birlikte yukle.
+6. En dar kapsamli task agent'i sec.
+7. Zorunlu phase handoff formatini kullan.
+8. Kanonik dosyadaki exact approval token olmadan sonraki faza gecme.
 
 ## PaceBuild Ek Task Agenti
 
