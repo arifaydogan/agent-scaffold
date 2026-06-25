@@ -39,10 +39,10 @@ echo "============================================="
 echo "        AI Team Scaffold Installer           "
 echo "============================================="
 
-# Detect source directory
-# Check if running from a local cloned repo (contains core/ and packs/)
-if [ -d "core" ] && [ -d "packs" ]; then
-  SOURCE_DIR="$(pwd)"
+# Detect source directory from the script location, not the caller's cwd.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/core" ] && [ -d "$SCRIPT_DIR/packs" ]; then
+  SOURCE_DIR="$SCRIPT_DIR"
   echo "Using local source directory: $SOURCE_DIR"
   TEMP_DIR=""
 else

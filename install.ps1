@@ -56,11 +56,13 @@ try {
     Write-Host "        AI Team Scaffold Installer           " -ForegroundColor Cyan
     Write-Host "=============================================" -ForegroundColor Cyan
 
-    # Detect source directory
-    # If we run from a directory that contains core and packs directories
-    $LocalSource = Get-Item -Path "core", "packs" -ErrorAction SilentlyContinue
-    if ($LocalSource -and $LocalSource.Count -eq 2) {
-        $SourceDir = (Get-Location).Path
+    # Detect source directory from the script location, not the caller's cwd.
+    $ScriptDir = $PSScriptRoot
+    $HasScriptSource = $ScriptDir -and
+        (Test-Path -LiteralPath (Join-Path $ScriptDir "core")) -and
+        (Test-Path -LiteralPath (Join-Path $ScriptDir "packs"))
+    if ($HasScriptSource) {
+        $SourceDir = $ScriptDir
         Write-Host "Using local source directory: $SourceDir" -ForegroundColor Green
         $TempDir = $null
     } else {
