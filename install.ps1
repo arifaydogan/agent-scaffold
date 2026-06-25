@@ -13,7 +13,9 @@ param (
 
     [switch]$WithUpstreamSkills = $false,
 
-    [switch]$WithCaveman = $false
+    [switch]$WithCaveman = $false,
+
+    [switch]$SkipHooks = $false
 )
 
 $RepoUrl = "https://github.com/arifaydogan/agent-scaffold.git"
@@ -448,7 +450,7 @@ if ($AdapterChoice -eq "3" -or $AdapterChoice -eq "4") {
 # ----------------------------------------------------
 # Git Hooks Installation (if target is a Git repo)
 # ----------------------------------------------------
-if (Test-Path (Join-Path $TargetDir ".git")) {
+if ((Test-Path (Join-Path $TargetDir ".git")) -and -not $SkipHooks) {
     $InstallHooks = $false
     if ($Interactive) {
         $HookConfirm = Read-Host "Git repository detected. Install Git hooks? (Y/n)"
@@ -627,6 +629,45 @@ if (Test-Path (Join-Path $TargetDir ".git")) {
             Write-Host "  [WARN] Caveman kurulumu sirasinda bir hata olustu: $($_.Exception.Message)" -ForegroundColor Yellow
         } finally {
             Pop-Location
+        }
+    }
+
+    # Persist the local installation profile for one-command updates.
+    $ProfileDir = Join-Path $TargetDir ".agent-scaffold"
+    $ProfilePath = Join-Path $ProfileDir "profile.env"
+    New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
+
+    $InstalledAdapters = @()
+    if (Test-Path -LiteralPath $ProfilePath) {
+        foreach ($Line in Get-Content -LiteralPath $ProfilePath) {
+            if ($Line -match "^ADAPTER_CHOICES=(.*)$") {
+                $InstalledAdapters += $Matches[1].Split(",") | Where-Object { $_ }
+            }
+        }
+    }
+    if ($AdapterChoice -eq "4") {
+        $InstalledAdapters += @("1", "2", "3")
+    } else {
+        $InstalledAdapters += $AdapterChoice
+    }
+    $InstalledAdapters = @($InstalledAdapters | Sort-Object -Unique)
+
+    @(
+        "SOURCE_REPO=$RepoUrl"
+        "SOURCE_REF=master"
+        "PACK_CHOICE=$PackChoice"
+        "ADAPTER_CHOICES=$($InstalledAdapters -join ',')"
+    ) | Set-Content -LiteralPath $ProfilePath
+
+    Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\update-scaffold.ps1") -Destination (Join-Path $ProfileDir "update.ps1") -Force
+    Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\update-scaffold.sh") -Destination (Join-Path $ProfileDir "update.sh") -Force
+
+    $InfoExclude = Join-Path $TargetDir ".git\info\exclude"
+    if (Test-Path (Join-Path $TargetDir ".git")) {
+        $ExcludeEntry = ".agent-scaffold/"
+        $ExistingExclude = if (Test-Path -LiteralPath $InfoExclude) { Get-Content -LiteralPath $InfoExclude } else { @() }
+        if ($ExistingExclude -notcontains $ExcludeEntry) {
+            Add-Content -LiteralPath $InfoExclude -Value $ExcludeEntry
         }
     }
 

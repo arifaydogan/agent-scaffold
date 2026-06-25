@@ -11,6 +11,7 @@ ADAPTER_CHOICE="${3:-}"
 FORCE=false
 WITH_UPSTREAM_SKILLS=false
 WITH_CAVEMAN=false
+SKIP_HOOKS=false
 
 # Check for --force flag anywhere in args
 for arg in "$@"; do
@@ -22,6 +23,9 @@ for arg in "$@"; do
   fi
   if [ "$arg" = "--with-caveman" ]; then
     WITH_CAVEMAN=true
+  fi
+  if [ "$arg" = "--skip-hooks" ]; then
+    SKIP_HOOKS=true
   fi
 done
 
@@ -529,7 +533,7 @@ fi
 # ----------------------------------------------------
 # Git Hooks Installation (if target is a Git repo)
 # ----------------------------------------------------
-if [ -d "$TARGET_DIR/.git" ]; then
+if [ -d "$TARGET_DIR/.git" ] && [ "$SKIP_HOOKS" = false ]; then
   INSTALL_HOOKS=false
   if [ "$INTERACTIVE" = true ]; then
     read -p "Git repository detected. Install Git hooks? (Y/n): " HOOK_CONFIRM
@@ -550,6 +554,43 @@ if [ -d "$TARGET_DIR/.git" ]; then
     chmod +x "$TARGET_DIR/.git/hooks/pre-commit" "$TARGET_DIR/.git/hooks/commit-msg" "$TARGET_DIR/.git/hooks/pre-push"
     echo "Git hooks installed and made executable."
   fi
+fi
+
+# Persist the local installation profile for one-command updates.
+PROFILE_DIR="$TARGET_DIR/.agent-scaffold"
+PROFILE_PATH="$PROFILE_DIR/profile.env"
+mkdir -p "$PROFILE_DIR"
+
+EXISTING_ADAPTERS=""
+if [ -f "$PROFILE_PATH" ]; then
+  EXISTING_ADAPTERS=$(grep '^ADAPTER_CHOICES=' "$PROFILE_PATH" | cut -d= -f2- || true)
+fi
+
+if [ "$ADAPTER_CHOICE" = "4" ]; then
+  NEW_ADAPTERS="1,2,3"
+else
+  NEW_ADAPTERS="$ADAPTER_CHOICE"
+fi
+
+ADAPTER_CHOICES=$(printf '%s\n' "$EXISTING_ADAPTERS,$NEW_ADAPTERS" | \
+  tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)
+
+cat > "$PROFILE_PATH" <<EOF
+SOURCE_REPO=$REPO_URL
+SOURCE_REF=master
+PACK_CHOICE=$PACK_CHOICE
+ADAPTER_CHOICES=$ADAPTER_CHOICES
+EOF
+
+cp "$SOURCE_DIR/scripts/update-scaffold.ps1" "$PROFILE_DIR/update.ps1"
+cp "$SOURCE_DIR/scripts/update-scaffold.sh" "$PROFILE_DIR/update.sh"
+chmod +x "$PROFILE_DIR/update.sh"
+
+if [ -d "$TARGET_DIR/.git" ]; then
+  mkdir -p "$TARGET_DIR/.git/info"
+  touch "$TARGET_DIR/.git/info/exclude"
+  grep -qxF '.agent-scaffold/' "$TARGET_DIR/.git/info/exclude" || \
+    echo '.agent-scaffold/' >> "$TARGET_DIR/.git/info/exclude"
 fi
 
 echo "============================================="

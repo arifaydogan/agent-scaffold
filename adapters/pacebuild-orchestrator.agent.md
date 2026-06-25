@@ -98,6 +98,9 @@ evidence exists, report `repository unresolved` and block.
   every tracked working-tree change. Never create a task branch from an
   unrelated setup/feature branch or carry unrelated tracked changes into it.
 - Run relevant tests and report exact evidence.
+- During review, automatically fix objective findings inside the already
+  approved file scope, rerun verification, and repeat review. Ask again only
+  when the fix changes scope, dependencies, architecture, or public contracts.
 
 ## Human-only actions
 

@@ -268,6 +268,45 @@ without including the corresponding command and exit status in Verification.
 If findings require code changes, return to `PHASE_2_IMPLEMENTATION`, apply the
 approved in-scope fixes, rerun verification, and repeat Phase 3.
 
+### Automatic review-fix loop
+
+The original `APPROVE PHASE 2` remains valid for fixes that:
+
+- stay inside the approved file scope;
+- directly address a Phase 3 finding;
+- do not change architecture, public contracts, dependencies, or acceptance
+  criteria;
+- are objectively verifiable by lint, tests, or diff inspection.
+
+For these findings, do not ask the user to diagnose or approve each fix.
+Automatically:
+
+1. report the finding with file and line;
+2. transition back to `PHASE_2_IMPLEMENTATION`;
+3. apply the smallest fix;
+4. stage the complete approved diff;
+5. rerun `ruff`, the repository test runner, `git diff --cached --check`, and
+   acceptance verification;
+6. transition to `PHASE_3_REVIEW` and review again.
+
+Continue until Phase 3 is clean or three review-fix iterations have failed.
+
+Stop and request human approval only when a fix would:
+
+- touch a file outside the approved scope;
+- change an API/schema/architecture decision;
+- add or remove a dependency;
+- alter Jira acceptance criteria;
+- discard or overwrite unrelated user work.
+
+The final Phase 3 handoff must include:
+
+- findings discovered;
+- fixes applied;
+- review-fix iteration count;
+- final lint/test commands and exit codes;
+- confirmation that no unresolved findings remain.
+
 Only a successful Phase 3 handoff may enter
 `WAITING_EXTERNAL_WRITE_APPROVAL`.
 

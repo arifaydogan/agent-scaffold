@@ -28,6 +28,9 @@ test("Antigravity orchestrator requires child issue evidence before Phase 0 comp
   assert.match(skill, /ad-hoc[\s\S]*supplemental evidence/);
   assert.match(skill, /failed `pytest`[\s\S]*cannot be replaced/);
   assert.match(skill, /timezone-aware UTC values/);
+  assert.match(skill, /Automatic review-fix loop/);
+  assert.match(skill, /three review-fix iterations/);
+  assert.match(skill, /do not ask the user to diagnose or approve each fix/);
 });
 
 test("Copilot orchestrator requires a separate child issue query", () => {
@@ -40,4 +43,5 @@ test("Copilot orchestrator requires a separate child issue query", () => {
   assert.match(agent, /first executable child/);
   assert.match(agent, /do not default to `architect`/);
   assert.match(agent, /unrelated setup\/feature branch/);
+  assert.match(agent, /automatically fix objective findings/);
 });

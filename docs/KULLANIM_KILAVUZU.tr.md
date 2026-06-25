@@ -316,3 +316,40 @@ Bu nedenle ilk pilotlarda:
 - Jira acceptance criteria okumadan kodlamak
 - Runtime'i orchestration protokolunun kendisi sanmak
 - Agent'a merge veya Done yetkisi vermek
+
+## 10. Scaffold Guncelleme
+
+Installer hedef projeye yerel bir kurulum profili ve updater kopyalar:
+
+```text
+.agent-scaffold/
+  profile.env
+  update.ps1
+  update.sh
+  last-update.env
+```
+
+Bu klasor hedef reponun `.git/info/exclude` dosyasina eklenir; proje ile push
+edilmez.
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .agent-scaffold\update.ps1
+```
+
+Linux/macOS:
+
+```bash
+bash .agent-scaffold/update.sh
+```
+
+Updater:
+
+1. `agent-scaffold` reposunun guncel `master` branch'ini gecici klasore klonlar.
+2. Daha once kurulan pack ve adapter secimlerini `profile.env` dosyasindan okur.
+3. Antigravity, Copilot ve/veya Claude dosyalarini `-Force` ile yeniler.
+4. Git hook'larini yeniden kurmaz.
+5. `.vscode/mcp.json` gibi credential/OAuth durumunu tasiyan yerel dosyalara
+   dokunmaz.
+6. Kurulan commit'i `last-update.env` dosyasina kaydeder.
