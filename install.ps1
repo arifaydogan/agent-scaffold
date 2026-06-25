@@ -18,6 +18,29 @@ param (
 
 $RepoUrl = "https://github.com/arifaydogan/agent-scaffold.git"
 
+function Resolve-TargetDirectoryPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue
+    )
+
+    $Candidate = [Environment]::ExpandEnvironmentVariables($PathValue.Trim().Trim('"'))
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        $Candidate = (Get-Location).Path
+    }
+
+    if (Test-Path -LiteralPath $Candidate) {
+        $Item = Get-Item -LiteralPath $Candidate -ErrorAction Stop
+        if (-not $Item.PSIsContainer) {
+            throw "Target path is not a directory: $Candidate"
+        }
+        return [string]$Item.FullName
+    }
+
+    $Created = New-Item -ItemType Directory -Path $Candidate -Force -ErrorAction Stop
+    return [string]$Created.FullName
+}
+
 # Define cleanup block
 $Cleanup = {
     if ($TempDir -and (Test-Path $TempDir)) {
@@ -60,23 +83,13 @@ if (-not $TargetDir -or -not $PackChoice -or -not $AdapterChoice) {
 
 if ($Interactive) {
     $TargetInput = Read-Host "Enter target project directory (default: .)"
-    if ([string]::IsNullOrWhiteSpace($TargetInput)) {
-        $TargetDir = (Get-Location).Path
-    } else {
-        $TargetDir = Resolve-Path $TargetInput -ErrorAction SilentlyContinue
-        if (-not $TargetDir) {
-            $TargetDir = New-Item -ItemType Directory -Path $TargetInput -Force | Select-Object -ExpandProperty FullName
-        } else {
-            $TargetDir = $TargetDir.Path
-        }
-    }
+    $TargetDir = Resolve-TargetDirectoryPath $TargetInput
 } else {
-    $Resolved = Resolve-Path $TargetDir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path
-    if (-not $Resolved) {
-        $TargetDir = New-Item -ItemType Directory -Path $TargetDir -Force | Select-Object -ExpandProperty FullName
-    } else {
-        $TargetDir = $Resolved
-    }
+    $TargetDir = Resolve-TargetDirectoryPath $TargetDir
+}
+
+if ([string]::IsNullOrWhiteSpace([string]$TargetDir)) {
+    throw "Target directory could not be resolved."
 }
 
 if ($Interactive) {
