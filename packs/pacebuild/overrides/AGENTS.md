@@ -16,6 +16,13 @@ PaceBuild'e ozel task agent, skill, risk ve faz baglamini ekler.
 7. Zorunlu phase handoff formatini kullan.
 8. Kanonik dosyadaki exact approval token olmadan sonraki faza gecme.
 
+## Urun Kesfi Ve Backlog
+
+Istek `DISCOVERY:` veya `PRODUCT:` ile basliyorsa `PACEBUILD_DISCOVERY.md`
+dosyasini oku ve uygula. Bu, mevcut Jira task uygulamasindan ayri, sohbet
+tabanli `product-manager` + `pm-analyst` akışıdır. Confluence, epic ve task
+yazimi ancak `APPROVE BACKLOG WRITES` tokeni ile yapilir.
+
 ## PaceBuild Ek Task Agenti
 
 | Task agent | Scope |

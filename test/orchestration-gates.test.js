@@ -30,6 +30,51 @@ test("canonical PaceBuild contract enforces orchestration gates", () => {
   assert.match(contract, /do not ask the user to diagnose or approve each fix/);
   assert.match(contract, /configured review status, normally `In Review`/);
   assert.match(contract, /transition only the implemented child issue/);
+  assert.match(contract, /Confluence validation page/);
+  assert.match(contract, /manual test cases with preconditions, steps/);
+  assert.match(contract, /user-visible change log/);
+  assert.match(contract, /lowest-cost model and reasoning effort/);
+  assert.match(contract, /Adapters own concrete model names/);
+  assert.match(contract, /`PACE-43 REVIEW` is a distinct read-only command/);
+  assert.match(contract, /It must not infer a branch from the current checkout/);
+});
+
+test("product discovery separates conversational refinement from backlog writes", () => {
+  const discovery = fs.readFileSync("PACEBUILD_DISCOVERY.md", "utf8");
+
+  assert.match(discovery, /DISCOVERY:/);
+  assert.match(discovery, /Persona: `product-manager`/);
+  assert.match(discovery, /Task agent: `pm-analyst`/);
+  assert.match(discovery, /completed and in-review work/);
+  assert.match(discovery, /APPROVE BACKLOG WRITES/);
+  assert.match(discovery, /Do not create or edit Jira issues, epics, or Confluence pages during discovery/);
+});
+
+test("Codex review agents are read-only and use risk-based model routing", () => {
+  const lite = fs.readFileSync(
+    "adapters/codex/agents/pacebuild-review-lite.toml",
+    "utf8"
+  );
+  const deep = fs.readFileSync(
+    "adapters/codex/agents/pacebuild-review-deep.toml",
+    "utf8"
+  );
+
+  assert.match(lite, /model = "gpt-5.4-mini"/);
+  assert.match(lite, /sandbox_mode = "read-only"/);
+  assert.match(deep, /model = "gpt-5.5"/);
+  assert.match(deep, /model_reasoning_effort = "high"/);
+  assert.match(deep, /sandbox_mode = "read-only"/);
+});
+
+test("Antigravity receives adapter-specific model routing", () => {
+  const routing = fs.readFileSync(
+    "adapters/antigravity/model-routing.md",
+    "utf8"
+  );
+
+  assert.match(routing, /lowest-cost\ncapable option/);
+  assert.match(routing, /fresh read-only agent/);
 });
 
 test("every provider adapter loads the canonical PaceBuild contract", () => {

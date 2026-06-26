@@ -8,6 +8,10 @@ The user only needs to provide a Jira issue key such as `PACE-43`, an exact Jira
 issue title, or an epic. Resolve a title to exactly one issue before continuing.
 If no issue or multiple issues match, stop Phase 0 and ask for the issue key.
 
+`PACE-43 REVIEW` is a distinct read-only command. It runs the independent
+review workflow below; it does not restart implementation planning or ask for
+the Phase 1 and Phase 2 approval tokens.
+
 When the resolved issue is an epic or has child issues, inspect all children,
 derive dependency order, and select the first eligible, unblocked child as the
 next executable unit. Do not implement an epic as one large change.
@@ -307,6 +311,26 @@ The final Phase 3 handoff must include:
 Only a successful Phase 3 handoff may enter
 `WAITING_EXTERNAL_WRITE_APPROVAL`.
 
+## Model and token routing
+
+Use the lowest-cost model and reasoning effort that can safely complete the
+current bounded phase. Do not use a high-cost model merely because a task is
+new or because an issue has an epic parent.
+
+| Work | Default route | Escalate only when |
+| --- | --- | --- |
+| Jira/Confluence intake, child ordering, documentation, simple diff scan | lowest-cost available model, low or medium reasoning | evidence conflicts, scope is ambiguous, or a cross-service decision is needed |
+| Single-module implementation and ordinary tests | provider-selected balanced model, medium reasoning | the change crosses services, changes public contracts, or verification fails repeatedly |
+| Security, concurrency, data-loss, auth, migration, or cross-service review | strongest available model, high reasoning | never downgrade these risks solely to save tokens |
+
+For an independent review, spawn exactly one read-only reviewer. Start with
+the adapter's lightweight reviewer; use its deep reviewer only for the
+high-risk conditions in the table. Do not fan out multiple reviewers unless the
+user explicitly requests parallel review: subagents consume additional tokens.
+
+Adapters own concrete model names and selection mechanisms. The active
+conversation cannot change its own model solely by reading this file.
+
 ## External writes
 
 Jira transitions/comments, Confluence writes, pushes, and pull request creation
@@ -316,6 +340,47 @@ After approval, transition the implemented executable issue to the project's
 configured review status, normally `In Review`, and add the evidence handoff.
 If the original input was an epic, transition only the implemented child issue;
 never transition or modify the epic.
+
+Create or update one Confluence validation page linked from the Jira issue or
+the project's documented delivery space. Read the target page before updating
+it. The page and the Jira handoff must contain the same review packet:
+
+- Jira issue key, repository, branch, commit SHA, and pull-request URL;
+- acceptance-criteria result and exact automated test commands with exit codes;
+- manual test cases with preconditions, steps, expected result, and observed result;
+- a user-visible change log: screens, APIs, events, errors, permissions, and
+  non-changes relevant to users or operators;
+- known limitations, feature flags, test data, rollback notes, and reviewer
+  focus areas.
+
+If no linked or configured Confluence location can be identified, do not guess
+or create an arbitrary page. Record the missing location in the Jira handoff
+and complete the other approved external writes.
+
+## Independent review handoff
+
+A fresh reviewer receives only `PACE-43 REVIEW` or a pull-request URL. The
+implemented-task handoff must put this exact `Review packet` in the Jira
+comment before the issue transitions to `In Review`:
+
+- repository, base branch, implementation branch, commit SHA, and PR URL;
+- linked Confluence validation page;
+- acceptance-criteria result and automated/manual test evidence;
+- user-visible change scenarios, known limitations, and reviewer focus areas.
+
+For `PACE-43 REVIEW`, the reviewer reads that packet, fetches the stated branch
+if necessary, and compares the implementation branch with the declared base.
+It must not infer a branch from the current checkout, task title, or a previous
+conversation. A missing, contradictory, or inaccessible packet is a review
+blocker.
+
+The reviewer must remain read-only and report findings with file and line
+references. Its completion report is written in the chat unless the user
+separately approves an external review comment.
+
+The reviewer does not transition Jira, update Confluence, push, create a pull
+request, or apply fixes. A separate implementation run handles accepted review
+findings through the normal Phase 2 and Phase 3 loop.
 
 Never transition an issue to Done or merge a pull request.
 
@@ -331,6 +396,7 @@ Task agent: [...]
 Decisions: [...]
 Artifacts: [...]
 Verification: [...]
+Review packet: [repository, base branch, implementation branch, SHA, PR, Confluence page]
 Open items: [...]
 Switching to: [...]
 Human approval needed: [exact approval token]

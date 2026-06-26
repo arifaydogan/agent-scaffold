@@ -31,6 +31,10 @@ the active phase.
 The custom agent is a thin adapter. Jira workflow, epic decomposition, approval
 gates, and review behavior come from `PACEBUILD_ORCHESTRATOR.md`.
 
+When Copilot uses Auto mode, leave model selection to Auto. The shared contract
+still limits token use by loading only the active phase's files and requiring a
+single independent reviewer unless parallel review is explicitly requested.
+
 ## Installation
 
 PowerShell:

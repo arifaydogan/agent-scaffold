@@ -9,6 +9,11 @@ epic, also read and follow
 [PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md). It is the
 provider-neutral Jira execution contract.
 
+For PaceBuild product discovery, feature shaping, backlog design, or
+Confluence product documentation, read and follow
+[PACEBUILD_DISCOVERY.md](PACEBUILD_DISCOVERY.md). Start this conversational
+workflow with `DISCOVERY:` or `PRODUCT:`.
+
 ## Objective
 
 This repository builds a reusable autonomous software-delivery scaffold. The

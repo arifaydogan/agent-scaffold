@@ -2,7 +2,8 @@
   "version": 1,
   "orchestration_contracts": [
     "ORCHESTRATION.md",
-    "PACEBUILD_ORCHESTRATOR.md"
+    "PACEBUILD_ORCHESTRATOR.md",
+    "PACEBUILD_DISCOVERY.md"
   ],
   "core_agents": [
     "orchestrator",

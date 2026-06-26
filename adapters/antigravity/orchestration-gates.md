@@ -11,3 +11,5 @@ autonomously.
 Phase 0 and Phase 1 are read-only. Planning artifacts do not grant permission
 to implement. Never infer approval from task clarity, Jira acceptance criteria,
 or a previous message.
+
+For model and independent-review behavior, also follow `rules/model-routing.md`.

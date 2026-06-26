@@ -41,6 +41,10 @@ For Jira work, the `pacebuild-orchestrator` skill loads the repository-root
 `PACEBUILD_ORCHESTRATOR.md`. Epic decomposition and executable-child selection
 are defined there, not in the adapter.
 
+Antigravity receives a separate `model-routing.md` rule: select the least
+expensive capable runtime option when its UI exposes model selection, then
+escalate only for defined high-risk work.
+
 ### Interactive Installation
 ```bash
 ./install.sh

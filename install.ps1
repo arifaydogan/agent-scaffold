@@ -146,6 +146,7 @@ Write-Host "  - Adapter:$AdapterName"
 $ExistingFiles = @()
 if (Test-Path (Join-Path $TargetDir "ORCHESTRATION.md")) { $ExistingFiles += "ORCHESTRATION.md" }
 if (Test-Path (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md")) { $ExistingFiles += "PACEBUILD_ORCHESTRATOR.md" }
+if (Test-Path (Join-Path $TargetDir "PACEBUILD_DISCOVERY.md")) { $ExistingFiles += "PACEBUILD_DISCOVERY.md" }
 if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     if (Test-Path (Join-Path $TargetDir ".agents")) { $ExistingFiles += ".agents\" }
 }
@@ -183,6 +184,7 @@ if ($ExistingFiles.Count -gt 0 -and -not $Force) {
 # The orchestration contracts are shared by every adapter.
 Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
 Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_ORCHESTRATOR.md") -Destination (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md") -Force
+Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_DISCOVERY.md") -Destination (Join-Path $TargetDir "PACEBUILD_DISCOVERY.md") -Force
 
 # Helpers for file copying
 function Copy-RulesAntigravity {
@@ -273,6 +275,7 @@ if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     New-Item -ItemType Directory -Path $orchestratorSkill -Force | Out-Null
     Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\pacebuild-orchestrator\SKILL.md") -Destination (Join-Path $orchestratorSkill "SKILL.md") -Force
     Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\orchestration-gates.md") -Destination (Join-Path $agentsDir "rules\orchestration-gates.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\model-routing.md") -Destination (Join-Path $agentsDir "rules\model-routing.md") -Force
     Write-Host "Antigravity Adapter installed successfully." -ForegroundColor Green
 }
 
@@ -475,6 +478,7 @@ if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
     Copy-Item -Path (Join-Path $SourceDir "core\agents\*") -Destination $codexAgentsDir -Recurse -Force
     Copy-Item -Path (Join-Path $SourceDir "core\personas\*") -Destination $codexPersonasDir -Recurse -Force
     Copy-Item -Path (Join-Path $SourceDir "core\rules\*.md") -Destination $codexRulesDir -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\codex\agents\*.toml") -Destination $codexAgentsDir -Force
     $codexOrchestratorSkill = Join-Path $codexSkillsDir "pacebuild-orchestrator"
     New-Item -ItemType Directory -Path $codexOrchestratorSkill -Force | Out-Null
     Copy-Item -Path (Join-Path $SourceDir "adapters\codex\pacebuild-orchestrator\SKILL.md") -Destination (Join-Path $codexOrchestratorSkill "SKILL.md") -Force
@@ -516,18 +520,21 @@ if ($AdapterChoice -eq "4" -or $AdapterChoice -eq "5") {
 
     Copy-Item -Path (Join-Path $SourceDir "ORCHESTRATION.md") -Destination (Join-Path $TargetDir "ORCHESTRATION.md") -Force
     Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_ORCHESTRATOR.md") -Destination (Join-Path $TargetDir "PACEBUILD_ORCHESTRATOR.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "PACEBUILD_DISCOVERY.md") -Destination (Join-Path $TargetDir "PACEBUILD_DISCOVERY.md") -Force
     @(
         "# Codex Adapter Layout",
         "",
         "- `AGENTS.md`: repository-root instructions Codex reads first.",
         "- `ORCHESTRATION.md`: canonical phase and handoff protocol.",
         "- `PACEBUILD_ORCHESTRATOR.md`: provider-neutral Jira execution contract.",
+        "- `PACEBUILD_DISCOVERY.md`: conversational product discovery and backlog contract.",
         "- `.codex/personas/`: decision personas for the active phase.",
         "- `.codex/agents/`: scoped task-agent definitions.",
+        "- `.codex/agents/pacebuild-review-*.toml`: read-only independent review agents.",
         "- `.codex/skills/`: reusable skill workflows with scripts and references.",
         "- `.codex/rules/`: global and pack-specific operating rules.",
         "",
-        "For Jira work, start from `AGENTS.md`, load `PACEBUILD_ORCHESTRATOR.md`, then load only the persona, task agent, and skills needed for the current phase."
+        "For Jira work, start from `AGENTS.md`, load `PACEBUILD_ORCHESTRATOR.md`, then load only the persona, task agent, and skills needed for the current phase. Use the read-only review agents for an independent PR review."
     ) | Set-Content -Path (Join-Path $codexDir "README.md") -Force
 
     Write-Host "Codex Adapter installed successfully." -ForegroundColor Green
