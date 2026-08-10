@@ -305,3 +305,35 @@ degildir. Bu protokolu otomatiklestirmek icin deneysel MVP altyapisidir:
 
 Structured prompting modeli bunlar olmadan da kullanilabilir. Runtime devre disi
 olsa bile bu dokuman ve agent/skill dosyalari calisma protokolunu tanimlar.
+
+## Epic delivery hierarchy
+
+For a Jira epic, delivery is coordinated as a hierarchy rather than one large
+implementation. The local runtime records an EpicContext with its leaves,
+branches, serialized integration queue and completion-notification fence.
+
+    develop -> epic/<epic-key>-<slug>
+    epic/<epic-key>-<slug> -> task/<issue-key>-<slug> (or story/<issue-key>-<slug>)
+    task/story PR -> epic branch
+    epic PR -> develop
+    develop -> release
+    release -> master
+
+A leaf may be integrated only through the epic queue. One integration owns that
+queue at a time. A merge conflict is persisted as blocked-conflict; it blocks
+the epic-ready gate and requires human resolution/requeue. No runtime command
+pushes or merges these branches.
+
+An epic becomes ready only when every registered leaf is integrated and the
+queue is clear. The local epic-ready notification reservation is idempotent:
+it may be surfaced once to the user, then an approved handoff agent may add the
+Confluence dossier under the epic and the project Jira Task List hierarchy.
+Jira Done, epic-to-develop merge, release promotion and production promotion
+remain human-only.
+
+## Provider-neutral model routing
+
+Use model-profile-<name> labels to choose the cheapest configured capable
+profile. Built-in example profiles are Codex luna, terra, sol, and
+Antigravity gemini-flash, gemini-pro. review-claude is an explicit,
+optional read-only Claude review route; it never replaces the primary builder.
