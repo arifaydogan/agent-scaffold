@@ -71,3 +71,24 @@ To verify the installation:
 - Check that `.agents/rules/global.md` exists and contains the instructions.
 - Ensure `.agents/skills/` contains the triggers for all skills.
 - Open Antigravity and check if it discovers the project scope rules.
+
+## Antigravity CLI 1.1+ and autonomous execution
+
+The installer creates lowercase `.agents/agents/<role>/agent.md` definitions
+with current Antigravity tool identifiers, a `/pace-task` workflow, and a
+structured execution-result schema. Use `agy agents` to verify discovery.
+
+For provider-neutral automation, configure `executor.providers.antigravity` and
+route an issue with `provider-antigravity` plus an optional
+`model-profile-low|medium|high|mechanical|ux` label. The runtime records the
+conversation id, duration, turn count, and token usage without persisting the
+task prompt in command telemetry.
+
+On Antigravity CLI 1.1.11 for Windows, print mode may not discover workspace
+custom agents even though the IDE does. Run
+`scripts/install-antigravity-agents.js` to install the same definitions into
+the official global agent directory, then verify all roles with `agy agents`.
+
+Do not use `--dangerously-skip-permissions` on a developer workstation. Apply
+the restricted profile with `scripts/configure-antigravity-permissions.js` so
+the main checkout remains read-only and writes are limited to the worktree root.

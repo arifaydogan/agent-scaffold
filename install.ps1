@@ -245,18 +245,34 @@ function Copy-AgentsAntigravity {
     $personasDest = Join-Path $dest "personas"
     New-Item -ItemType Directory -Path $agentsDest -Force | Out-Null
     New-Item -ItemType Directory -Path $personasDest -Force | Out-Null
-    
-    # Copy core agents
-    Copy-Item -Path (Join-Path $src "core\agents\*") -Destination $agentsDest -Recurse -Force
+
+    # Antigravity 1.1+ discovers lowercase agent.md files with provider-specific
+    # tool identifiers. Keep provider-neutral core AGENT.md files unchanged for
+    # the other adapters and install the Antigravity views explicitly.
+    $adapterAgentsPath = Join-Path $src "adapters\antigravity\agents"
+    foreach ($agent in Get-ChildItem -Path $adapterAgentsPath -Directory) {
+        if ($agent.Name -eq "cv-engineer" -and $PackChoice -ne "2") {
+            continue
+        }
+        $agentTarget = Join-Path $agentsDest $agent.Name
+        New-Item -ItemType Directory -Path $agentTarget -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $agent.FullName "agent.md") -Destination (Join-Path $agentTarget "agent.md") -Force
+
+        $rulesSource = if ($agent.Name -eq "cv-engineer") {
+            Join-Path $src "packs\pacebuild\agents\cv-engineer\rules.md"
+        } else {
+            Join-Path $src ("core\agents\{0}\rules.md" -f $agent.Name)
+        }
+        if (Test-Path -LiteralPath $rulesSource) {
+            Copy-Item -LiteralPath $rulesSource -Destination (Join-Path $agentTarget "rules.md") -Force
+        }
+    }
+
     Copy-Item -Path (Join-Path $src "core\personas\*") -Destination $personasDest -Recurse -Force
     Copy-Item -Path (Join-Path $src "AGENTS.md") -Destination (Join-Path $dest "AGENTS.md") -Force
     Copy-Item -Path (Join-Path $src "ORCHESTRATION.md") -Destination (Join-Path $dest "ORCHESTRATION.md") -Force
-    
-    # Copy PaceBuild agents and overrides
+
     if ($PackChoice -eq "2") {
-        $cvDest = Join-Path $agentsDest "cv-engineer"
-        New-Item -ItemType Directory -Path $cvDest -Force | Out-Null
-        Copy-Item -Path (Join-Path $src "packs\pacebuild\agents\cv-engineer\*") -Destination $cvDest -Recurse -Force
         Copy-Item -Path (Join-Path $src "packs\pacebuild\overrides\AGENTS.md") -Destination (Join-Path $dest "AGENTS.md") -Force
     }
 }
@@ -276,6 +292,13 @@ if ($AdapterChoice -eq "1" -or $AdapterChoice -eq "5") {
     Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\pacebuild-orchestrator\SKILL.md") -Destination (Join-Path $orchestratorSkill "SKILL.md") -Force
     Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\orchestration-gates.md") -Destination (Join-Path $agentsDir "rules\orchestration-gates.md") -Force
     Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\model-routing.md") -Destination (Join-Path $agentsDir "rules\model-routing.md") -Force
+    $workflowsDir = Join-Path $agentsDir "workflows"
+    $schemasDir = Join-Path $agentsDir "schemas"
+    New-Item -ItemType Directory -Path $workflowsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $schemasDir -Force | Out-Null
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\workflows\pace-task.md") -Destination (Join-Path $workflowsDir "pace-task.md") -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\execution-result.schema.json") -Destination (Join-Path $schemasDir "execution-result.schema.json") -Force
+    Copy-Item -Path (Join-Path $SourceDir "adapters\antigravity\permissions.example.json") -Destination (Join-Path $agentsDir "permissions.example.json") -Force
     Write-Host "Antigravity Adapter installed successfully." -ForegroundColor Green
 }
 

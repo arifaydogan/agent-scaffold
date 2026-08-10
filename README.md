@@ -22,7 +22,8 @@ worktrees, and Codex execution.
 - Eleven complete upstream skills copied with scripts, references, and assets.
 - Jira eligibility rules and human-only action boundaries.
 - SQLite run history and exclusive issue locks.
-- Worktree planning and Codex executor adapter.
+- Worktree planning with Codex and Antigravity CLI executor adapters.
+- Explicit Antigravity model profiles, structured results, and token telemetry.
 - Antigravity, Claude Code, GitHub Copilot, and Codex instruction adapters.
 - PaceBuild-specific CV, TimescaleDB, and demo reliability rules.
 
@@ -85,10 +86,20 @@ Copy-Item agent-scaffold.example.json agent-scaffold.json
 node bin/agentctl.js --config agent-scaffold.json doctor
 node bin/agentctl.js --config agent-scaffold.json plan PACE-123
 node bin/agentctl.js --config agent-scaffold.json run PACE-123
+node bin/agentctl.js --config agent-scaffold.json dispatch --limit 10 --concurrency 3
+node bin/agentctl.js --config agent-scaffold.json runs --limit 20
+node bin/agentctl.js --config agent-scaffold.json dashboard --demo
 ```
 
-`run` is dry-run by default. Pass `--execute` only after reviewing the generated
-route, worktree path, persona, and skill selection.
+`run` and `dispatch` are dry-run by default. Pass `--execute` only after reviewing
+the generated route, worktree path, persona, skill selection, and dispatch waves.
+Parallel dispatch is bounded by global and provider concurrency limits. Tasks with
+overlapping path scopes are serialized, and cross-service tasks run in an exclusive
+wave.
+
+`dashboard` starts a localhost-only, read-only Agent Operations Console. It shows
+task summaries, states, personas, skills, provider/model capacity, token counters,
+worktrees, and blockers without exposing prompts, Jira descriptions, or log bodies.
 
 Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`. Jira writes remain
 disabled until `jira.write_enabled = true` is set explicitly.

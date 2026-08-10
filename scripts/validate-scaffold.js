@@ -27,6 +27,55 @@ for (const role of manifest.core_agents) {
   if (!fs.existsSync(file)) errors.push(`Missing agent: ${file}`);
 }
 
+const antigravityTools = new Set([
+  "view_file",
+  "grep_search",
+  "list_dir",
+  "write_to_file",
+  "replace_file_content",
+  "multi_replace_file_content"
+]);
+for (const role of [...manifest.core_agents, "cv-engineer"]) {
+  const file = `adapters/antigravity/agents/${role}/agent.md`;
+  if (!fs.existsSync(file)) {
+    errors.push(`Missing Antigravity agent: ${file}`);
+    continue;
+  }
+  const content = fs.readFileSync(file, "utf8");
+  if (!content.startsWith("---")) errors.push(`Missing frontmatter: ${file}`);
+  for (const field of ["name:", "description:", "tools:"]) {
+    if (!content.includes(field)) errors.push(`Missing ${field} in ${file}`);
+  }
+  const toolLines = content.match(/^  - ([a-z0-9_-]+)$/gm) || [];
+  for (const line of toolLines) {
+    const tool = line.slice(4);
+    if (!antigravityTools.has(tool)) {
+      errors.push(`Unsupported Antigravity tool ${tool} in ${file}`);
+    }
+  }
+}
+
+for (const file of [
+  "adapters/antigravity/workflows/pace-task.md",
+  "adapters/antigravity/execution-result.schema.json",
+  "adapters/antigravity/permissions.example.json",
+  "scripts/configure-antigravity-permissions.js",
+  "scripts/install-antigravity-agents.js"
+]) {
+  if (!fs.existsSync(file)) errors.push(`Missing Antigravity runtime artifact: ${file}`);
+}
+
+for (const file of [
+  "lib/dashboard.js",
+  "ui/index.html",
+  "ui/dashboard.css",
+  "ui/dashboard.js"
+]) {
+  if (!fs.existsSync(file)) {
+    errors.push(`Missing Agent Operations Console artifact: ${file}`);
+  }
+}
+
 for (const file of manifest.personas) {
   if (!fs.existsSync(file)) {
     errors.push(`Missing persona: ${file}`);

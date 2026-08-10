@@ -1,0 +1,22 @@
+{
+  "toolPermission": "request-review",
+  "allowNonWorkspaceAccess": false,
+  "enableTerminalSandbox": true,
+  "permissions": {
+    "allow": [
+      "read_file({repoPath})",
+      "read_file({worktreeRoot})",
+      "write_file({worktreeRoot})"
+    ],
+    "deny": [
+      "write_file({repoPath})",
+      "write_file({scaffoldPath})",
+      "command(git push)",
+      "command(git merge)",
+      "command(git reset)",
+      "command(git clean)",
+      "command(Remove-Item)",
+      "command(del)"
+    ]
+  }
+}

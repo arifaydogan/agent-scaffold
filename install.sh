@@ -217,17 +217,32 @@ copy_agents_antigravity() {
   local dest="$2"
   mkdir -p "$dest/agents"
   mkdir -p "$dest/personas"
-  
-  # Copy core agents
-  cp -r "$src"/core/agents/* "$dest/agents/"
+
+  # Antigravity 1.1+ discovers lowercase agent.md files with provider-specific
+  # tool identifiers. Keep the provider-neutral core agents unchanged.
+  for agent_dir in "$src"/adapters/antigravity/agents/*; do
+    [ -d "$agent_dir" ] || continue
+    agent_name="$(basename "$agent_dir")"
+    if [ "$agent_name" = "cv-engineer" ] && [ "$PACK_CHOICE" != "2" ]; then
+      continue
+    fi
+    mkdir -p "$dest/agents/$agent_name"
+    cp "$agent_dir/agent.md" "$dest/agents/$agent_name/agent.md"
+    if [ "$agent_name" = "cv-engineer" ]; then
+      rules_source="$src/packs/pacebuild/agents/cv-engineer/rules.md"
+    else
+      rules_source="$src/core/agents/$agent_name/rules.md"
+    fi
+    if [ -f "$rules_source" ]; then
+      cp "$rules_source" "$dest/agents/$agent_name/rules.md"
+    fi
+  done
+
   cp -r "$src"/core/personas/* "$dest/personas/"
   cp "$src"/AGENTS.md "$dest/AGENTS.md"
   cp "$src"/ORCHESTRATION.md "$dest/ORCHESTRATION.md"
-  
-  # Copy PaceBuild agents and AGENTS override
+
   if [ "$PACK_CHOICE" = "2" ]; then
-    mkdir -p "$dest/agents/cv-engineer"
-    cp -r "$src"/packs/pacebuild/agents/cv-engineer/* "$dest/agents/cv-engineer/"
     cp "$src"/packs/pacebuild/overrides/AGENTS.md "$dest/AGENTS.md"
   fi
 }
@@ -248,6 +263,13 @@ if [ "$ADAPTER_CHOICE" = "1" ] || [ "$ADAPTER_CHOICE" = "5" ]; then
     "$TARGET_DIR/.agents/rules/orchestration-gates.md"
   cp "$SOURCE_DIR/adapters/antigravity/model-routing.md" \
     "$TARGET_DIR/.agents/rules/model-routing.md"
+  mkdir -p "$TARGET_DIR/.agents/workflows" "$TARGET_DIR/.agents/schemas"
+  cp "$SOURCE_DIR/adapters/antigravity/workflows/pace-task.md" \
+    "$TARGET_DIR/.agents/workflows/pace-task.md"
+  cp "$SOURCE_DIR/adapters/antigravity/execution-result.schema.json" \
+    "$TARGET_DIR/.agents/schemas/execution-result.schema.json"
+  cp "$SOURCE_DIR/adapters/antigravity/permissions.example.json" \
+    "$TARGET_DIR/.agents/permissions.example.json"
   echo "Antigravity Adapter installed successfully."
 fi
 

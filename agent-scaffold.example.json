@@ -4,10 +4,57 @@
     "repoPath": "."
   },
   "policy": {
-    "allowedProjects": ["PACE"],
-    "requiredLabels": ["agent-ready"],
-    "humanOnlyStatuses": ["Tamam", "Done"],
-    "maxChangedFiles": 30
+    "allowedProjects": [
+      "PACE"
+    ],
+    "requiredLabels": [
+      "agent-ready"
+    ],
+    "humanOnlyStatuses": [
+      "Tamam",
+      "Done"
+    ],
+    "maxChangedFiles": 30,
+    "maxConcurrency": 3,
+    "providerConcurrency": {
+      "antigravity": 2,
+      "codex": 1
+    },
+    "pathScopes": {
+      "architect": [
+        "docs/**",
+        "*.md"
+      ],
+      "backend-engineer": [
+        "backend/**"
+      ],
+      "frontend-engineer": [
+        "frontend/**"
+      ],
+      "devops-engineer": [
+        ".github/**",
+        "infra/**",
+        "scripts/**",
+        "docker-compose*.yml"
+      ],
+      "qa-engineer": [
+        "backend/**",
+        "frontend/**",
+        "cv-engine/**",
+        "tests/**"
+      ],
+      "pm-analyst": [
+        "docs/**",
+        "*.md"
+      ],
+      "security-engineer": [],
+      "data-engineer": [
+        "backend/**"
+      ],
+      "cv-engineer": [
+        "cv-engine/**"
+      ]
+    }
   },
   "worktree": {
     "root": "../agent-worktrees"
@@ -19,9 +66,53 @@
     "writeEnabled": false
   },
   "executor": {
-    "codex": {
-      "command": ["codex", "exec", "-C", "{worktree}", "{prompt}"],
-      "timeoutSeconds": 3600
+    "defaultProvider": "codex",
+    "providers": {
+      "codex": {
+        "command": [
+          "codex",
+          "exec",
+          "-C",
+          "{worktree}",
+          "{prompt}"
+        ],
+        "timeoutSeconds": 3600
+      },
+      "antigravity": {
+        "command": [
+          "agy",
+          "--agent",
+          "{agent}",
+          "--model",
+          "{model}",
+          "--mode",
+          "{mode}",
+          "--sandbox",
+          "--output-format",
+          "stream-json",
+          "--json-schema",
+          "{resultSchema}",
+          "--log-file",
+          "{logFile}",
+          "--print-timeout",
+          "60m",
+          "-p",
+          "{prompt}"
+        ],
+        "cwd": "{worktree}",
+        "mode": "accept-edits",
+        "defaultModel": "claude-sonnet-4-6",
+        "defaultEffort": "medium",
+        "modelProfiles": {
+          "low": "gemini-3.6-flash-low",
+          "medium": "claude-sonnet-4-6",
+          "high": "claude-opus-4-6-thinking",
+          "mechanical": "gpt-oss-120b-medium",
+          "ux": "gemini-3.1-pro-high"
+        },
+        "resultSchema": "adapters/antigravity/execution-result.schema.json",
+        "timeoutSeconds": 3600
+      }
     }
   }
 }

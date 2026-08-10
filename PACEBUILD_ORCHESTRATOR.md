@@ -1,4 +1,4 @@
-# PaceBuild Orchestrator
+?# PaceBuild Orchestrator
 
 This is the provider-neutral execution contract for PaceBuild Jira work.
 Adapters may discover or invoke it differently, but they must not duplicate or
@@ -80,6 +80,23 @@ Then perform a separate child-issue query using Jira MCP:
 - if the issue response reports subtasks, verify the separate query returns
   the same keys;
 - if child retrieval fails, Phase 0 is blocked and cannot be marked complete.
+
+### Jira freshness gate and local index
+
+For any question about task progress, current status, what was done, or overall
+project state:
+
+- check the repository's canonical Jira/project-memory index first;
+- perform only the lightest possible Jira MCP freshness check by comparing the
+  total / Done / In Review / other relevant status counts against that index;
+- if the counts match, treat the index as the source of truth and answer from
+  it only; do not re-fetch issue status details from Jira MCP;
+- if the counts do not match, mark the index stale, inspect only the missing or
+  changed items with Jira MCP, update the index, and record the drift;
+- use live Jira MCP reads for routine status answers only when the index is
+  missing, stale, or the user explicitly asks for live Jira evidence;
+- avoid spending extra MCP calls or token budget on Jira when the index is
+  already confirmed fresh.
 
 Run `git remote get-url origin` and normalize the current repository.
 
