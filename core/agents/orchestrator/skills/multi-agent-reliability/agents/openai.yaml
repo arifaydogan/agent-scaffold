@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi Agent Reliability"
+  short_description: "Coordinate multi-agent state boundaries, leases, and telemetry."
+  default_prompt: "Apply $multi-agent-reliability to enforce topology boundaries, heartbeats, and idempotency."

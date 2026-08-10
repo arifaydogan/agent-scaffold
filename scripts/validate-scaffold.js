@@ -1,7 +1,13 @@
 import fs from "node:fs";
+import { validateUpstreamSources } from "../lib/upstream-sources.js";
 
 const manifest = JSON.parse(fs.readFileSync("scaffold-manifest.json", "utf8"));
 const errors = [];
+
+if (!manifest.upstream_registry || !fs.existsSync(manifest.upstream_registry)) {
+  errors.push(`Missing or invalid upstream_registry in manifest: ${manifest.upstream_registry}`);
+}
+errors.push(...validateUpstreamSources());
 
 for (const file of manifest.orchestration_contracts ?? []) {
   if (!fs.existsSync(file)) errors.push(`Missing orchestration contract: ${file}`);
