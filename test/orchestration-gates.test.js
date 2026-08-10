@@ -73,7 +73,7 @@ test("Antigravity receives adapter-specific model routing", () => {
     "utf8"
   );
 
-  assert.match(routing, /lowest-cost\ncapable option/);
+  assert.match(routing, /lowest-cost\r?\ncapable option/);
   assert.match(routing, /fresh read-only agent/);
 });
 

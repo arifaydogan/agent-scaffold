@@ -1,0 +1,43 @@
+name: Scaffold CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - release
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Scaffold quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run checks
+        run: npm run check
+
+  validate-promotion:
+    name: Validate promotion path
+    runs-on: ubuntu-latest
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_REF: ${{ github.head_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate promotion path
+        run: node scripts/validate-promotion-path.js
