@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "precedence": [
+    "canonical_policy",
+    "local_override",
+    "upstream_capability",
+    "persona_voice"
+  ],
+  "sources": [
+    {
+      "id": "agency-agents",
+      "repo": "https://github.com/msitarzewski/agency-agents",
+      "commit": "ebe9c99acb5c96f9468de368d8bead775387d1a7",
+      "license": "MIT",
+      "copyright": "2025 AgentLand Contributors"
+    },
+    {
+      "id": "ponytail",
+      "repo": "https://github.com/DietrichGebert/ponytail",
+      "commit": "2ed6c52c9d7e5e56942508591085fd45dea277d3",
+      "license": "MIT",
+      "copyright": "2026 DietrichGebert"
+    },
+    {
+      "id": "agent-skills",
+      "repo": "https://github.com/addyosmani/agent-skills",
+      "commit": "7676817c12a1317454ae3898a0c5c1eacf5dd3d5",
+      "license": "MIT",
+      "copyright": "2025 Addy Osmani"
+    },
+    {
+      "id": "prime-agent",
+      "repo": "https://github.com/PrimeIntellect-ai/prime-agent",
+      "commit": "d698b4b7029d8445fd9e3be33603b7b31418481b",
+      "license": "MIT",
+      "copyright": "2025 Mario Zechner and 2026 Prime Intellect"
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "minimal-change",
+      "skill_path": "core/agents/orchestrator/skills/minimal-change/SKILL.md",
+      "source_ids": [
+        "ponytail"
+      ],
+      "adaptation": "Adapted minimal-change execution guidelines for strict scope containment and test preservation.",
+      "vendored_code": false
+    },
+    {
+      "id": "multi-agent-reliability",
+      "skill_path": "core/agents/orchestrator/skills/multi-agent-reliability/SKILL.md",
+      "reference_paths": [
+        "core/agents/orchestrator/skills/multi-agent-reliability/references/patterns.md"
+      ],
+      "source_ids": [
+        "agency-agents",
+        "prime-agent"
+      ],
+      "adaptation": "Adapted multi-agent coordination patterns for one-writer boundaries, heartbeats, and telemetry.",
+      "vendored_code": false
+    },
+    {
+      "id": "bounded-autonomy",
+      "skill_path": "core/agents/orchestrator/skills/bounded-autonomy/SKILL.md",
+      "reference_paths": [
+        "core/agents/orchestrator/skills/bounded-autonomy/references/autonomy-contract.md"
+      ],
+      "source_ids": [
+        "agent-skills",
+        "prime-agent"
+      ],
+      "adaptation": "Adapted bounded autonomy state machine and budget leases with human gate retention.",
+      "vendored_code": false
+    },
+    {
+      "id": "upstream-capability-selection",
+      "skill_path": "core/agents/orchestrator/skills/upstream-capability-selection/SKILL.md",
+      "reference_paths": [
+        "core/agents/orchestrator/skills/upstream-capability-selection/references/capability-map.md"
+      ],
+      "source_ids": [
+        "agency-agents",
+        "agent-skills"
+      ],
+      "adaptation": "Adapted upstream capability resolution using sources.lock.json provenance and precedence rules.",
+      "vendored_code": false
+    }
+  ]
+}

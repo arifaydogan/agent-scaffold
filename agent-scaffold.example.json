@@ -114,5 +114,13 @@
         "timeoutSeconds": 3600
       }
     }
+  },
+  "supervisor": {
+    "executeEnabled": false,
+    "pollIntervalSeconds": 30,
+    "heartbeatSeconds": 10,
+    "staleAfterSeconds": 90,
+    "maxConsecutiveFailures": 3,
+    "issueLimit": 10
   }
 }

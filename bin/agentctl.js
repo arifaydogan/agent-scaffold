@@ -2,7 +2,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { loadSettings } from "../lib/config.js";
@@ -10,11 +9,12 @@ import { JiraClient } from "../lib/jira.js";
 import { configuredExecutors } from "../lib/executor.js";
 import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
-import { buildDispatchWaves, executeDispatchWaves } from "../lib/scheduler.js";
+import { dispatchOnce } from "../lib/dispatcher.js";
+import { runSupervisor } from "../lib/supervisor.js";
 
 function usage() {
   console.error(
-    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock [args]"
+    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop [args]"
   );
 }
 
@@ -42,22 +42,6 @@ function numericArgument(args, name, fallback) {
     throw new Error(`${name} must be a positive integer`);
   }
   return value;
-}
-
-function launchIssue(configPath, issueKey) {
-  return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [fileURLToPath(import.meta.url), "--config", configPath, "run", issueKey, "--execute"],
-      { stdio: "inherit" }
-    );
-    child.once("error", (error) =>
-      resolve({ exitCode: 1, error: error.message })
-    );
-    child.once("close", (code, signal) =>
-      resolve({ exitCode: code ?? 1, signal: signal || null })
-    );
-  });
 }
 
 async function main() {
@@ -166,6 +150,41 @@ async function main() {
   }
 
   /**
+   * supervisor-status: show persisted supervisor state. Local-only; no Jira.
+   */
+  if (parsed.command === "supervisor-status") {
+    const store = getStore(settings);
+    const supervisors = store.listSupervisors();
+    const events = store.listSupervisorEvents(20);
+    console.log(JSON.stringify({ supervisors, events }, null, 2));
+    return 0;
+  }
+
+  /**
+   * supervisor-stop: request graceful stop. Local-only; no Jira.
+   */
+  if (parsed.command === "supervisor-stop") {
+    const supervisorId = settings.projectKey;
+    const store = getStore(settings);
+    const existing = store.getSupervisor(supervisorId);
+    if (!existing) {
+      console.error(`No supervisor record found for id "${supervisorId}".`);
+      return 1;
+    }
+    if (existing.status !== "running") {
+      console.log(
+        JSON.stringify({ supervisorId, alreadyStopped: true, status: existing.status }, null, 2)
+      );
+      return 0;
+    }
+    store.requestSupervisorStop(supervisorId);
+    console.log(
+      JSON.stringify({ supervisorId, stopRequested: true }, null, 2)
+    );
+    return 0;
+  }
+
+  /**
    * local-run: execute a pre-resolved issue packet from a JSON file or stdin.
    * This path never requires Jira credentials.
    *
@@ -193,6 +212,76 @@ async function main() {
     return result.exitCode;
   }
 
+  /**
+   * supervise: start the resident supervisor loop.
+   *
+   * Options:
+   *   --limit N        max issues to poll per cycle (default: supervisor.issueLimit)
+   *   --concurrency N  max concurrent dispatches (default: policy.maxConcurrency)
+   *   --once           run exactly one cycle and stop
+   *   --max-cycles N   stop after N cycles
+   *   --execute        enable execute mode (requires supervisor.executeEnabled = true in config)
+   *
+   * Default is plan-only (dry-run) mode. SIGINT/SIGTERM requests a graceful stop.
+   * Merge, Done transitions, and external writes remain human-only.
+   */
+  if (parsed.command === "supervise") {
+    const execute = parsed.args.includes("--execute");
+    const once = parsed.args.includes("--once");
+    const maxCycles = numericArgument(parsed.args, "--max-cycles", once ? 1 : undefined);
+    const limit = numericArgument(parsed.args, "--limit", undefined);
+    const maxConcurrency = numericArgument(parsed.args, "--concurrency", undefined);
+
+    // --execute is fail-closed: if config doesn't have executeEnabled=true, supervisor
+    // will throw before any Jira polling or dispatch. This check is enforced inside
+    // runSupervisor; we surface it early for a clear CLI error message.
+    if (execute && !settings.data.supervisor.executeEnabled) {
+      console.error(
+        "Error: --execute requires supervisor.executeEnabled = true in config. " +
+        "Set it explicitly to opt in."
+      );
+      return 1;
+    }
+
+    const ac = new AbortController();
+    let gracefulStopRequested = false;
+
+    const gracefulStop = () => {
+      if (gracefulStopRequested) return;
+      gracefulStopRequested = true;
+      console.error("Graceful stop requested. Waiting for in-flight cycle...");
+      // Write stop request to DB so supervisor loop detects it even if this
+      // process exits before the current cycle finishes.
+      try {
+        getStore(settings).requestSupervisorStop(settings.projectKey);
+      } catch {
+        // Non-fatal: AC signal is the primary stop mechanism.
+      }
+      ac.abort();
+    };
+
+    process.once("SIGINT", gracefulStop);
+    process.once("SIGTERM", gracefulStop);
+
+    try {
+      await runSupervisor(settings, {
+        execute,
+        once,
+        ...(maxCycles !== undefined ? { maxCycles } : {}),
+        ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+        ...(limit !== undefined ? { issueLimit: limit } : {}),
+        signal: ac.signal
+      });
+    } catch (err) {
+      console.error(`Supervisor terminated with error: ${err.message}`);
+      return 1;
+    } finally {
+      process.off("SIGINT", gracefulStop);
+      process.off("SIGTERM", gracefulStop);
+    }
+    return 0;
+  }
+
   // ── Jira-dependent commands ───────────────────────────────────────────────
   // JiraClient is instantiated here, AFTER all local-only commands have been
   // handled. Commands above this point do not require Jira credentials.
@@ -215,38 +304,34 @@ async function main() {
       configuredMaximum
     );
     const maxConcurrency = Math.min(requestedConcurrency, configuredMaximum);
-    const providerConcurrency = settings.data.policy.providerConcurrency || {};
-    const label = settings.data.policy.requiredLabels[0];
-    const issues = await jira.poll(settings.projectKey, label, limit);
-    const lockedIssues = new Set(
-      getStore(settings).listLocks().map((lock) => lock.issue_key)
-    );
-    const plans = issues.map((issue) => {
-      const plan = issuePlan(settings, issue);
-      if (!lockedIssues.has(issue.key)) return plan;
-      return {
-        ...plan,
-        eligible: false,
-        eligibilityReasons: [...plan.eligibilityReasons, "Issue is already locked"]
-      };
-    });
-    const waves = buildDispatchWaves(plans, {
+    const execute = parsed.args.includes("--execute");
+
+    const result = await dispatchOnce(settings, {
+      execute,
+      limit,
       maxConcurrency,
-      providerConcurrency
+      jira
     });
-    if (!parsed.args.includes("--execute")) {
-      console.log(JSON.stringify({ mode: "dry-run", maxConcurrency, waves }, null, 2));
+
+    if (!execute) {
+      console.log(
+        JSON.stringify(
+          { mode: "dry-run", maxConcurrency: result.maxConcurrency, waves: result.waves },
+          null,
+          2
+        )
+      );
       return 0;
     }
-    const results = await executeDispatchWaves(waves, (plan) =>
-      launchIssue(settings.source, plan.issue)
+
+    console.log(
+      JSON.stringify(
+        { mode: "execute", maxConcurrency: result.maxConcurrency, results: result.results },
+        null,
+        2
+      )
     );
-    console.log(JSON.stringify({ mode: "execute", maxConcurrency, results }, null, 2));
-    return results.some((wave) =>
-      wave.executions.some((execution) => execution.exitCode !== 0)
-    )
-      ? 1
-      : 0;
+    return result.failed > 0 ? 1 : 0;
   }
 
   const issueKey = parsed.args[0];

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Upstream Capability Selection"
+  short_description: "Select upstream capabilities using provenance and precedence."
+  default_prompt: "Apply $upstream-capability-selection to resolve external capabilities via sources.lock.json."

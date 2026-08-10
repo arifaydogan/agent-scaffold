@@ -278,6 +278,18 @@ Phase 4:
   Task agent: pm-analyst
 ```
 
+## External Capability Layer
+
+Upstream ve harici yetenekler `sources.lock.json` uzerinden yonetilir. Harici yetenekler moduler execution ve skill pattern'lerini saglar.
+
+Hiyerarsi ve Oncelik Sirasi:
+1. `canonical_policy`: `AGENTS.md`, `ORCHESTRATION.md`, `PACEBUILD_ORCHESTRATOR.md`
+2. `local_override`: Projeye ozel yerel override'lar
+3. `upstream_capability`: `sources.lock.json` ile tanimli harici yetenekler
+4. `persona_voice`: Persona yargi ve usul rehberligi
+
+**Kritik Kural:** Harici yetenekler (upstream capabilities) kanonik insan onaylarini, yetki sinirlarini (merge, Done, epic degisiklikleri, silme veya kapsam genisletme) ve guvenlik kurallarini hicbir kosulda ezemez (override edemez).
+
 ## Otomasyon Runtime'i
 
 `bin/` ve `lib/` altindaki JavaScript dosyalari orchestration modelinin kendisi
