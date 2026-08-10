@@ -177,8 +177,14 @@ MVP'sidir. Su isleri otomatiklestirmek icin eklendi:
 - Ayni taskin iki kez alinmasini engelleyen SQLite lock
 - Persona ve skill route onerisi
 - Git worktree plani
-- Codex CLI calistirma
+- Codex ve Antigravity CLI calistirma
+- Antigravity model profili, yapilandirilmis sonuc ve token telemetrisi
 - Run durumunu kaydetme
+- Provider bazli eszamanlilik limiti olan paralel dispatch dalgalari
+- Cakisan dosya sahiplik alanlarini ayni anda calistirmama
+- `agentctl runs` ile run ve issue lock takibi
+- `agentctl dashboard` ile local, salt-okunur Agent Operations Console
+- Task, persona, skill, model, token, worktree ve blocker gorunurlugu
 
 Bu runtime olmadan da orchestration modeli kullanilabilir. Detayli kullanim:
 [docs/KULLANIM_KILAVUZU.tr.md](docs/KULLANIM_KILAVUZU.tr.md)

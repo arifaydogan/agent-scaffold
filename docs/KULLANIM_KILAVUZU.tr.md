@@ -311,6 +311,65 @@ Gercek execute:
 node bin/agentctl.js --config agent-scaffold.json run PACE-123 --execute
 ```
 
+Paralel dispatch planini Jira'ya veya repoya yazmadan gor:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json dispatch --limit 10 --concurrency 3
+```
+
+Plani calistir:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json dispatch --limit 10 --concurrency 3 --execute
+```
+
+Dispatcher `policy.maxConcurrency` degerini asamaz. Ayni provider icin
+`policy.providerConcurrency` limiti uygulanir. Ayni dosya sahiplik alanina
+ornegin `frontend/**` yazacak iki task ayni dalgada calistirilmaz. Cross-service
+tasklar tek basina bir dalgaya alinir.
+
+Run ve lock durumlarini izle:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json runs --limit 20
+node bin/agentctl.js --config agent-scaffold.json report RUN_ID
+```
+
+Bir process yarida kesildiyse veya insan incelemesi sonrasinda ayni issue'nun
+yeniden alinmasi gerekiyorsa lock acikca serbest birakilir:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json unlock RUN_ID
+```
+
+`dispatch` varsayilan olarak dry-run'dir. Gercek worktree ve executor cagrisini
+yalnizca `--execute` baslatir. Jira yazmalari ayri bir policy gate'idir.
+
+### Agent Operations Console
+
+Gercek runtime verisini localhost uzerinde salt-okunur izle:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json dashboard
+```
+
+Henuz run yoksa arayuzun aktif, review ve blocked durumlarini ornek veriyle gor:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json dashboard --demo
+```
+
+Varsayilan adres `http://127.0.0.1:4317`'dir. Port degistirilebilir:
+
+```powershell
+node bin/agentctl.js --config agent-scaffold.json dashboard --port 4417
+```
+
+Console yalnizca localhost'a bind olur ve sadece GET/HEAD kabul eder. Prompt,
+Jira aciklamasi, token degeri veya log govdesi API'ye cikmaz. Ekran task ozeti,
+persona, skill, provider/model, state, sure, token sayaci, worktree ve blocker
+metadata'sini 2.5 saniyede bir yeniler.
+
 ### Runtime'in bugunku siniri
 
 Runtime su anda orchestration prompt paketini tam olarak faz faz calistirmiyor.
