@@ -91,6 +91,7 @@ function fakespawnRuntime(opts = {}) {
 
   function spawn(_cmd, _args, _opts) {
     const proc = new EventEmitter();
+    proc.pid = 4242;
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
     proc.kill = () => {};
@@ -157,6 +158,7 @@ test("lifecycle: queued is persisted before the provider process starts", async 
 
       // Return a process that immediately exits successfully with a valid JSON line.
       const proc = new EventEmitter();
+      proc.pid = 4242;
       proc.stdout = new EventEmitter();
       proc.stderr = new EventEmitter();
       proc.kill = () => {};
@@ -248,6 +250,9 @@ test("lifecycle: streaming events progress through queued→started→progress",
     states.indexOf("queued") < states.indexOf("started"),
     "queued must precede started"
   );
+  const startedEvent = run.events.find((e) => e.state === "started");
+  assert.ok(startedEvent, "started event must be present");
+  assert.equal(startedEvent.payload.pid, 4242, "started payload pid must be 4242");
   // model_selected (if present) must come after started
   if (states.includes("model_selected")) {
     assert.ok(
@@ -449,9 +454,9 @@ test("dashboard: queued/started/model_selected/progress are classified as active
   });
   store.acquireLock("PACE-354", runId);
   store.transition(runId, "queued", { provider: "antigravity", model: "claude-sonnet-4-6" });
-  store.transition(runId, "started", { provider: "antigravity", model: "claude-sonnet-4-6" });
-  store.transition(runId, "model_selected", { provider: "antigravity", model: "claude-sonnet-4-6" });
-  store.transition(runId, "progress", { seq: 1, text: "Analyzing code", provider: "antigravity" });
+  store.transition(runId, "started", { provider: "antigravity", model: "claude-sonnet-4-6", pid: 4242 });
+  store.transition(runId, "model_selected", { provider: "antigravity", model: "claude-sonnet-4-6", pid: 4242 });
+  store.transition(runId, "progress", { seq: 1, text: "Analyzing code", provider: "antigravity", pid: 4242 });
 
   const settings = {
     source: path.join(dir, "agent-scaffold.json"),
@@ -464,6 +469,9 @@ test("dashboard: queued/started/model_selected/progress are classified as active
   assert.equal(snapshot.runs.length, 1);
   const run = snapshot.runs[0];
   assert.equal(run.stateKind, "active", `progress state must be active, got: ${run.stateKind}`);
+  assert.equal(run.workerStatus, "running");
+  assert.equal(run.workerPid, 4242);
+  assert.equal(snapshot.capacity.active, 1);
   assert.equal(run.taskAgent, "backend-engineer", "taskAgent must be set from plan");
   assert.equal(run.persona, "startup-cto", "persona must be the orchestration role");
   // provider and model must be visible (no secrets)
@@ -526,6 +534,7 @@ test("timeout: spawnProviderAsync transitions to failed and releases the lock", 
   const hangingRuntime = {
     spawn(_cmd, _args, _opts) {
       const proc = new EventEmitter();
+      proc.pid = 4242;
       proc.stdout = new EventEmitter();
       proc.stderr = new EventEmitter();
       proc.kill = () => { proc.emit("close", null); };
@@ -673,6 +682,7 @@ test("spawn error: lock is released when child emits an error event", async () =
   const errorRuntime = {
     spawn(_cmd, _args, _opts) {
       const proc = new EventEmitter();
+      proc.pid = 4242;
       proc.stdout = new EventEmitter();
       proc.stderr = new EventEmitter();
       proc.kill = () => {};

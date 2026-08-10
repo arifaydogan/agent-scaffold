@@ -18,6 +18,9 @@ function settings(directory) {
       policy: {
         maxConcurrency: 3,
         providerConcurrency: { antigravity: 2, codex: 1 }
+      },
+      supervisor: {
+        staleAfterSeconds: 30
       }
     }
   };
@@ -41,6 +44,18 @@ test("dashboard snapshot exposes operational metadata without prompts", () => {
     description: "secret prompt content must not leave the store"
   });
   store.acquireLock("PACE-12", runId);
+  store.transition(runId, "queued", {
+    provider: "antigravity",
+    model: "claude-sonnet-4-6"
+  });
+
+  const queuedSnapshot = buildDashboardSnapshot(settings(directory), {
+    store,
+    now: "2026-08-09T16:00:00.000Z"
+  });
+  assert.equal(queuedSnapshot.capacity.active, 0);
+  assert.equal(queuedSnapshot.capacity.queued, 1);
+
   store.transition(runId, "executing", {
     provider: "antigravity",
     model: "claude-sonnet-4-6"
@@ -52,6 +67,7 @@ test("dashboard snapshot exposes operational metadata without prompts", () => {
   });
 
   assert.equal(snapshot.totals.active, 1);
+  assert.equal(snapshot.capacity.active, 1);
   assert.equal(snapshot.capacity.providers[0].active, 1);
   assert.equal(snapshot.runs[0].persona, "frontend-engineer");
   assert.deepEqual(snapshot.runs[0].skills, ["component-design"]);

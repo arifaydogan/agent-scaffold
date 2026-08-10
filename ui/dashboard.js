@@ -23,7 +23,14 @@ const elements = {
   metricBlocked: document.querySelector("#metric-blocked"),
   metricTokens: document.querySelector("#metric-tokens"),
   metricCapacity: document.querySelector("#metric-capacity"),
-  search: document.querySelector("#run-search")
+  search: document.querySelector("#run-search"),
+  supervisorCard: document.querySelector("#supervisor-card"),
+  supervisorDot: document.querySelector("#supervisor-dot"),
+  supervisorStatusText: document.querySelector("#supervisor-status-text"),
+  supervisorPid: document.querySelector("#supervisor-pid"),
+  supervisorMode: document.querySelector("#supervisor-mode"),
+  supervisorCycles: document.querySelector("#supervisor-cycles"),
+  supervisorHeartbeat: document.querySelector("#supervisor-heartbeat")
 };
 
 const STATUS_LABELS = {
@@ -54,6 +61,19 @@ const PERSONA_INITIALS = {
   architect: "AR",
   "pm-analyst": "PM"
 };
+
+function getWorkerInfo(run) {
+  return { status: run.workerStatus || "finished", pid: run.workerPid };
+}
+
+function formatWorkerLabel(run) {
+  const { status, pid } = getWorkerInfo(run);
+  if (status === "queued") return "Kuyrukta";
+  if (status === "running") {
+    return pid ? `Çalışıyor · PID ${pid}` : "Çalışıyor";
+  }
+  return "Tamamlandı";
+}
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -125,7 +145,13 @@ function runCard(run) {
   card.setAttribute("aria-label", `${run.issue}: ${run.summary}`);
 
   const topline = element("div", "card-topline");
-  topline.append(element("span", "issue-key", run.issue), statePill(run));
+  const leftGroup = element("div", "topline-left");
+  const { status: workerStatus } = getWorkerInfo(run);
+  leftGroup.append(
+    element("span", "issue-key", run.issue),
+    element("span", `worker-badge worker-${workerStatus}`, formatWorkerLabel(run))
+  );
+  topline.append(leftGroup, statePill(run));
   card.append(topline);
 
   // Show taskAgent (executor role) as the primary avatar; persona is the orchestration role.
@@ -206,7 +232,8 @@ function providerItem(provider) {
   const label = element("div", "capacity-label");
   const name = element("span", "provider-name");
   name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name));
-  label.append(name, element("span", "", `${provider.active} / ${provider.limit}`));
+  const queuedText = provider.queued ? ` (${provider.queued} kuyrukta)` : "";
+  label.append(name, element("span", "", `${provider.active} / ${provider.limit}${queuedText}`));
   const track = element("div", "capacity-track");
   const fill = element("div", "capacity-fill");
   fill.style.width = `${Math.min(100, (provider.active / Math.max(1, provider.limit)) * 100)}%`;
@@ -217,19 +244,84 @@ function providerItem(provider) {
 
 function renderCapacity() {
   const { capacity } = state.snapshot;
-  elements.capacityTotal.textContent = `${capacity.active} / ${capacity.total} aktif`;
+  const queuedText = capacity.queued ? ` (${capacity.queued} kuyrukta)` : "";
+  elements.capacityTotal.textContent = `${capacity.active} / ${capacity.total}${queuedText}`;
   elements.providers.replaceChildren(...capacity.providers.map(providerItem));
 }
 
+function renderSupervisor() {
+  const snapshot = state.snapshot;
+  if (!snapshot) return;
+
+  const supervisor = snapshot.supervisor || (snapshot.mode === "demo" ? {
+    status: "running",
+    pid: 1420,
+    mode: "autonomous",
+    startedAt: snapshot.generatedAt,
+    lastHeartbeatAt: snapshot.generatedAt,
+    cycleCount: 142,
+    lastError: null,
+    lastResult: null
+  } : null);
+
+  if (!supervisor || !elements.supervisorCard) {
+    if (elements.supervisorCard) elements.supervisorCard.hidden = true;
+    return;
+  }
+
+  elements.supervisorCard.hidden = false;
+
+  let status = supervisor.status || "stopped";
+
+  const STATUS_MAP = {
+    running: { label: "Çalışıyor", class: "is-running" },
+    stale: { label: "Stale", class: "is-stale" },
+    stopped: { label: "Durduruldu", class: "is-stopped" },
+    failed: { label: "Başarısız", class: "is-failed" }
+  };
+
+  const statusInfo = STATUS_MAP[status] || { label: status, class: "is-stopped" };
+
+  elements.supervisorDot.className = `supervisor-dot ${statusInfo.class}`;
+  elements.supervisorStatusText.textContent = statusInfo.label;
+  elements.supervisorPid.textContent = supervisor.pid ?? "—";
+  elements.supervisorMode.textContent = supervisor.mode || "—";
+  elements.supervisorCycles.textContent = supervisor.cycleCount ?? 0;
+
+  if (supervisor.lastHeartbeatAt) {
+    const nowMs = snapshot.generatedAt ? new Date(snapshot.generatedAt).getTime() : Date.now();
+    const hbMs = new Date(supervisor.lastHeartbeatAt).getTime();
+    const diffSec = Math.max(0, Math.floor((nowMs - hbMs) / 1000));
+    elements.supervisorHeartbeat.textContent = diffSec < 60 ? `${diffSec}sn önce` : formatTime(supervisor.lastHeartbeatAt);
+  } else {
+    elements.supervisorHeartbeat.textContent = "—";
+  }
+}
+
 function renderActivity() {
-  const rows = state.snapshot.activity.slice(0, 12).map((event) => {
+  const rows = (state.snapshot.activity || []).slice(0, 12).map((event) => {
     const row = document.createElement("tr");
     const time = element("td", "", formatTime(event.createdAt, true));
-    const issue = element("td", "table-issue", event.issue);
-    const action = element("td", "", STATUS_LABELS[event.state] || event.state);
-    const status = element("td");
-    status.append(element("span", `event-state ${event.stateKind}`, event.state));
-    row.append(time, issue, action, status);
+
+    const isSupervisor = event.category === "supervisor" || !event.issue;
+    const issueText = isSupervisor ? "Supervisor" : (event.issue || "—");
+    const issueCell = element("td", "table-issue", issueText);
+
+    const rawState = event.status || event.state || event.event || event.type || "—";
+    const actionText = STATUS_LABELS[rawState] || rawState;
+    const actionCell = element("td", "", actionText);
+
+    const kindClass = event.stateKind || (
+      ["active", "running", "start", "reclaim"].includes(rawState) ? "active" :
+      ["verifying", "review"].includes(rawState) ? "review" :
+      ["blocked", "failed", "failed-retryable", "failed-scope", "failure", "stale"].includes(rawState) ? "blocked" :
+      "idle"
+    );
+
+    const statusCell = element("td");
+    statusCell.append(element("span", `event-state ${kindClass}`, rawState));
+
+    row.append(time, issueCell, actionCell, statusCell);
     return row;
   });
   if (!rows.length) {
@@ -244,11 +336,12 @@ function renderActivity() {
 
 function renderSummary() {
   const { totals, capacity, project, mode, generatedAt } = state.snapshot;
-  elements.metricActive.textContent = totals.active;
+  elements.metricActive.textContent = capacity.active;
   elements.metricReview.textContent = totals.review;
   elements.metricBlocked.textContent = totals.blocked;
   elements.metricTokens.textContent = formatNumber(totals.tokens);
-  elements.metricCapacity.textContent = `${capacity.active}/${capacity.total} worker slot kullanımda`;
+  const queuedText = capacity.queued ? ` (${capacity.queued} kuyrukta)` : "";
+  elements.metricCapacity.textContent = `${capacity.active}/${capacity.total} worker slot kullanımda${queuedText}`;
   elements.project.textContent = project;
   elements.demo.hidden = mode !== "demo";
   elements.syncTime.textContent = formatTime(generatedAt);
@@ -257,6 +350,7 @@ function renderSummary() {
 function render() {
   if (!state.snapshot) return;
   renderSummary();
+  renderSupervisor();
   renderCapacity();
   renderRuns();
   renderActivity();

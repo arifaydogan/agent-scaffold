@@ -25,6 +25,19 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <div id="supervisor-card" class="supervisor-card" role="status" aria-live="polite" hidden>
+          <div class="supervisor-header">
+            <span id="supervisor-dot" class="supervisor-dot"></span>
+            <span class="eyebrow" style="margin:0; font-size:0.65rem;">Supervisor</span>
+            <strong id="supervisor-status-text" class="supervisor-status-badge">—</strong>
+          </div>
+          <div id="supervisor-meta" class="supervisor-meta">
+            <span>PID <strong id="supervisor-pid">—</strong></span>
+            <span><strong id="supervisor-mode">—</strong></span>
+            <span><strong id="supervisor-cycles">—</strong> döngü</span>
+            <span><strong id="supervisor-heartbeat">—</strong></span>
+          </div>
+        </div>
         <span id="demo-badge" class="demo-badge" hidden>Demo verisi</span>
         <div class="connection-pill" role="status" aria-live="polite">
           <span id="connection-dot" class="connection-dot"></span>
@@ -63,7 +76,7 @@
       <section class="metrics" aria-label="Çalışma özeti">
         <article class="metric-card metric-active">
           <span class="metric-icon" aria-hidden="true">↗</span>
-          <p>Aktif agent</p>
+          <p>Çalışan worker</p>
           <strong id="metric-active">—</strong>
           <small id="metric-capacity">Kapasite hesaplanıyor</small>
         </article>

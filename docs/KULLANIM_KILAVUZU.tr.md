@@ -328,6 +328,58 @@ Dispatcher `policy.maxConcurrency` degerini asamaz. Ayni provider icin
 ornegin `frontend/**` yazacak iki task ayni dalgada calistirilmaz. Cross-service
 tasklar tek basina bir dalgaya alinir.
 
+### Resident Supervisor
+
+Supervisor, surdurulebilir bir poll/dispatch dongusu calistirir. Varsayilan mod
+**plan-only** (dry-run) dur, execute etmez.
+
+```powershell
+# Plan-only modda supervisor basalt (guvenli, hicbir sey calistirmaz).
+node bin/agentctl.js --config agent-scaffold.json supervise
+
+# Tam olarak bir dongu calistir, sonra dur.
+node bin/agentctl.js --config agent-scaffold.json supervise --once
+
+# En fazla 5 dongu calistir.
+node bin/agentctl.js --config agent-scaffold.json supervise --max-cycles 5
+
+# Execute modunda calistir (config'de supervisor.executeEnabled = true olmali).
+node bin/agentctl.js --config agent-scaffold.json supervise --execute
+
+# Supervisor durumunu ve lifecycle event'lerini goster (yerel, Jira gerektirmez).
+node bin/agentctl.js --config agent-scaffold.json supervisor-status
+
+# Graceful stop talep et (yerel, Jira gerektirmez). Aktif dongu tamamlanana kadar beklenir.
+node bin/agentctl.js --config agent-scaffold.json supervisor-stop
+```
+
+**Execute gate:** `--execute` fail-closed'dir. Config dosyasinda
+`supervisor.executeEnabled = true` olmadan etkisi yoktur. Ornek config
+`executeEnabled: false` ile gelir.
+
+**Graceful shutdown:** SIGINT ve SIGTERM graceful stop talep eder. Supervisor
+aktif dispatch dongusunu tamamladiktan sonra cikar. `supervisor-stop` komutu
+veritabanina stop talebi yazar; calisan process bunu heartbeat araliklarinda
+algilar.
+
+**Insan onayi gerektiren islemler degismedi.** Supervisor hicbir kosulda
+PR merge etmez, Jira issue'sunu Done'a gecirmez, Jira'ya yazi yazmaz, epic
+degistirmez veya aktif issue lock'larini serbest birakmaz. Bu sinirlar
+orchestration protokolu tarafindan korunur ve yapilandirilamaz.
+
+### Jira Intake Modları
+
+- **Tercih edilen orkestre yol (Preferred orchestrated path):** Codex, Atlassian Rovo MCP kullanarak Jira'yı okur, `{key, summary, description, issueType, status, labels}` formatında normalize eder ve bu JSON'ı `node bin/agentctl.js --config agent-scaffold.json local-run --stdin` (opsiyonel `--execute` ile) komutuna pipe eder. Bu yol yerel `ATLASSIAN_EMAIL` veya `ATLASSIAN_API_TOKEN` gerektirmez.
+- **Opsiyonel yerleşik REST poller (Optional resident REST poller):** `supervise`/`poll` komutu `JiraClient` kullanır ve `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` gerektirir. Supervisor Node süreci, Codex/Rovo OAuth token'larını içermez veya miras almaz.
+- **Read-only sınırı:** Rovo intake, harici onaylı Jira yazma yetkisi verilene kadar read-only kalır; merge, Done durumuna geçiş ve epic değişiklikleri insan onayına tabidir.
+
+PowerShell örneği:
+
+```powershell
+$issueJson = '{"key":"PACE-123","summary":"Orkestre gorev","description":"Detaylar","issueType":"Task","status":"To Do","labels":["agent-ready"]}'
+$issueJson | node bin/agentctl.js --config agent-scaffold.json local-run --stdin --execute
+```
+
 Run ve lock durumlarini izle:
 
 ```powershell
