@@ -11,10 +11,11 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
+import { backfillExternalRun } from "../lib/external-run.js";
 
 function usage() {
   console.error(
-    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop [args]"
+    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop|backfill-external-run [args]"
   );
 }
 
@@ -181,6 +182,27 @@ async function main() {
     console.log(
       JSON.stringify({ supervisorId, stopRequested: true }, null, 2)
     );
+    return 0;
+  }
+
+  /**
+   * backfill-external-run: Backfill an external run.
+   */
+  if (parsed.command === "backfill-external-run") {
+    const issueKey = parsed.args[parsed.args.indexOf("--issue") + 1];
+    const pid = numericArgument(parsed.args, "--pid", null);
+    const provider = parsed.args[parsed.args.indexOf("--provider") + 1];
+    const model = parsed.args[parsed.args.indexOf("--model") + 1];
+    const branch = parsed.args[parsed.args.indexOf("--branch") + 1];
+    const blocker = parsed.args.includes("--blocker") ? parsed.args[parsed.args.indexOf("--blocker") + 1] : null;
+
+    if (!issueKey || !provider || !model || !branch) {
+      console.error("Missing required arguments for backfill-external-run.");
+      return 1;
+    }
+
+    const runId = backfillExternalRun(settings, { issueKey, pid, provider, model, branch, blocker });
+    console.log(JSON.stringify({ runId, backfilled: true }, null, 2));
     return 0;
   }
 

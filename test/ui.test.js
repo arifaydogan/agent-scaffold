@@ -1,0 +1,158 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+
+function setupMockDOM() {
+  const elements = {};
+  const document = {
+    querySelector: (sel) => {
+      if (!elements[sel]) elements[sel] = createElement("div");
+      return elements[sel];
+    },
+    querySelectorAll: () => [],
+    createElement: createElement,
+    createTextNode: (text) => ({ textNode: true, text }),
+    hidden: false
+  };
+
+  function createElement(tag) {
+    const el = {
+      tag,
+      className: "",
+      textContent: "",
+      children: [],
+      style: {},
+      attributes: {},
+      href: "",
+      target: "",
+      rel: "",
+      disabled: false,
+      title: "",
+      onclick: null,
+      append: (...nodes) => {
+        for (const n of nodes) {
+          if (typeof n === 'string') el.children.push({ textNode: true, text: n });
+          else el.children.push(n);
+        }
+      },
+      replaceChildren: (...nodes) => {
+        el.children = [];
+        el.append(...nodes);
+      },
+      setAttribute: (k, v) => { el.attributes[k] = v; },
+      classList: {
+        toggle: (c, force) => {
+          let cls = el.className.split(" ").filter(Boolean);
+          if (force) { if (!cls.includes(c)) cls.push(c); }
+          else { cls = cls.filter(x => x !== c); }
+          el.className = cls.join(" ");
+        }
+      },
+      addEventListener: () => {}
+    };
+    return el;
+  }
+
+  const globalScope = {
+    document,
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    setInterval: () => {},
+    Intl: global.Intl,
+    console: global.console,
+    Math: global.Math,
+    Date: global.Date,
+    String: global.String,
+    JSON: global.JSON,
+    confirm: () => true
+  };
+
+  return { globalScope, elements };
+}
+
+test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => {
+  const code = fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8");
+  const { globalScope, elements } = setupMockDOM();
+  
+  // Inject the code into a function that acts as the global scope
+  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderCapacity };");
+  const ui = runUI(...Object.values(globalScope));
+
+  // Set up test data
+  ui.state.snapshot = {
+    runs: [
+      { id: 1, issue: "PACE-1", summary: "First task", stateKind: "active", state: "failed", tokens: 10, workerStatus: "finished" },
+      { id: 2, issue: "PACE-1", summary: "First task", stateKind: "blocked", state: "blocked", tokens: 25, workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR" },
+      { id: 3, issue: "PACE-2", summary: "Second task", stateKind: "active", state: "verifying", tokens: 0, workerStatus: "running" }
+    ],
+    capacity: {
+      active: 1,
+      total: 3,
+      providers: [
+        { name: "antigravity", active: 1, limit: 3, quota: 4000 },
+        { name: "codex", active: 0, limit: 1 } // no quota
+      ]
+    },
+    policy: { maxAttempts: 3 },
+    capabilities: { retryHandler: true }
+  };
+
+  ui.renderRuns();
+  
+  const grid = elements["#agent-grid"];
+  const cards = grid.children;
+  
+  // Test 1: Grouping - should group 3 runs into 2 task cards
+  assert.equal(cards.length, 2);
+  
+  const task1Card = cards[0];
+  // Test 2: Jira links
+  // We need to find the link element
+  const topline = task1Card.children.find(c => c.className === "card-topline");
+  const leftGroup = topline.children.find(c => c.className === "topline-left");
+  const issueLink = leftGroup.children.find(c => c.className === "issue-key-link");
+  assert.equal(issueLink.href, "https://houndvision.atlassian.net/browse/PACE-1");
+  assert.equal(issueLink.target, "_blank");
+  assert.equal(issueLink.rel, "noopener noreferrer");
+
+  // Test 3: Blocker resolution / user expectation
+  const blockerNote = task1Card.children.find(c => c.className === "blocker-note");
+  assert.ok(blockerNote, "Blocker note should be rendered for blocked task");
+  const blockerTitle = blockerNote.children.find(c => c.className === "blocker-title");
+  assert.ok(blockerTitle.children.find(c => c.textContent === "İnsan eylemi bekleniyor" || (c.textNode && c.text === "İnsan eylemi bekleniyor") || c.children.some(x => x.text === "İnsan eylemi bekleniyor")));
+  const blockerCause = blockerNote.children.find(c => c.className === "blocker-cause");
+  assert.equal(blockerCause.textContent, "Needs review");
+  const blockerAction = blockerNote.children.find(c => c.className === "blocker-action");
+  assert.equal(blockerAction.textContent, "Review PR");
+
+  // Test 4: Retry eligibility/disabled state
+  const retryBtn = task1Card.children.find(c => c.className === "retry-button");
+  assert.ok(retryBtn, "Retry button should be present for blocked task");
+  assert.equal(retryBtn.disabled, false); // 2 attempts < 3 maxAttempts
+  
+  // Test 5: Token unavailable vs used
+  const footer1 = task1Card.children.find(c => c.className === "agent-card-footer");
+  const tokenText1 = footer1.children[0].textContent;
+  assert.match(tokenText1, /35 token \(total\)/); // 10 + 25
+  assert.match(tokenText1, /25 \(this attempt\)/);
+
+  const task2Card = cards[1];
+  const footer2 = task2Card.children.find(c => c.className === "agent-card-footer");
+  const tokenText2 = footer2.children[0].textContent;
+  assert.equal(tokenText2, "Usage unavailable"); // 0 tokens
+
+  // Test 6: Provider quota unavailable
+  ui.renderCapacity();
+  const providerList = elements["#provider-list"];
+  const antProv = providerList.children[0];
+  const antLabel = antProv.children[0];
+  const antStats = antLabel.children[1];
+  const antQuota = antStats.children[1];
+  assert.match(antQuota.textContent, /Remaining quota: 4\.000/);
+
+  const cxProv = providerList.children[1];
+  const cxLabel = cxProv.children[0];
+  const cxStats = cxLabel.children[1];
+  const cxQuota = cxStats.children[1];
+  assert.equal(cxQuota.textContent, "Provider does not expose remaining quota");
+});

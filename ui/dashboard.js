@@ -130,6 +130,15 @@ function detailsFor(run) {
     ...(run.allowedPaths || []).map((value) => `scope · ${value}`),
     ...(run.changedFiles || []).map((value) => `changed · ${value}`)
   ];
+  
+  if (run.worktree) values.push(`worktree · ${run.worktree}`);
+  if (run.tests) values.push(`tests · ${run.tests.length} run`);
+  if (run.commit) values.push(`commit · ${run.commit}`);
+  if (run.pr) values.push(`pr · ${run.pr}`);
+  if (run.providerCooldown) values.push(`cooldown · ${run.providerCooldown}`);
+  if (run.workerPid) values.push(`PID · ${run.workerPid}`);
+  if (run.lastHeartbeat) values.push(`heartbeat · ${formatTime(run.lastHeartbeat)}`);
+
   if (!values.length && !run.branch) return null;
   const details = element("details", "run-details");
   details.append(element("summary", "", "Teknik detaylar"));
@@ -140,21 +149,28 @@ function detailsFor(run) {
   return details;
 }
 
-function runCard(run) {
+function taskCard(group) {
+  const run = group.latest;
+  const attempts = group.attempts;
   const card = element("article", `agent-card state-${run.stateKind}`);
   card.setAttribute("aria-label", `${run.issue}: ${run.summary}`);
 
   const topline = element("div", "card-topline");
   const leftGroup = element("div", "topline-left");
   const { status: workerStatus } = getWorkerInfo(run);
+  
+  const issueLink = element("a", "issue-key-link", run.issue);
+  issueLink.href = `https://houndvision.atlassian.net/browse/${run.issue}`;
+  issueLink.target = "_blank";
+  issueLink.rel = "noopener noreferrer";
+  
   leftGroup.append(
-    element("span", "issue-key", run.issue),
+    issueLink,
     element("span", `worker-badge worker-${workerStatus}`, formatWorkerLabel(run))
   );
   topline.append(leftGroup, statePill(run));
   card.append(topline);
 
-  // Show taskAgent (executor role) as the primary avatar; persona is the orchestration role.
   const displayAgent = run.taskAgent || run.persona || "unassigned";
   const identity = element("div", "agent-identity");
   identity.append(element("span", "persona-avatar", PERSONA_INITIALS[displayAgent] || "AI"));
@@ -174,7 +190,6 @@ function runCard(run) {
   meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
   card.append(meta);
 
-  // Show live progress text for streaming states.
   if (run.progressText && run.stateKind === "active") {
     const progressEl = element("p", "progress-text");
     progressEl.textContent = run.progressText;
@@ -187,18 +202,88 @@ function runCard(run) {
   if (!run.skills?.length) skills.append(element("span", "skill-chip", "skill atanmamış"));
   card.append(skills);
 
-  if (run.blockers?.length) {
+  if (run.blockers?.length || run.stateKind === "blocked") {
     const blocker = element("div", "blocker-note");
-    blocker.append(element("strong", "", "!"), element("span", "", run.blockers[0]));
+    blocker.style.display = "flex";
+    blocker.style.flexDirection = "column";
+    blocker.style.gap = "0.25rem";
+    
+    let statusText = run.state === "blocked" ? "İnsan eylemi bekleniyor" : "Çözülüyor";
+    const titleRow = element("div", "blocker-title");
+    titleRow.style.fontWeight = "bold";
+    titleRow.append(element("span", "", "! "), element("span", "", statusText));
+    
+    blocker.append(
+      titleRow,
+      element("span", "blocker-cause", run.blockers?.[0] || "Bilinmeyen blocker nedeni"),
+      element("span", "blocker-action", run.resolution || "Lütfen sorunu çözün veya manuel müdahale edin.")
+    );
     card.append(blocker);
   }
 
   const details = detailsFor(run);
   if (details) card.append(details);
 
+  if (attempts.length > 1) {
+    const timeline = element("details", "attempts-timeline");
+    timeline.style.marginTop = "0.5rem";
+    timeline.style.fontSize = "0.85rem";
+    timeline.append(element("summary", "", `${attempts.length} deneme (Geçmiş)`));
+    const list = element("ul", "attempt-list");
+    list.style.paddingLeft = "1rem";
+    attempts.slice(0, -1).forEach((oldRun, idx) => {
+      const li = element("li", "attempt-item");
+      li.textContent = `Deneme ${idx + 1}: ${STATUS_LABELS[oldRun.state] || oldRun.state}`;
+      if (oldRun.state === 'blocked' || oldRun.blockers?.length) {
+        const link = element("span", "retry-link", ` → Deneme ${idx + 2} ile değiştirildi`);
+        link.style.opacity = "0.7";
+        link.style.marginLeft = "0.25rem";
+        li.append(link);
+      }
+      list.append(li);
+    });
+    timeline.append(list);
+    card.append(timeline);
+  }
+
+  const isTerminal = ["failed", "failed-retryable", "failed-scope", "blocked"].includes(run.state);
+  const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
+  if (isTerminal) {
+    const canRetry = (run.state === "failed-retryable" || run.state === "blocked") && attempts.length < maxAttempts;
+    const hasHandler = state.snapshot.capabilities?.retryHandler;
+    
+    const retryBtn = element("button", "retry-button", "Retry Attempt");
+    retryBtn.style.marginTop = "0.5rem";
+    if (!hasHandler) {
+      retryBtn.disabled = true;
+      retryBtn.title = "No injected retry handler on server";
+    } else if (!canRetry) {
+      retryBtn.disabled = true;
+      retryBtn.title = attempts.length >= maxAttempts ? "Attempt limit reached" : "Run not retryable";
+    } else {
+      retryBtn.onclick = () => {
+        if (confirm("Are you sure you want to retry this task?")) {
+           fetch(`/api/retry`, {
+             method: "POST",
+             headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({ runId: run.id, issueKey: run.issue })
+           });
+        }
+      };
+    }
+    card.append(retryBtn);
+  }
+
   const footer = element("footer", "agent-card-footer");
+  const taskTokens = attempts.reduce((sum, r) => sum + (r.tokens || 0), 0);
+  const latestTokens = run.tokens;
+  
+  const tokenText = (latestTokens === undefined || latestTokens === null || latestTokens === 0)
+    ? "Usage unavailable" 
+    : `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
+    
   footer.append(
-    element("span", "", `${formatNumber(run.tokens)} token`),
+    element("span", "", tokenText),
     element("span", "", `${run.turns || 0} turn`),
     element("span", "", run.locked ? "● locked" : "○ unlocked")
   );
@@ -209,7 +294,25 @@ function runCard(run) {
 function visibleRuns() {
   if (!state.snapshot) return [];
   const query = state.query.trim().toLocaleLowerCase("tr-TR");
-  return state.snapshot.runs.filter((run) => {
+  
+  const groups = {};
+  for (const run of state.snapshot.runs) {
+    if (!groups[run.issue]) groups[run.issue] = [];
+    groups[run.issue].push(run);
+  }
+  
+  const groupedTasks = Object.values(groups).map(group => {
+    return {
+      issue: group[0].issue,
+      summary: group[0].summary,
+      latest: group[group.length - 1],
+      attempts: group,
+      stateKind: group[group.length - 1].stateKind
+    };
+  });
+
+  return groupedTasks.filter((task) => {
+    const run = task.latest;
     const matchesFilter = state.filter === "all" || run.stateKind === state.filter;
     const text = [run.issue, run.summary, run.persona, run.provider, run.model, ...(run.skills || [])]
       .filter(Boolean)
@@ -220,11 +323,11 @@ function visibleRuns() {
 }
 
 function renderRuns() {
-  const runs = visibleRuns();
-  elements.grid.replaceChildren(...runs.map(runCard));
+  const tasks = visibleRuns();
+  elements.grid.replaceChildren(...tasks.map(taskCard));
   elements.grid.setAttribute("aria-busy", "false");
-  elements.grid.hidden = runs.length === 0;
-  elements.empty.hidden = runs.length !== 0;
+  elements.grid.hidden = tasks.length === 0;
+  elements.empty.hidden = tasks.length !== 0;
 }
 
 function providerItem(provider) {
@@ -232,8 +335,25 @@ function providerItem(provider) {
   const label = element("div", "capacity-label");
   const name = element("span", "provider-name");
   name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name));
+  
+  const statsSpan = element("span", "capacity-stats");
+  statsSpan.style.display = "flex";
+  statsSpan.style.flexDirection = "column";
+  statsSpan.style.alignItems = "flex-end";
+  
   const queuedText = provider.queued ? ` (${provider.queued} kuyrukta)` : "";
-  label.append(name, element("span", "", `${provider.active} / ${provider.limit}${queuedText}`));
+  statsSpan.append(element("span", "", `${provider.active} / ${provider.limit}${queuedText}`));
+  
+  const quotaText = (provider.quota !== undefined && provider.quota !== null)
+    ? `Remaining quota: ${formatNumber(provider.quota)}`
+    : `Provider does not expose remaining quota`;
+  const quotaEl = element("small", "", quotaText);
+  quotaEl.style.fontSize = "0.65rem";
+  quotaEl.style.opacity = "0.7";
+  statsSpan.append(quotaEl);
+  
+  label.append(name, statsSpan);
+  
   const track = element("div", "capacity-track");
   const fill = element("div", "capacity-fill");
   fill.style.width = `${Math.min(100, (provider.active / Math.max(1, provider.limit)) * 100)}%`;
