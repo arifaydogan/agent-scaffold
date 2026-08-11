@@ -81,9 +81,10 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   // Set up test data
   ui.state.snapshot = {
     runs: [
-      { id: 2, issue: "PACE-1", summary: "First task", stateKind: "blocked", state: "blocked", tokens: 25, usageAvailable: true, attempt: 2, createdAt: "2026-08-11T10:01:00Z", workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR", humanActionRequired: true, userExpectation: "Approve review" },
+      { id: 2, issue: "PACE-1", summary: "First task", role: "worker", retryOfRunId: 1, stateKind: "blocked", state: "blocked", tokens: 25, usageAvailable: true, attempt: 2, createdAt: "2026-08-11T10:01:00Z", workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR", humanActionRequired: true, userExpectation: "Approve review" },
+      { id: 4, issue: "PACE-1", summary: "First task", role: "reviewer", stateKind: "review", state: "review_queued", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:03:00Z", workerStatus: "queued" },
       { id: 3, issue: "PACE-2", summary: "Second task", stateKind: "active", state: "verifying", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:02:00Z", workerStatus: "running" },
-      { id: 1, issue: "PACE-1", summary: "First task", stateKind: "active", state: "failed", tokens: 10, usageAvailable: true, attempt: 1, createdAt: "2026-08-11T10:00:00Z", workerStatus: "finished" }
+      { id: 1, issue: "PACE-1", summary: "First task", role: "worker", stateKind: "active", state: "failed", tokens: 10, usageAvailable: true, attempt: 1, createdAt: "2026-08-11T10:00:00Z", workerStatus: "finished" }
     ],
     capacity: {
       active: 1,
@@ -120,11 +121,18 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   assert.equal(issueLink.target, "_blank");
   assert.equal(issueLink.rel, "noopener noreferrer");
 
+  const roleLanes = task1Card.children.find(c => c.className === "role-lanes");
+  assert.equal(roleLanes.children.length, 2, "worker and reviewer must stay in independent lanes");
+  const workerLane = roleLanes.children.find(c => c.className.includes("role-lane-worker"));
+  const reviewerLane = roleLanes.children.find(c => c.className.includes("role-lane-reviewer"));
+  assert.ok(workerLane);
+  assert.ok(reviewerLane);
+
   // Test 3: Blocker resolution / user expectation
-  const blockerNote = task1Card.children.find(c => c.className === "blocker-note");
+  const blockerNote = workerLane.children.find(c => c.className.includes("blocker-note"));
   assert.ok(blockerNote, "Blocker note should be rendered for blocked task");
   const blockerTitle = blockerNote.children.find(c => c.className === "blocker-title");
-  assert.ok(blockerTitle.children.find(c => c.textContent === "Senden aksiyon bekleniyor" || (c.textNode && c.text === "Senden aksiyon bekleniyor") || c.children.some(x => x.text === "Senden aksiyon bekleniyor")));
+  assert.equal(blockerTitle.textContent, "Senden aksiyon bekleniyor");
   const blockerCause = blockerNote.children.find(c => c.className === "blocker-cause");
   assert.equal(blockerCause.textContent, "Needs review");
   const blockerAction = blockerNote.children.find(c => c.className === "blocker-action");
@@ -133,7 +141,7 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   // Test 4: Retry eligibility/disabled state
   const blockerExpectation = blockerNote.children.find(c => c.className === "blocker-expectation");
   assert.equal(blockerExpectation.textContent, "Approve review");
-  const retryBtn = task1Card.children.find(c => c.className === "retry-button");
+  const retryBtn = workerLane.children.find(c => c.className === "retry-button");
   assert.ok(retryBtn, "Retry button should be present for blocked task");
   assert.equal(retryBtn.disabled, false); // 2 attempts < 3 maxAttempts
 
@@ -141,7 +149,7 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   const footer1 = task1Card.children.find(c => c.className === "agent-card-footer");
   const tokenText1 = footer1.children[0].textContent;
   assert.match(tokenText1, /35 token toplam/); // 10 + 25
-  assert.match(tokenText1, /25 son deneme/);
+  assert.match(tokenText1, /son deneme usage unavailable/);
 
   const task2Card = cards[1];
   const footer2 = task2Card.children.find(c => c.className === "agent-card-footer");

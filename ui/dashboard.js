@@ -155,9 +155,117 @@ function detailsFor(run) {
   return details;
 }
 
+const ROLE_LABELS = {
+  worker: "Worker",
+  reviewer: "Reviewer",
+  integration: "Integration"
+};
+
+function normalizeRole(role) {
+  const value = String(role || "worker").toLowerCase();
+  if (["review", "reviewer", "qa"].includes(value)) return "reviewer";
+  if (["integration", "integrator"].includes(value)) return "integration";
+  return value || "worker";
+}
+
+function roleLane(lane) {
+  const run = lane.latest;
+  const section = element("section", `role-lane role-lane-${lane.role}`);
+  section.setAttribute("aria-label", `${ROLE_LABELS[lane.role] || lane.role} lane`);
+
+  const header = element("div", "role-lane-header");
+  const heading = element("div", "role-lane-heading");
+  heading.append(
+    element("strong", "role-lane-name", ROLE_LABELS[lane.role] || lane.role),
+    element("span", `worker-badge worker-${getWorkerInfo(run).status}`, formatWorkerLabel(run))
+  );
+  header.append(heading, statePill(run));
+  section.append(header);
+
+  const actor = run.taskAgent || run.persona || "unassigned";
+  section.append(element(
+    "p",
+    "role-lane-agent",
+    `${actor} · ${displayModel(run)} · Deneme ${run.attempt || lane.attempts.length}`
+  ));
+
+  if (run.blockers?.length || run.stateKind === "blocked") {
+    const blocker = element("div", "blocker-note role-lane-blocker");
+    const statusText = run.humanActionRequired
+      ? "Senden aksiyon bekleniyor"
+      : run.blockerResolved
+        ? "Blocker çözüldü"
+        : "Otomatik çözüm bekliyor";
+    blocker.append(
+      element("strong", "blocker-title", statusText),
+      element("span", "blocker-cause", run.blockers?.[0] || "Bilinmeyen blocker nedeni"),
+      element("span", "blocker-action", run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"),
+      element("span", "blocker-expectation", run.humanActionRequired
+        ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
+        : "Senden beklenen bir işlem yok")
+    );
+    section.append(blocker);
+  }
+
+  if (lane.attempts.length > 1) {
+    const timeline = element("details", "attempts-timeline");
+    timeline.append(element("summary", "", `${lane.attempts.length} ${ROLE_LABELS[lane.role] || lane.role} denemesi`));
+    const list = element("ul", "attempt-list");
+    lane.attempts.forEach((attemptRun, index) => {
+      const attemptTokens = attemptRun.usageAvailable && attemptRun.tokens > 0
+        ? `${formatNumber(attemptRun.tokens)} token`
+        : "Usage unavailable";
+      list.append(element(
+        "li",
+        "attempt-item",
+        `Deneme ${attemptRun.attempt || index + 1}: ${STATUS_LABELS[attemptRun.state] || attemptRun.state} - ${attemptTokens}`
+      ));
+    });
+    timeline.append(list);
+    section.append(timeline);
+  }
+
+  const retryable = ["failed-retryable", "blocked", "human_action_required"].includes(run.state);
+  if (retryable) {
+    const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
+    const retryBtn = element("button", "retry-button", "Tekrar dene");
+    const hasHandler = state.snapshot.capabilities?.retryHandler;
+    const canRetry = (run.attempt || lane.attempts.length) < maxAttempts;
+    if (!hasHandler || !canRetry) {
+      retryBtn.disabled = true;
+      retryBtn.title = !hasHandler ? "Sunucuda retry handler etkin değil" : "Deneme sınırına ulaşıldı";
+    } else {
+      retryBtn.onclick = async () => {
+        if (!confirm("Bu rol için yeniden deneme başlatılsın mı?")) return;
+        retryBtn.disabled = true;
+        retryBtn.textContent = "Kuyruğa alınıyor…";
+        try {
+          const response = await fetch("/api/retry", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: run.id, issueKey: run.issue })
+          });
+          if (!response.ok) throw new Error("Retry request rejected");
+          retryBtn.textContent = "Yeniden deneme kuyruğunda";
+          await refresh();
+        } catch {
+          retryBtn.disabled = false;
+          retryBtn.textContent = "Tekrar dene";
+          retryBtn.title = "Yeniden deneme isteği gönderilemedi";
+        }
+      };
+    }
+    section.append(retryBtn);
+  }
+
+  return section;
+}
+
 function taskCard(group) {
   const run = group.latest;
-  const attempts = group.attempts;
+  const allRuns = group.attempts;
+  const latestLane = group.lanes.find((lane) => lane.latest.id === run.id) || group.lanes[0];
+  const attempts = latestLane.attempts;
   const card = element("article", `agent-card state-${run.stateKind}`);
   card.setAttribute("aria-label", `${run.issue}: ${run.summary}`);
 
@@ -198,6 +306,10 @@ function taskCard(group) {
   taskLink.rel = "noopener noreferrer";
   taskTitle.append(taskLink);
   card.append(taskTitle);
+  const lanes = element("div", "role-lanes");
+  lanes.append(...group.lanes.map(roleLane));
+  card.append(lanes);
+
   const meta = element("div", "agent-meta");
   meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
   card.append(meta);
@@ -214,7 +326,7 @@ function taskCard(group) {
   if (!run.skills?.length) skills.append(element("span", "skill-chip", "skill atanmamış"));
   card.append(skills);
 
-  if (run.blockers?.length || run.stateKind === "blocked") {
+  if (!group.lanes.length && (run.blockers?.length || run.stateKind === "blocked")) {
     const blocker = element("div", "blocker-note");
     blocker.style.display = "flex";
     blocker.style.flexDirection = "column";
@@ -246,7 +358,7 @@ function taskCard(group) {
   const details = detailsFor(run);
   if (details) card.append(details);
 
-  if (attempts.length > 1) {
+  if (!group.lanes.length && attempts.length > 1) {
     const timeline = element("details", "attempts-timeline");
     timeline.style.marginTop = "0.5rem";
     timeline.style.fontSize = "0.85rem";
@@ -311,7 +423,7 @@ function taskCard(group) {
   }
 
   const footer = element("footer", "agent-card-footer");
-  const taskTokens = attempts.reduce((sum, r) => sum + (r.tokens || 0), 0);
+  const taskTokens = allRuns.reduce((sum, r) => sum + (r.tokens || 0), 0);
   const latestTokens = run.tokens;
 
   const tokenText = (latestTokens === undefined || latestTokens === null || latestTokens === 0)
@@ -345,20 +457,51 @@ function visibleRuns() {
     const attempts = [...group].sort((a, b) =>
       new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
     );
+    const byId = new Map(attempts.map((run) => [run.id, run]));
+    const lineageRoot = (run) => {
+      let current = run;
+      const seen = new Set();
+      while (current.retryOfRunId && byId.has(current.retryOfRunId) && !seen.has(current.id)) {
+        seen.add(current.id);
+        current = byId.get(current.retryOfRunId);
+      }
+      return current.id;
+    };
+    const roleGroups = {};
+    for (const run of attempts) {
+      const role = normalizeRole(run.role);
+      const laneKey = `${role}:${lineageRoot(run)}`;
+      if (!roleGroups[laneKey]) roleGroups[laneKey] = { role, attempts: [] };
+      roleGroups[laneKey].attempts.push(run);
+    }
+    const lanes = Object.values(roleGroups)
+      .map((lane) => ({
+        role: lane.role,
+        attempts: lane.attempts,
+        latest: lane.attempts.at(-1)
+      }))
+      .sort((a, b) => {
+        const order = ["worker", "reviewer", "integration"];
+        return (order.indexOf(a.role) + 1 || 99) - (order.indexOf(b.role) + 1 || 99);
+      });
     const latest = attempts.at(-1);
     return {
       issue: latest.issue,
       summary: latest.summary,
       latest,
       attempts,
+      lanes,
       stateKind: latest.stateKind
     };
   });
 
   return groupedTasks.filter((task) => {
     const run = task.latest;
-    const matchesFilter = state.filter === "all" || run.stateKind === state.filter;
-    const text = [run.issue, run.summary, run.persona, run.provider, run.model, ...(run.skills || [])]
+    const matchesFilter = state.filter === "all" || task.lanes.some((lane) => lane.latest.stateKind === state.filter);
+    const text = task.attempts.flatMap((attempt) => [
+      attempt.issue, attempt.summary, attempt.persona, attempt.taskAgent,
+      attempt.provider, attempt.model, ...(attempt.skills || [])
+    ])
       .filter(Boolean)
       .join(" ")
       .toLocaleLowerCase("tr-TR");

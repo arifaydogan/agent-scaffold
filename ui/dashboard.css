@@ -345,6 +345,15 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .issue-key-link:hover,
 .task-title-link:hover { color: var(--cyan); text-decoration: underline; text-underline-offset: 3px; }
+.role-lanes { display: grid; gap: 8px; margin: 0 0 13px; }
+.role-lane { border: 1px solid rgba(148, 163, 184, 0.13); border-radius: 9px; background: rgba(2, 6, 23, 0.2); padding: 9px; }
+.role-lane-header,
+.role-lane-heading { display: flex; align-items: center; gap: 7px; }
+.role-lane-header { justify-content: space-between; }
+.role-lane-name { color: var(--muted-strong); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.role-lane-agent { margin: 7px 0 0; color: var(--muted); font-family: var(--font-code); font-size: 0.65rem; }
+.role-lane-blocker { flex-direction: column; gap: 4px; }
+.role-lane .attempts-timeline { margin-top: 8px !important; }
 .blocker-note { line-height: 1.45; }
 .blocker-title { display: flex; align-items: center; gap: 5px; color: #fecdd3; }
 .blocker-cause { color: #ffe4e6; font-weight: 700; }
