@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minimal Change"
+  short_description: "Enforce minimal code diffs and reuse existing project patterns."
+  default_prompt: "Apply $minimal-change to keep changes minimal, reusing existing code without scope creep."

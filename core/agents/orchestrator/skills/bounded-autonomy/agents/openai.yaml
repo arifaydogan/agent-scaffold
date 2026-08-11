@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bounded Autonomy"
+  short_description: "Execute within approved budget leases and human safety gates."
+  default_prompt: "Apply $bounded-autonomy to execute within budget leases while preserving human approval gates."

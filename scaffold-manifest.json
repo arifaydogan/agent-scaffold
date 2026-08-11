@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "upstream_registry": "sources.lock.json",
   "orchestration_contracts": [
     "ORCHESTRATION.md",
     "PACEBUILD_ORCHESTRATOR.md",
@@ -60,7 +61,11 @@
     "core/agents/pm-analyst/skills/jira-expert/SKILL.md",
     "core/agents/pm-analyst/skills/confluence-expert/SKILL.md",
     "core/agents/security-engineer/skills/security-pen-testing/SKILL.md",
-    "core/agents/data-engineer/skills/senior-data-engineer/SKILL.md"
+    "core/agents/data-engineer/skills/senior-data-engineer/SKILL.md",
+    "core/agents/orchestrator/skills/minimal-change/SKILL.md",
+    "core/agents/orchestrator/skills/multi-agent-reliability/SKILL.md",
+    "core/agents/orchestrator/skills/bounded-autonomy/SKILL.md",
+    "core/agents/orchestrator/skills/upstream-capability-selection/SKILL.md"
   ],
   "pacebuild_skills": [
     "packs/pacebuild/agents/cv-engineer/skills/cv-pipeline-checks/SKILL.md",
