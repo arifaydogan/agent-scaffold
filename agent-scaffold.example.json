@@ -76,6 +76,16 @@
           "{worktree}",
           "{prompt}"
         ],
+        "defaultModel": "gpt-5.6-terra",
+        "defaultEffort": "medium",
+        "modelProfiles": {
+          "luna": "gpt-5.6-luna",
+          "terra": "gpt-5.6-terra",
+          "sol": "gpt-5.6-sol",
+          "low": "gpt-5.6-terra",
+          "medium": "gpt-5.6-terra",
+          "high": "gpt-5.6-sol"
+        },
         "timeoutSeconds": 3600
       },
       "antigravity": {
@@ -105,8 +115,11 @@
         "defaultEffort": "medium",
         "modelProfiles": {
           "low": "gemini-3.6-flash-low",
-          "medium": "claude-sonnet-4-6",
-          "high": "claude-opus-4-6-thinking",
+          "medium": "gemini-3.6-flash-low",
+          "high": "gemini-3.1-pro-high",
+          "gemini-flash": "gemini-3.6-flash-low",
+          "gemini-pro": "gemini-3.1-pro-high",
+          "claude-review": "claude-sonnet-4-6",
           "mechanical": "gpt-oss-120b-medium",
           "ux": "gemini-3.1-pro-high"
         },

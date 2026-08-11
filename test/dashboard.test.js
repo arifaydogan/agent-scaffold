@@ -109,3 +109,23 @@ test("dashboard server is localhost-only and returns secure read-only responses"
     await new Promise((resolve) => dashboard.server.close(resolve));
   }
 });
+
+test("dashboard snapshot exposes epic progress, integration queue, and token budget", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-dashboard-epic-"));
+  const store = new RunStore(path.join(directory, "runs.sqlite3"));
+  store.upsertEpic({
+    key: "PACE-124", summary: "Agent orchestration", branch: "epic/pace-124-agent-orchestration",
+    baseBranch: "develop", modelBudget: 100
+  });
+  store.upsertEpicTask({
+    epicKey: "PACE-124", issueKey: "PACE-359", summary: "Epic runtime",
+    branch: "task/pace-359-epic-runtime", state: "integrated", budget: 100
+  });
+  const run = store.createRun("PACE-359", { summary: "Epic runtime" });
+  store.transition(run, "verifying", { usage: { total_tokens: 40 } });
+  const snapshot = buildDashboardSnapshot(settings(directory), { store });
+  assert.equal(snapshot.epics.length, 1);
+  assert.equal(snapshot.epics[0].completedLeaves, 1);
+  assert.equal(snapshot.epics[0].ready, true);
+  assert.deepEqual(snapshot.epics[0].modelBudget, { limit: 100, used: 40, remaining: 60 });
+});
