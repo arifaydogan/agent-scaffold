@@ -80,6 +80,16 @@ test("dashboard preserves the latest provider usage after terminal events", (t) 
   assert.equal(snapshot.runs[0].usageAvailable, true);
 });
 
+test("dashboard treats null provider usage as unavailable", (t) => {
+  const { store, settings } = fixture(t);
+  const runId = store.createRun("PACE-11", { summary: "Null usage task" });
+  store.transition(runId, "progress", { usage: null });
+
+  const snapshot = buildDashboardSnapshot(settings, { store });
+  assert.equal(snapshot.runs[0].tokens, 0);
+  assert.equal(snapshot.runs[0].usageAvailable, false);
+});
+
 test("retry endpoint accepts only constrained localhost task identity", async (t) => {
   const { store, settings } = fixture(t);
   const calls = [];
