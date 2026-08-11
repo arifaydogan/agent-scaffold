@@ -11,11 +11,11 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
-import { tick } from "../lib/reconciler.js";
+import { recordReviewerOutcome, tick } from "../lib/reconciler.js";
 
 function usage() {
   console.error(
-    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop|tick [args]"
+    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop|tick|review-result [args]"
   );
 }
 
@@ -33,6 +33,11 @@ function parseArguments(argv) {
 function commandAvailable(command) {
   const check = process.platform === "win32" ? "where" : "which";
   return spawnSync(check, [command], { stdio: "ignore" }).status === 0;
+}
+
+function stringArgument(args, name) {
+  const index = args.indexOf(name);
+  return index < 0 ? null : args[index + 1] || null;
 }
 
 function numericArgument(args, name, fallback) {
@@ -143,6 +148,30 @@ async function main() {
     const result = tick(settings, store);
     console.log(JSON.stringify(result, null, 2));
     return 0;
+  }
+
+  if (parsed.command === "review-result") {
+    const runId = parsed.args[0];
+    const implementationSha = stringArgument(parsed.args, "--sha");
+    const reviewerId = stringArgument(parsed.args, "--reviewer");
+    const verdict = stringArgument(parsed.args, "--verdict");
+    const evidence = stringArgument(parsed.args, "--evidence");
+    if (!runId || !implementationSha || !reviewerId || !verdict || !evidence) {
+      console.error(
+        "review-result requires <run-id> --sha <sha> --reviewer <id> " +
+        "--verdict <clean|changes-requested> --evidence <text>"
+      );
+      return 1;
+    }
+    const result = recordReviewerOutcome(getStore(settings), {
+      runId,
+      implementationSha,
+      reviewerId,
+      verdict,
+      evidence: [evidence]
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return result.recorded ? 0 : 1;
   }
 
   if (parsed.command === "report" || parsed.command === "resume") {

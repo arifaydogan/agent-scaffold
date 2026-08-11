@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { RunStore } from "../lib/store.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
+import { issuePlan } from "../lib/runtime.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,18 @@ function makeSettings(policyOverrides = {}) {
       },
       worktree: { root: "." },
       jira: { baseUrl: "https://example.atlassian.net" },
+      executor: {
+        defaultProvider: "codex",
+        providers: {
+          codex: {
+            command: ["codex", "exec", "{prompt}"],
+            defaultModel: "gpt-5",
+            defaultEffort: "medium",
+            mode: "accept-edits",
+            timeoutSeconds: 60
+          }
+        }
+      },
       supervisor: { issueLimit: 10 }
     }
   };
@@ -302,4 +315,113 @@ test("non-aborted call returns aborted=false in dry-run", async () => {
     store: makeStore()
   });
   assert.equal(result.aborted, false);
+});
+
+
+const RETRY_PLAN_FIELDS = [
+  "summary", "epicKey", "persona", "taskAgent", "skills", "execution",
+  "risk", "parallelSafe", "branch", "worktree", "allowedPaths"
+];
+
+function retryPayload(parentRunId, plan) {
+  return {
+    ...Object.fromEntries(RETRY_PLAN_FIELDS.map((field) => [field, plan[field]])),
+    role: "worker",
+    retryOfRunId: parentRunId,
+    parentRunId,
+    attempt: 1,
+    blockerResolution: "User confirmed blocker resolved from control plane"
+  };
+}
+
+test("durable retry is claimed exactly at child dispatch", async () => {
+  const settings = makeSettings();
+  const store = makeStore();
+  const issue = makeIssue("TEST-20");
+  const plan = issuePlan(settings, issue);
+  const parentRunId = store.createRun(issue.key, plan);
+  store.transition(parentRunId, "failed-retryable", { reason: "provider failed" });
+  const retryRunId = store.createRun(issue.key, retryPayload(parentRunId, plan));
+  store.transition(retryRunId, "retry_requested");
+  let calls = 0;
+
+  const result = await dispatchOnce(settings, {
+    execute: true,
+    jira: makeJira([issue]),
+    store,
+    runIssueImpl: async () => {
+      calls += 1;
+      assert.equal(store.getRun(retryRunId).state, "retry-dispatching");
+      return { exitCode: 0, output: { runId: "child-run" } };
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(store.getRun(retryRunId).state, "retry-dispatched");
+  assert.equal(store.getRun(retryRunId).events.at(-1).payload.childRunId, "child-run");
+});
+
+test("dispatcher does not schedule a provider with persisted cooldown evidence", async () => {
+  const settings = makeSettings();
+  const store = makeStore();
+  const cooldownRun = store.createRun("TEST-COOLDOWN", issuePlan(settings, makeIssue("TEST-COOLDOWN")));
+  store.transition(cooldownRun, "failed-retryable", {
+    provider: "codex",
+    cooldownUntil: new Date(Date.now() + 60_000).toISOString()
+  });
+
+  const result = await dispatchOnce(settings, {
+    execute: false,
+    jira: makeJira([makeIssue("TEST-21")]),
+    store
+  });
+
+  assert.deepEqual(result.waves, []);
+});
+
+test("durable reconciliation runs before a failing Jira poll", async () => {
+  const settings = makeSettings();
+  const store = makeStore();
+
+  const stalePlan = issuePlan(settings, makeIssue("TEST-STALE"));
+  const staleRunId = store.createRun("TEST-STALE", stalePlan);
+  store.transition(staleRunId, "queued", {
+    provider: "codex",
+    workerLeaseId: "expired-lease",
+    workerLeaseExpiresAt: "2020-01-01T00:00:00.000Z"
+  });
+  store.acquireLock("TEST-STALE", staleRunId);
+
+  const reviewPlan = issuePlan(settings, makeIssue("TEST-REVIEW"));
+  const reviewRunId = store.createRun("TEST-REVIEW", reviewPlan);
+  store.transition(reviewRunId, "verifying", { commit: "a".repeat(40) });
+
+  const retryIssue = makeIssue("TEST-RETRY");
+  const retryPlan = issuePlan(settings, retryIssue);
+  const parentRunId = store.createRun(retryIssue.key, retryPlan);
+  store.transition(parentRunId, "failed-retryable", { reason: "provider failed" });
+  const retryRunId = store.createRun(retryIssue.key, retryPayload(parentRunId, retryPlan));
+  store.transition(retryRunId, "retry_requested");
+
+  store.upsertEpic({ key: "EPIC-1", summary: "Epic", branch: "epic/epic-1" });
+  store.upsertEpicTask({
+    epicKey: "EPIC-1", issueKey: "TEST-INTEGRATION", summary: "Task", branch: "task/test-integration"
+  });
+  store.queueEpicIntegration({
+    epicKey: "EPIC-1", issueKey: "TEST-INTEGRATION", leafBranch: "task/test-integration"
+  });
+
+  await assert.rejects(
+    dispatchOnce(settings, {
+      jira: { poll: async () => { throw new Error("Jira offline"); } },
+      store
+    }),
+    /Jira offline/
+  );
+
+  assert.equal(store.getRun(staleRunId).state, "failed-retryable");
+  assert.equal(store.getRun(reviewRunId).state, "review-queued");
+  assert.equal(store.getRun(retryRunId).state, "retry-ready");
+  assert.equal(store.getEpic("EPIC-1").integrations[0].state, "queued");
 });

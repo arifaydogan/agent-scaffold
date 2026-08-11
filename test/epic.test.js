@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { RunStore } from "../lib/store.js";
@@ -73,4 +74,42 @@ test("serialized integration blocks conflicts and epic-ready notification is ide
   assert.equal(reserveEpicReadyNotification(readyDb, "PACE-200").reserved, false);
   assert.equal(readyDb.markEpicNotificationSent("PACE-200", "epic-ready"), true);
   assert.equal(readyDb.markEpicNotificationSent("PACE-200", "epic-ready"), false);
+});
+
+
+test("leaf worktree resolves the actual slugged epic branch", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agent-epic-ref-"));
+  assert.equal(spawnSync("git", ["init", "-q", repo]).status, 0);
+  assert.equal(spawnSync("git", ["-C", repo, "config", "user.email", "test@example.com"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", repo, "config", "user.name", "Test User"]).status, 0);
+  fs.writeFileSync(path.join(repo, "README.md"), "test\n", "utf8");
+  assert.equal(spawnSync("git", ["-C", repo, "add", "README.md"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", repo, "commit", "-qm", "init"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", repo, "branch", "-M", "develop"]).status, 0);
+  assert.equal(
+    spawnSync("git", ["-C", repo, "branch", "epic/pace-124-agent-orchestration"]).status,
+    0
+  );
+
+  const epic = prepareEpicWorktree({
+    repoPath: repo,
+    root: path.join(repo, "worktrees"),
+    epicKey: "PACE-999",
+    summary: "New epic",
+    baseRef: "develop"
+  });
+  assert.equal(epic.baseRef, "develop");
+  assert.equal(epic.baseRefResolved, true);
+
+  const leaf = prepareLeafWorktree({
+    repoPath: repo,
+    root: path.join(repo, "worktrees"),
+    epicKey: "PACE-124",
+    epicBranch: "epic/pace-124",
+    issueKey: "PACE-362",
+    summary: "Recovery"
+  });
+  assert.equal(leaf.baseRef, "epic/pace-124-agent-orchestration");
+  assert.equal(leaf.baseRefResolved, true);
+  assert.equal(leaf.command.at(-1), "epic/pace-124-agent-orchestration");
 });
