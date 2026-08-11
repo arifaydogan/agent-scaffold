@@ -42,7 +42,7 @@ test("sanitizePayload redacts secrets without mutating original", () => {
     }
   };
   const sanitized = sanitizePayload(original);
-  
+
   assert.equal(sanitized.prompts, undefined);
   assert.equal(sanitized.env, undefined);
   assert.equal(sanitized.credentials, undefined);
@@ -51,8 +51,8 @@ test("sanitizePayload redacts secrets without mutating original", () => {
   assert.equal(sanitized.safe, "value");
   assert.equal(sanitized.nested.token, undefined);
   assert.equal(sanitized.nested.api_key, "[redacted]");
-  
-  // ensure original is intact
+
+  // ensure original is intac
   assert.equal(original.prompts[0], "secret prompt");
 });
 
@@ -65,7 +65,7 @@ test("persistPreSpawn stores queued state", (t) => {
     settings.cleanup();
   });
   const run = store.getRun(runId);
-  
+
   assert.equal(run.state, "queued");
   assert.equal(run.payload.branch, "test-branch");
   assert.equal(run.payload.prompts, undefined); // sanitized
@@ -74,19 +74,19 @@ test("persistPreSpawn stores queued state", (t) => {
 test("streamProgress and heartbeat record progress events", (t) => {
   const settings = createTestSettings();
   const runId = persistPreSpawn(settings, "TEST-2", { branch: "test" });
-  
+
   streamProgress(settings, runId, { text: "working", env: "secret" });
   heartbeat(settings, runId, { pid: 1234 });
-  
+
   const store = new RunStore(path.join(path.dirname(settings.source), ".agent-runtime", "runs.sqlite3"));
   t.after(() => {
     store.database.close();
     settings.cleanup();
   });
   const run = store.getRun(runId);
-  
+
   assert.equal(run.state, "progress");
-  
+
   const progressEvents = run.events.filter(e => e.state === "progress");
   assert.equal(progressEvents.length, 2);
   assert.equal(progressEvents[0].payload.text, "working");
@@ -96,7 +96,7 @@ test("streamProgress and heartbeat record progress events", (t) => {
 
 test("backfillExternalRun idempotently backfills states", (t) => {
   const settings = createTestSettings();
-  
+
   const runId1 = backfillExternalRun(settings, {
     issueKey: "PACE-362",
     pid: 15692,
@@ -105,21 +105,21 @@ test("backfillExternalRun idempotently backfills states", (t) => {
     branch: "task/pace-362-reconciler",
     blocker: "permission denied"
   });
-  
+
   const store = new RunStore(path.join(path.dirname(settings.source), ".agent-runtime", "runs.sqlite3"));
   t.after(() => {
     store.database.close();
     settings.cleanup();
   });
   const run1 = store.getRun(runId1);
-  
+
   assert.equal(run1.state, "blocked");
   const events1 = run1.events.map(e => e.state);
   assert.ok(events1.includes("queued"));
   assert.ok(events1.includes("started"));
   assert.ok(events1.includes("progress"));
   assert.ok(events1.includes("blocked"));
-  
+
   // Call again, should be idempotent and return same runId
   const runId2 = backfillExternalRun(settings, {
     issueKey: "PACE-362",
@@ -129,7 +129,7 @@ test("backfillExternalRun idempotently backfills states", (t) => {
     branch: "task/pace-362-reconciler",
     blocker: "permission denied"
   });
-  
+
   assert.equal(runId1, runId2);
   const run2 = store.getRun(runId2);
   assert.equal(run2.events.length, run1.events.length); // no new events added
@@ -143,19 +143,19 @@ test("gateTerminalSuccess blocks without evidence", (t) => {
     store.database.close();
     settings.cleanup();
   });
-  
+
   // Non-existent worktree
   let ok = gateTerminalSuccess(settings, runId, path.join(settings.repoPath, "missing"), []);
   assert.equal(ok, false);
   assert.equal(store.getRun(runId).state, "failed");
-  
+
   // Empty git repo (no changed files)
   const worktree = path.join(settings.repoPath, "wt");
   fs.mkdirSync(worktree);
   import("node:child_process").then(cp => {
     cp.spawnSync("git", ["init"], { cwd: worktree });
   });
-  
+
   // we can mock parseGitStatus or validateChangedFiles to simulate no changed files
   // gateTerminalSuccess uses child_process spawnSync, so it'll run `git status --porcelain=v1`
   // An empty dir won't be a git repo unless we git init it.

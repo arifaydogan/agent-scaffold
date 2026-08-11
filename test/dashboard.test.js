@@ -105,7 +105,9 @@ test("dashboard server is localhost-only and returns secure read-only responses"
       method: "POST"
     });
     assert.equal(mutation.status, 405);
+    await mutation.text();
   } finally {
+    dashboard.server.closeAllConnections?.();
     await new Promise((resolve) => dashboard.server.close(resolve));
   }
 });

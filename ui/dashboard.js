@@ -43,8 +43,14 @@ const STATUS_LABELS = {
   model_selected: "Model seçildi",
   progress: "İşleniyor",
   executing: "Çalışıyor",
+  retry_requested: "Yeniden deneme kuyruğunda",
   verifying: "Review bekliyor",
+  review_queued: "Review kuyruğunda",
+  reviewing: "Review ediliyor",
+  review_fix_queued: "Review düzeltmesi bekliyor",
+  accepted: "Kabul edildi",
   blocked: "Bloke",
+  human_action_required: "Senden aksiyon bekliyor",
   "failed-retryable": "Tekrar denenebilir",
   "failed-scope": "Scope ihlali",
   failed: "Başarısız"
@@ -130,7 +136,7 @@ function detailsFor(run) {
     ...(run.allowedPaths || []).map((value) => `scope · ${value}`),
     ...(run.changedFiles || []).map((value) => `changed · ${value}`)
   ];
-  
+
   if (run.worktree) values.push(`worktree · ${run.worktree}`);
   if (run.tests) values.push(`tests · ${run.tests.length} run`);
   if (run.commit) values.push(`commit · ${run.commit}`);
@@ -158,12 +164,12 @@ function taskCard(group) {
   const topline = element("div", "card-topline");
   const leftGroup = element("div", "topline-left");
   const { status: workerStatus } = getWorkerInfo(run);
-  
+
   const issueLink = element("a", "issue-key-link", run.issue);
   issueLink.href = `https://houndvision.atlassian.net/browse/${run.issue}`;
   issueLink.target = "_blank";
   issueLink.rel = "noopener noreferrer";
-  
+
   leftGroup.append(
     issueLink,
     element("span", `worker-badge worker-${workerStatus}`, formatWorkerLabel(run))
@@ -185,7 +191,13 @@ function taskCard(group) {
   identity.append(identityCopy);
   card.append(identity);
 
-  card.append(element("h3", "task-title", run.summary));
+  const taskTitle = element("h3", "task-title");
+  const taskLink = element("a", "task-title-link", run.summary);
+  taskLink.href = issueLink.href;
+  taskLink.target = "_blank";
+  taskLink.rel = "noopener noreferrer";
+  taskTitle.append(taskLink);
+  card.append(taskTitle);
   const meta = element("div", "agent-meta");
   meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
   card.append(meta);
@@ -207,16 +219,26 @@ function taskCard(group) {
     blocker.style.display = "flex";
     blocker.style.flexDirection = "column";
     blocker.style.gap = "0.25rem";
-    
-    let statusText = run.state === "blocked" ? "İnsan eylemi bekleniyor" : "Çözülüyor";
+
+    const statusText = run.humanActionRequired
+      ? "Senden aksiyon bekleniyor"
+      : run.state === "retry_requested"
+        ? "Yeniden deneme kuyruğunda"
+        : run.blockerResolved
+          ? "Blocker çözüldü"
+          : "Otomatik çözüm bekliyor";
+    const userExpectation = run.humanActionRequired
+      ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
+      : "Senden beklenen bir işlem yok";
     const titleRow = element("div", "blocker-title");
     titleRow.style.fontWeight = "bold";
     titleRow.append(element("span", "", "! "), element("span", "", statusText));
-    
+
     blocker.append(
       titleRow,
       element("span", "blocker-cause", run.blockers?.[0] || "Bilinmeyen blocker nedeni"),
-      element("span", "blocker-action", run.resolution || "Lütfen sorunu çözün veya manuel müdahale edin.")
+      element("span", "blocker-action", run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"),
+      element("span", "blocker-expectation", userExpectation)
     );
     card.append(blocker);
   }
@@ -233,7 +255,10 @@ function taskCard(group) {
     list.style.paddingLeft = "1rem";
     attempts.slice(0, -1).forEach((oldRun, idx) => {
       const li = element("li", "attempt-item");
-      li.textContent = `Deneme ${idx + 1}: ${STATUS_LABELS[oldRun.state] || oldRun.state}`;
+      const attemptTokens = oldRun.usageAvailable && oldRun.tokens > 0
+        ? `${formatNumber(oldRun.tokens)} token`
+        : "Usage unavailable";
+      li.textContent = `Deneme ${oldRun.attempt || idx + 1}: ${STATUS_LABELS[oldRun.state] || oldRun.state} - ${attemptTokens}`;
       if (oldRun.state === 'blocked' || oldRun.blockers?.length) {
         const link = element("span", "retry-link", ` → Deneme ${idx + 2} ile değiştirildi`);
         link.style.opacity = "0.7";
@@ -246,12 +271,12 @@ function taskCard(group) {
     card.append(timeline);
   }
 
-  const isTerminal = ["failed", "failed-retryable", "failed-scope", "blocked"].includes(run.state);
+  const isTerminal = ["failed", "failed-retryable", "failed-scope", "blocked", "human_action_required"].includes(run.state);
   const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
   if (isTerminal) {
-    const canRetry = (run.state === "failed-retryable" || run.state === "blocked") && attempts.length < maxAttempts;
+    const canRetry = ["failed-retryable", "blocked", "human_action_required"].includes(run.state) && (run.attempt || attempts.length) < maxAttempts;
     const hasHandler = state.snapshot.capabilities?.retryHandler;
-    
+
     const retryBtn = element("button", "retry-button", "Retry Attempt");
     retryBtn.style.marginTop = "0.5rem";
     if (!hasHandler) {
@@ -261,13 +286,24 @@ function taskCard(group) {
       retryBtn.disabled = true;
       retryBtn.title = attempts.length >= maxAttempts ? "Attempt limit reached" : "Run not retryable";
     } else {
-      retryBtn.onclick = () => {
+      retryBtn.onclick = async () => {
         if (confirm("Are you sure you want to retry this task?")) {
-           fetch(`/api/retry`, {
-             method: "POST",
-             headers: { "Content-Type": "application/json" },
-             body: JSON.stringify({ runId: run.id, issueKey: run.issue })
-           });
+          retryBtn.disabled = true;
+          retryBtn.textContent = "Kuyruğa alınıyor…";
+          try {
+            const response = await fetch("/api/retry", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ runId: run.id, issueKey: run.issue })
+            });
+            if (!response.ok) throw new Error("Retry request rejected");
+            retryBtn.textContent = "Yeniden deneme kuyruğunda";
+            await refresh();
+          } catch {
+            retryBtn.disabled = false;
+            retryBtn.textContent = "Tekrar dene";
+            retryBtn.title = "Yeniden deneme isteği gönderilemedi";
+          }
         }
       };
     }
@@ -277,13 +313,17 @@ function taskCard(group) {
   const footer = element("footer", "agent-card-footer");
   const taskTokens = attempts.reduce((sum, r) => sum + (r.tokens || 0), 0);
   const latestTokens = run.tokens;
-  
+
   const tokenText = (latestTokens === undefined || latestTokens === null || latestTokens === 0)
-    ? "Usage unavailable" 
+    ? "Usage unavailable"
     : `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
-    
+
+  const taskTokenText = taskTokens > 0
+    ? `${formatNumber(taskTokens)} token toplam - ${run.usageAvailable && latestTokens > 0 ? `${formatNumber(latestTokens)} son deneme` : "son deneme usage unavailable"}`
+    : tokenText;
+
   footer.append(
-    element("span", "", tokenText),
+    element("span", "", taskTokenText),
     element("span", "", `${run.turns || 0} turn`),
     element("span", "", run.locked ? "● locked" : "○ unlocked")
   );
@@ -294,20 +334,24 @@ function taskCard(group) {
 function visibleRuns() {
   if (!state.snapshot) return [];
   const query = state.query.trim().toLocaleLowerCase("tr-TR");
-  
+
   const groups = {};
   for (const run of state.snapshot.runs) {
     if (!groups[run.issue]) groups[run.issue] = [];
     groups[run.issue].push(run);
   }
-  
-  const groupedTasks = Object.values(groups).map(group => {
+
+  const groupedTasks = Object.values(groups).map((group) => {
+    const attempts = [...group].sort((a, b) =>
+      new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+    );
+    const latest = attempts.at(-1);
     return {
-      issue: group[0].issue,
-      summary: group[0].summary,
-      latest: group[group.length - 1],
-      attempts: group,
-      stateKind: group[group.length - 1].stateKind
+      issue: latest.issue,
+      summary: latest.summary,
+      latest,
+      attempts,
+      stateKind: latest.stateKind
     };
   });
 
@@ -335,25 +379,25 @@ function providerItem(provider) {
   const label = element("div", "capacity-label");
   const name = element("span", "provider-name");
   name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name));
-  
+
   const statsSpan = element("span", "capacity-stats");
   statsSpan.style.display = "flex";
   statsSpan.style.flexDirection = "column";
   statsSpan.style.alignItems = "flex-end";
-  
+
   const queuedText = provider.queued ? ` (${provider.queued} kuyrukta)` : "";
   statsSpan.append(element("span", "", `${provider.active} / ${provider.limit}${queuedText}`));
-  
+
   const quotaText = (provider.quota !== undefined && provider.quota !== null)
-    ? `Remaining quota: ${formatNumber(provider.quota)}`
+    ? `Remaining quota: ${new Intl.NumberFormat("tr-TR").format(provider.quota)}`
     : `Provider does not expose remaining quota`;
   const quotaEl = element("small", "", quotaText);
   quotaEl.style.fontSize = "0.65rem";
   quotaEl.style.opacity = "0.7";
   statsSpan.append(quotaEl);
-  
+
   label.append(name, statsSpan);
-  
+
   const track = element("div", "capacity-track");
   const fill = element("div", "capacity-fill");
   fill.style.width = `${Math.min(100, (provider.active / Math.max(1, provider.limit)) * 100)}%`;

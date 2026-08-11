@@ -11,7 +11,7 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
-import { backfillExternalRun } from "../lib/external-run.js";
+import { backfillExternalRun, requestExternalRetry } from "../lib/external-run.js";
 
 function usage() {
   console.error(
@@ -96,13 +96,18 @@ async function main() {
   if (parsed.command === "dashboard") {
     const port = numericArgument(parsed.args, "--port", 4317);
     const demo = parsed.args.includes("--demo");
-    const dashboard = await startDashboardServer(settings, { port, demo });
+    const dashboard = await startDashboardServer(settings, {
+      port,
+      demo,
+      retryHandler: demo ? undefined : (request) => requestExternalRetry(settings, request)
+    });
     console.log(
       `Agent Operations Console${demo ? " (demo)" : ""}: ${dashboard.url}`
     );
     await new Promise((resolve) => {
       const shutdown = () => {
         dashboard.server.close(resolve);
+        dashboard.server.closeAllConnections?.();
       };
       process.once("SIGINT", shutdown);
       process.once("SIGTERM", shutdown);

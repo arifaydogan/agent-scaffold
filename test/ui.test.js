@@ -73,7 +73,7 @@ function setupMockDOM() {
 test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => {
   const code = fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8");
   const { globalScope, elements } = setupMockDOM();
-  
+
   // Inject the code into a function that acts as the global scope
   const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderCapacity };");
   const ui = runUI(...Object.values(globalScope));
@@ -81,9 +81,9 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   // Set up test data
   ui.state.snapshot = {
     runs: [
-      { id: 1, issue: "PACE-1", summary: "First task", stateKind: "active", state: "failed", tokens: 10, workerStatus: "finished" },
-      { id: 2, issue: "PACE-1", summary: "First task", stateKind: "blocked", state: "blocked", tokens: 25, workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR" },
-      { id: 3, issue: "PACE-2", summary: "Second task", stateKind: "active", state: "verifying", tokens: 0, workerStatus: "running" }
+      { id: 2, issue: "PACE-1", summary: "First task", stateKind: "blocked", state: "blocked", tokens: 25, usageAvailable: true, attempt: 2, createdAt: "2026-08-11T10:01:00Z", workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR", humanActionRequired: true, userExpectation: "Approve review" },
+      { id: 3, issue: "PACE-2", summary: "Second task", stateKind: "active", state: "verifying", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:02:00Z", workerStatus: "running" },
+      { id: 1, issue: "PACE-1", summary: "First task", stateKind: "active", state: "failed", tokens: 10, usageAvailable: true, attempt: 1, createdAt: "2026-08-11T10:00:00Z", workerStatus: "finished" }
     ],
     capacity: {
       active: 1,
@@ -98,13 +98,13 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   };
 
   ui.renderRuns();
-  
+
   const grid = elements["#agent-grid"];
   const cards = grid.children;
-  
+
   // Test 1: Grouping - should group 3 runs into 2 task cards
   assert.equal(cards.length, 2);
-  
+
   const task1Card = cards[0];
   // Test 2: Jira links
   // We need to find the link element
@@ -112,6 +112,11 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   const leftGroup = topline.children.find(c => c.className === "topline-left");
   const issueLink = leftGroup.children.find(c => c.className === "issue-key-link");
   assert.equal(issueLink.href, "https://houndvision.atlassian.net/browse/PACE-1");
+  const taskTitle = task1Card.children.find(c => c.className === "task-title");
+  const taskTitleLink = taskTitle.children.find(c => c.className === "task-title-link");
+  assert.equal(taskTitleLink.href, "https://houndvision.atlassian.net/browse/PACE-1");
+  assert.equal(taskTitleLink.target, "_blank");
+
   assert.equal(issueLink.target, "_blank");
   assert.equal(issueLink.rel, "noopener noreferrer");
 
@@ -119,22 +124,24 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   const blockerNote = task1Card.children.find(c => c.className === "blocker-note");
   assert.ok(blockerNote, "Blocker note should be rendered for blocked task");
   const blockerTitle = blockerNote.children.find(c => c.className === "blocker-title");
-  assert.ok(blockerTitle.children.find(c => c.textContent === "İnsan eylemi bekleniyor" || (c.textNode && c.text === "İnsan eylemi bekleniyor") || c.children.some(x => x.text === "İnsan eylemi bekleniyor")));
+  assert.ok(blockerTitle.children.find(c => c.textContent === "Senden aksiyon bekleniyor" || (c.textNode && c.text === "Senden aksiyon bekleniyor") || c.children.some(x => x.text === "Senden aksiyon bekleniyor")));
   const blockerCause = blockerNote.children.find(c => c.className === "blocker-cause");
   assert.equal(blockerCause.textContent, "Needs review");
   const blockerAction = blockerNote.children.find(c => c.className === "blocker-action");
   assert.equal(blockerAction.textContent, "Review PR");
 
   // Test 4: Retry eligibility/disabled state
+  const blockerExpectation = blockerNote.children.find(c => c.className === "blocker-expectation");
+  assert.equal(blockerExpectation.textContent, "Approve review");
   const retryBtn = task1Card.children.find(c => c.className === "retry-button");
   assert.ok(retryBtn, "Retry button should be present for blocked task");
   assert.equal(retryBtn.disabled, false); // 2 attempts < 3 maxAttempts
-  
+
   // Test 5: Token unavailable vs used
   const footer1 = task1Card.children.find(c => c.className === "agent-card-footer");
   const tokenText1 = footer1.children[0].textContent;
-  assert.match(tokenText1, /35 token \(total\)/); // 10 + 25
-  assert.match(tokenText1, /25 \(this attempt\)/);
+  assert.match(tokenText1, /35 token toplam/); // 10 + 25
+  assert.match(tokenText1, /25 son deneme/);
 
   const task2Card = cards[1];
   const footer2 = task2Card.children.find(c => c.className === "agent-card-footer");
