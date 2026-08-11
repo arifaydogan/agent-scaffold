@@ -11,10 +11,11 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
+import { tick } from "../lib/reconciler.js";
 
 function usage() {
   console.error(
-    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop [args]"
+    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop|tick [args]"
   );
 }
 
@@ -76,7 +77,7 @@ async function main() {
       checks.git &&
       spawnSync("git", [
         "-c",
-        "safe.directory=*",
+        `safe.directory=${settings.repoPath}`,
         "-C",
         settings.repoPath,
         "rev-parse",
@@ -135,6 +136,13 @@ async function main() {
       )
     );
     return released ? 0 : 1;
+  }
+
+  if (parsed.command === "tick") {
+    const store = getStore(settings);
+    const result = tick(settings, store);
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
   }
 
   if (parsed.command === "report" || parsed.command === "resume") {
