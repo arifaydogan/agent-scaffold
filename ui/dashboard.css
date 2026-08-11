@@ -379,6 +379,37 @@ tbody tr:last-child td { border-bottom: 0; }
 .attempt-list { display: grid; gap: 6px; margin: 9px 0 2px; }
 .attempt-item { color: var(--muted); font-family: var(--font-code); font-size: 0.65rem; }
 .retry-link { color: #93c5fd; }
+.human-action-panel,
+.retry-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  padding-top: 8px;
+}
+.action-help,
+.retry-help,
+.retry-status,
+.copy-action-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+.copy-action-button {
+  min-height: 34px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fde68a;
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 760;
+  padding: 7px 11px;
+}
+.copy-action-button:hover:not(:disabled) { border-color: rgba(251, 191, 36, 0.6); }
+.copy-action-button:disabled { cursor: not-allowed; opacity: 0.55; }
+
 .retry-button {
   min-height: 34px;
   border: 1px solid rgba(34, 211, 238, 0.28);

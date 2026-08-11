@@ -198,12 +198,38 @@ function roleLane(lane) {
         : "Otomatik çözüm bekliyor";
     blocker.append(
       element("strong", "blocker-title", statusText),
-      element("span", "blocker-cause", run.blockers?.[0] || "Bilinmeyen blocker nedeni"),
-      element("span", "blocker-action", run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"),
-      element("span", "blocker-expectation", run.humanActionRequired
+      element("span", "blocker-cause", `Neden durdu: ${run.blockers?.[0] || "Bilinmeyen blocker nedeni"}`),
+      element("span", "blocker-expectation", `Senden beklenen: ${run.humanActionRequired
         ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
-        : "Senden beklenen bir işlem yok")
+        : "Bir işlem yok; sistem güvenli retry şartlarını kontrol edecek"}`),
+      element("span", "blocker-action", `Sonraki adım: ${run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"}`)
     );
+
+    if (run.humanActionRequired) {
+      const instruction = run.userExpectation || run.resolution || "Açıklanan insan aksiyonunu tamamla";
+      const actionPanel = element("div", "human-action-panel");
+      actionPanel.append(element(
+        "p",
+        "action-help",
+        "Bu kayıt otomatik retry ile çözülemez. Onay metnini ana Codex sohbetine gönder; coordinator işlemi doğrulayıp statüyü güncelleyecek."
+      ));
+      const copyButton = element("button", "copy-action-button", "Onay metnini kopyala");
+      const copyStatus = element("span", "copy-action-status", "");
+      copyButton.onclick = async () => {
+        try {
+          const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
+          if (!clipboard?.writeText) throw new Error("clipboard unavailable");
+          await clipboard.writeText(instruction);
+          copyButton.textContent = "Kopyalandı";
+          copyStatus.textContent = "Ana Codex sohbetine yapıştırıp gönder.";
+        } catch {
+          copyButton.disabled = true;
+          copyStatus.textContent = `Kopyalama kullanılamıyor. Şu metni gönder: ${instruction}`;
+        }
+      };
+      actionPanel.append(copyButton, copyStatus);
+      blocker.append(actionPanel);
+    }
     section.append(blocker);
   }
 
@@ -225,37 +251,49 @@ function roleLane(lane) {
     section.append(timeline);
   }
 
-  const retryable = ["failed-retryable", "blocked", "human_action_required"].includes(run.state);
+  const retryable = ["failed-retryable", "blocked"].includes(run.state) && !run.humanActionRequired;
   if (retryable) {
     const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
-    const retryBtn = element("button", "retry-button", "Tekrar dene");
+    const retryPanel = element("div", "retry-panel");
+    const retryBtn = element("button", "retry-button", "Blocker çözüldü — aynı işi yeniden çalıştır");
+    const retryStatus = element("p", "retry-status", "");
     const hasHandler = state.snapshot.capabilities?.retryHandler;
     const canRetry = (run.attempt || lane.attempts.length) < maxAttempts;
     if (!hasHandler || !canRetry) {
       retryBtn.disabled = true;
-      retryBtn.title = !hasHandler ? "Sunucuda retry handler etkin değil" : "Deneme sınırına ulaşıldı";
+      retryStatus.textContent = !hasHandler
+        ? "Yeniden çalıştırma servisi şu anda bağlı değil."
+        : `${maxAttempts}/${maxAttempts} otomatik deneme kullanıldı; yeni worker başlatılmayacak.`;
     } else {
       retryBtn.onclick = async () => {
-        if (!confirm("Bu rol için yeniden deneme başlatılsın mı?")) return;
+        if (!confirm("Teknik blocker çözüldü mü? Aynı güvenli plan yeni deneme olarak kuyruğa alınacak.")) return;
         retryBtn.disabled = true;
         retryBtn.textContent = "Kuyruğa alınıyor…";
+        retryStatus.textContent = "İstek coordinator kuyruğuna yazılıyor.";
         try {
           const response = await fetch("/api/retry", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ runId: run.id, issueKey: run.issue })
           });
-          if (!response.ok) throw new Error("Retry request rejected");
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || "Retry request rejected");
           retryBtn.textContent = "Yeniden deneme kuyruğunda";
+          retryStatus.textContent = "Statü güncellendi; uygun worker slotu açıldığında iş başlayacak.";
           await refresh();
-        } catch {
+        } catch (error) {
           retryBtn.disabled = false;
-          retryBtn.textContent = "Tekrar dene";
-          retryBtn.title = "Yeniden deneme isteği gönderilemedi";
+          retryBtn.textContent = "Blocker çözüldü — aynı işi yeniden çalıştır";
+          retryStatus.textContent = `Yeniden deneme başlatılamadı: ${error.message}`;
         }
       };
     }
-    section.append(retryBtn);
+    retryPanel.append(
+      element("p", "retry-help", "Bu işlem onay veya merge vermez; aynı branch ve güvenli planla yeni worker denemesi oluşturur."),
+      retryBtn,
+      retryStatus
+    );
+    section.append(retryPanel);
   }
 
   return section;
@@ -458,14 +496,16 @@ function visibleRuns() {
       new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
     );
     const byId = new Map(attempts.map((run) => [run.id, run]));
+    const referencedParents = new Set(attempts.map((run) => run.retryOfRunId).filter(Boolean));
     const lineageRoot = (run) => {
       let current = run;
       const seen = new Set();
-      while (current.retryOfRunId && byId.has(current.retryOfRunId) && !seen.has(current.id)) {
+      while (current.retryOfRunId && !seen.has(current.id)) {
         seen.add(current.id);
+        if (!byId.has(current.retryOfRunId)) return current.retryOfRunId;
         current = byId.get(current.retryOfRunId);
       }
-      return current.id;
+      return referencedParents.has(current.id) ? current.id : "legacy";
     };
     const roleGroups = {};
     for (const run of attempts) {

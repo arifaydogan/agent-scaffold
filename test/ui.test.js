@@ -5,6 +5,7 @@ import path from "node:path";
 
 function setupMockDOM() {
   const elements = {};
+  const clipboardWrites = [];
   const document = {
     querySelector: (sel) => {
       if (!elements[sel]) elements[sel] = createElement("div");
@@ -64,15 +65,16 @@ function setupMockDOM() {
     Date: global.Date,
     String: global.String,
     JSON: global.JSON,
-    confirm: () => true
+    confirm: () => true,
+    navigator: { clipboard: { writeText: async (value) => clipboardWrites.push(value) } }
   };
 
-  return { globalScope, elements };
+  return { globalScope, elements, clipboardWrites };
 }
 
 test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => {
   const code = fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8");
-  const { globalScope, elements } = setupMockDOM();
+  const { globalScope, elements, clipboardWrites } = setupMockDOM();
 
   // Inject the code into a function that acts as the global scope
   const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderCapacity };");
@@ -81,8 +83,9 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   // Set up test data
   ui.state.snapshot = {
     runs: [
-      { id: 2, issue: "PACE-1", summary: "First task", role: "worker", retryOfRunId: 1, stateKind: "blocked", state: "blocked", tokens: 25, usageAvailable: true, attempt: 2, createdAt: "2026-08-11T10:01:00Z", workerStatus: "finished", blockers: ["Needs review"], resolution: "Review PR", humanActionRequired: true, userExpectation: "Approve review" },
-      { id: 4, issue: "PACE-1", summary: "First task", role: "reviewer", stateKind: "review", state: "review_queued", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:03:00Z", workerStatus: "queued" },
+      { id: 2, issue: "PACE-1", summary: "First task", role: "worker", retryOfRunId: 1, stateKind: "blocked", state: "blocked", tokens: 25, usageAvailable: true, attempt: 2, createdAt: "2026-08-11T10:01:00Z", workerStatus: "finished", blockers: ["Needs review"], resolution: "Retry worker", humanActionRequired: false },
+      { id: 4, issue: "PACE-1", summary: "First task", role: "integration", stateKind: "blocked", state: "human_action_required", tokens: 0, usageAvailable: false, attempt: 3, createdAt: "2026-08-11T10:03:00Z", workerStatus: "finished", blockers: ["Explicit approval required"], resolution: "Send approval in main chat", humanActionRequired: true, userExpectation: "APPROVE TASK TO EPIC" },
+      { id: 5, issue: "PACE-1", summary: "First task", role: "reviewer", stateKind: "review", state: "review_queued", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:03:00Z", workerStatus: "queued" },
       { id: 3, issue: "PACE-2", summary: "Second task", stateKind: "active", state: "verifying", tokens: 0, usageAvailable: false, attempt: 1, createdAt: "2026-08-11T10:02:00Z", workerStatus: "running" },
       { id: 1, issue: "PACE-1", summary: "First task", role: "worker", stateKind: "active", state: "failed", tokens: 10, usageAvailable: true, attempt: 1, createdAt: "2026-08-11T10:00:00Z", workerStatus: "finished" }
     ],
@@ -122,26 +125,29 @@ test("Dashboard UI grouping, Jira links, blockers, tokens, quotas", async () => 
   assert.equal(issueLink.rel, "noopener noreferrer");
 
   const roleLanes = task1Card.children.find(c => c.className === "role-lanes");
-  assert.equal(roleLanes.children.length, 2, "worker and reviewer must stay in independent lanes");
+  assert.equal(roleLanes.children.length, 3, "worker, reviewer and integration must stay in independent lanes");
   const workerLane = roleLanes.children.find(c => c.className.includes("role-lane-worker"));
   const reviewerLane = roleLanes.children.find(c => c.className.includes("role-lane-reviewer"));
   assert.ok(workerLane);
   assert.ok(reviewerLane);
+  const integrationLane = roleLanes.children.find(c => c.className.includes("role-lane-integration"));
+  assert.ok(integrationLane);
 
   // Test 3: Blocker resolution / user expectation
   const blockerNote = workerLane.children.find(c => c.className.includes("blocker-note"));
   assert.ok(blockerNote, "Blocker note should be rendered for blocked task");
   const blockerTitle = blockerNote.children.find(c => c.className === "blocker-title");
-  assert.equal(blockerTitle.textContent, "Senden aksiyon bekleniyor");
+  assert.equal(blockerTitle.textContent, "Otomatik çözüm bekliyor");
   const blockerCause = blockerNote.children.find(c => c.className === "blocker-cause");
-  assert.equal(blockerCause.textContent, "Needs review");
+  assert.equal(blockerCause.textContent, "Neden durdu: Needs review");
   const blockerAction = blockerNote.children.find(c => c.className === "blocker-action");
-  assert.equal(blockerAction.textContent, "Review PR");
+  assert.equal(blockerAction.textContent, "Sonraki adım: Retry worker");
 
   // Test 4: Retry eligibility/disabled state
   const blockerExpectation = blockerNote.children.find(c => c.className === "blocker-expectation");
-  assert.equal(blockerExpectation.textContent, "Approve review");
-  const retryBtn = workerLane.children.find(c => c.className === "retry-button");
+  assert.match(blockerExpectation.textContent, /Senden beklenen: Bir işlem yok/);
+  const retryPanel = workerLane.children.find(c => c.className === "retry-panel");
+  const retryBtn = retryPanel.children.find(c => c.className === "retry-button");
   assert.ok(retryBtn, "Retry button should be present for blocked task");
   assert.equal(retryBtn.disabled, false); // 2 attempts < 3 maxAttempts
 
