@@ -104,6 +104,58 @@ worktrees, and blockers without exposing prompts, Jira descriptions, or log bodi
 Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`. Jira writes remain
 disabled until `jira.write_enabled = true` is set explicitly.
 
+### Resident Supervisor
+
+The supervisor runs a continuous poll/dispatch loop with persisted heartbeat, bounded
+retries, and graceful shutdown. Default mode is **plan-only** (dry-run).
+
+```powershell
+# Start the supervisor in plan-only mode (safe, no execution).
+node bin/agentctl.js --config agent-scaffold.json supervise
+
+# Run exactly one plan cycle then stop.
+node bin/agentctl.js --config agent-scaffold.json supervise --once
+
+# Run up to 5 plan cycles then stop.
+node bin/agentctl.js --config agent-scaffold.json supervise --max-cycles 5
+
+# Enable execute mode (requires supervisor.executeEnabled = true in config first).
+node bin/agentctl.js --config agent-scaffold.json supervise --execute
+
+# Check supervisor state and recent lifecycle events (local-only, no Jira).
+node bin/agentctl.js --config agent-scaffold.json supervisor-status
+
+# Request a graceful stop (local-only, no Jira). In-flight cycle is awaited.
+node bin/agentctl.js --config agent-scaffold.json supervisor-stop
+```
+
+**Execute gate:** `--execute` is fail-closed. It has no effect unless
+`supervisor.executeEnabled = true` is explicitly set in the config file. The example
+config ships with `executeEnabled: false`.
+
+**Graceful shutdown:** SIGINT and SIGTERM request a graceful stop. The supervisor
+finishes the in-flight dispatch cycle before exiting. `supervisor-stop` writes a
+persisted stop request so the running process detects it even across heartbeat
+intervals.
+
+**Human-only actions remain unchanged.** The supervisor never merges pull requests,
+transitions Jira issues to Done, writes to Jira, modifies epics, or releases live
+issue locks. Those boundaries are enforced by the orchestration protocol and are not
+configurable.
+
+### Jira Intake Modes
+
+- **Preferred orchestrated path:** Codex uses Atlassian Rovo MCP to read Jira, normalizes `{key, summary, description, issueType, status, labels}`, and pipes that JSON into `node bin/agentctl.js --config agent-scaffold.json local-run --stdin` with optional `--execute`. This path requires no local `ATLASSIAN_EMAIL` or `ATLASSIAN_API_TOKEN`.
+- **Optional resident REST poller:** `supervise`/`poll` uses `JiraClient` and does require `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN`. The supervisor Node process does not embed or inherit Codex/Rovo OAuth.
+- **Read-only boundary:** Rovo intake remains read-only until separately approved external Jira writes; merge, Done transition, and epic edits remain human-only.
+
+PowerShell-friendly example:
+
+```powershell
+$issueJson = '{"key":"PACE-123","summary":"Implement feature","description":"Details","issueType":"Task","status":"To Do","labels":["agent-ready"]}'
+$issueJson | node bin/agentctl.js --config agent-scaffold.json local-run --stdin --execute
+```
+
 ## Operating Model
 
 | Runtime role | Responsibility |
