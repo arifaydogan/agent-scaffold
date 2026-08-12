@@ -31,3 +31,33 @@ test("epics are blocked", () => {
   };
   assert.equal(evaluateIssue(issue, policy).allowed, false);
 });
+
+test("canonical done and cancelled states remain human-only", () => {
+  for (const canonicalState of ["done", "cancelled"]) {
+    const issue = {
+      key: "PACE-201",
+      summary: "Terminal work",
+      description: "Acceptance Criteria\n- [ ] Defined",
+      issueType: "Story",
+      status: "provider-specific",
+      canonicalState,
+      labels: ["agent-ready"]
+    };
+    assert.equal(evaluateIssue(issue, policy).allowed, false);
+  }
+});
+
+test("unknown canonical state fails closed", () => {
+  const issue = {
+    key: "PACE-202",
+    summary: "Unmapped work",
+    description: "Acceptance Criteria\n- [ ] Defined",
+    issueType: "Story",
+    status: "Vendor Queue",
+    canonicalState: "unknown",
+    labels: ["agent-ready"]
+  };
+  const result = evaluateIssue(issue, policy);
+  assert.equal(result.allowed, false);
+  assert.match(result.reasons.join(" "), /canonical workflow mapping/);
+});

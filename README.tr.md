@@ -1,7 +1,8 @@
 # agent-scaffold
 
-Jira'dan gelen yazilim islerini persona, skill ve task agent katmanlariyla
-yonetmek icin tasarlanmis, tekrar kullanilabilir AI ekip scaffold'u.
+Jira, GitHub Issues veya baska bir is kaynagindan gelen yazilim islerini
+provider-neutral persona, skill ve task agent katmanlariyla yonetmek icin
+tasarlanmis, tekrar kullanilabilir AI ekip scaffold'u.
 
 Bu reponun ana fikri JavaScript runtime degildir. Ana calisma modeli:
 [ORCHESTRATION.md](ORCHESTRATION.md).
@@ -25,11 +26,15 @@ protokolunu temel alir:
 - Birlikte yuklenebilen birden fazla skill
 - Backend, frontend, QA, security, data ve CV task agentlari
 - Zorunlu phase handoff formati
+- Jira ve GitHub Issues WorkSourceProvider adapter'lari
+- Canonical workflow state mapping
+- Ayri OrchestratorProvider ve ExecutorProvider registry'leri
+- Ponytail minimal-change ve codebase-memory-mcp Capability Registry gorunumu
 - Jira ve Confluence calisma kurallari
 - Git worktree modeli
 - Antigravity, Claude Code, Copilot ve Codex adapter'lari
 - PaceBuild extension pack
-- Opsiyonel Jira/worktree/Codex otomasyon runtime'i
+- Opsiyonel provider-neutral worktree/orchestration/executor runtime'i
 
 ## Hizli Baslangic
 
@@ -117,6 +122,19 @@ profile ve asset dosyalariyla birlikte repo icindedir:
 
 Kaynak ve lisans:
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+## Provider-neutral Control Plane
+
+Ilk uygulanabilir mimari dilim
+[docs/architecture/provider-neutral-control-plane.md](docs/architecture/provider-neutral-control-plane.md)
+dosyasinda aciklanir. 'workSource', 'orchestrator', 'executor' ve
+'codeIntelligence' ayri provider registry'leridir. Jira varsayilan adapter olarak
+kalir; GitHub Issues temel adapter'i ayni canonical work-item paketini uretir.
+
+4317 ekrani secili provider'lari, canonical state'leri, Capability Registry'yi ve
+proje bilgilerini gosterir. Config mutation varsayilan olarak kapalidir ve acilsa
+bile yalnizca onceden tanimli provider isimlerini secebilir; komut, credential,
+policy, merge veya Done gate'lerini degistiremez.
 
 ## Kurulum
 

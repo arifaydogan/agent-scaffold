@@ -395,17 +395,18 @@ node bin/agentctl.js --config agent-scaffold.json unlock RUN_ID
 ```
 
 `dispatch` varsayilan olarak dry-run'dir. Gercek worktree ve executor cagrisini
-yalnizca `--execute` baslatir. Jira yazmalari ayri bir policy gate'idir.
+yalnizca `--execute` baslatir. Work-source yazmalari provider'a ozel ayri bir
+policy gate'idir.
 
-### Agent Operations Console
+### Agent Scaffold Control Plane
 
-Gercek runtime verisini localhost uzerinde salt-okunur izle:
+Gercek runtime ve provider konfigurasyonunu localhost uzerinde izle:
 
 ```powershell
 node bin/agentctl.js --config agent-scaffold.json dashboard
 ```
 
-Henuz run yoksa arayuzun aktif, review ve blocked durumlarini ornek veriyle gor:
+Henuz run yoksa aktif, review ve blocked durumlarini ornek veriyle gor:
 
 ```powershell
 node bin/agentctl.js --config agent-scaffold.json dashboard --demo
@@ -417,10 +418,16 @@ Varsayilan adres `http://127.0.0.1:4317`'dir. Port degistirilebilir:
 node bin/agentctl.js --config agent-scaffold.json dashboard --port 4417
 ```
 
-Console yalnizca localhost'a bind olur ve sadece GET/HEAD kabul eder. Prompt,
-Jira aciklamasi, token degeri veya log govdesi API'ye cikmaz. Ekran task ozeti,
-persona, skill, provider/model, state, sure, token sayaci, worktree ve blocker
-metadata'sini 2.5 saniyede bir yeniler.
+Snapshot API proje bilgisini, work-source/orchestrator/executor/code-intelligence
+provider'larini, canonical workflow state'lerini, capability registry'yi ve run
+telemetrisini gosterir. Prompt, work-item aciklamasi, credential degeri ve log
+govdesi API'ye cikmaz.
+
+Server yalnizca `127.0.0.1` adresine bind olur. GET/HEAD endpoint'leri her zaman
+kullanilabilir. `PATCH /api/config/providers` varsayilan olarak 403 doner;
+yalnizca `controlPlane.configMutationEnabled: true` acikca ayarlandiginda calisir.
+Bu endpoint sadece tanimli provider isimlerini secer. Komut, credential, policy,
+`supervisor.executeEnabled`, write flag, merge veya Done gate'i degistiremez.
 
 ### Runtime'in bugunku siniri
 

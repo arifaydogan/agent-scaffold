@@ -75,5 +75,16 @@
   ],
   "upstream_pacebuild_skills": [
     "packs/pacebuild/agents/cv-engineer/skills/senior-computer-vision/SKILL.md"
-  ]
+  ],
+  "runtime_provider_modules": [
+    "lib/work-source.js",
+    "lib/jira.js",
+    "lib/github-issues.js",
+    "lib/orchestrator.js",
+    "lib/executor.js",
+    "lib/code-intelligence.js",
+    "lib/capability-registry.js",
+    "lib/workflow.js"
+  ],
+  "control_plane_contract": "docs/architecture/provider-neutral-control-plane.md"
 }

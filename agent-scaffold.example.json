@@ -1,7 +1,8 @@
 {
   "project": {
     "key": "PACE",
-    "repoPath": "."
+    "repoPath": ".",
+    "name": "PaceBuild"
   },
   "policy": {
     "allowedProjects": [
@@ -59,16 +60,77 @@
   "worktree": {
     "root": "../agent-worktrees"
   },
-  "jira": {
-    "baseUrl": "https://houndvision.atlassian.net",
-    "emailEnv": "ATLASSIAN_EMAIL",
-    "tokenEnv": "ATLASSIAN_API_TOKEN",
-    "writeEnabled": false
+  "workSource": {
+    "defaultProvider": "jira",
+    "providers": {
+      "jira": {
+        "type": "jira",
+        "baseUrl": "https://houndvision.atlassian.net",
+        "emailEnv": "ATLASSIAN_EMAIL",
+        "tokenEnv": "ATLASSIAN_API_TOKEN",
+        "writeEnabled": false,
+        "stateMapping": {
+          "ready": [
+            "Yapılacaklar"
+          ],
+          "in_progress": [
+            "Devam Ediyor"
+          ],
+          "review": [
+            "Review"
+          ],
+          "blocked": [
+            "Bloke"
+          ],
+          "done": [
+            "Tamam"
+          ]
+        }
+      },
+      "github-issues": {
+        "type": "github-issues",
+        "owner": "arifaydogan",
+        "repo": "agent-scaffold",
+        "tokenEnv": "GITHUB_TOKEN",
+        "writeEnabled": false,
+        "stateMapping": {
+          "ready": [
+            "open",
+            "agent-ready"
+          ],
+          "in_progress": [
+            "in-progress"
+          ],
+          "review": [
+            "in-review"
+          ],
+          "blocked": [
+            "blocked"
+          ],
+          "done": [
+            "closed",
+            "completed"
+          ],
+          "cancelled": [
+            "not-planned"
+          ]
+        }
+      }
+    }
+  },
+  "orchestrator": {
+    "defaultProvider": "builtin",
+    "providers": {
+      "builtin": {
+        "type": "builtin"
+      }
+    }
   },
   "executor": {
     "defaultProvider": "codex",
     "providers": {
       "codex": {
+        "type": "cli",
         "command": [
           "codex",
           "exec",
@@ -89,6 +151,7 @@
         "timeoutSeconds": 3600
       },
       "antigravity": {
+        "type": "cli",
         "command": [
           "agy",
           "--agent",
@@ -128,6 +191,26 @@
       }
     }
   },
+  "codeIntelligence": {
+    "defaultProvider": "codebase-memory",
+    "providers": {
+      "codebase-memory": {
+        "type": "codebase-memory-mcp",
+        "enabled": false,
+        "transport": "stdio",
+        "command": [
+          "codebase-memory-mcp"
+        ],
+        "readOnly": true,
+        "capabilities": [
+          "architecture",
+          "code-search",
+          "impact-analysis",
+          "call-graph"
+        ]
+      }
+    }
+  },
   "supervisor": {
     "executeEnabled": false,
     "pollIntervalSeconds": 30,
@@ -135,5 +218,8 @@
     "staleAfterSeconds": 90,
     "maxConsecutiveFailures": 3,
     "issueLimit": 10
+  },
+  "controlPlane": {
+    "configMutationEnabled": false
   }
 }

@@ -73,9 +73,17 @@ for (const file of [
 
 for (const file of [
   "lib/dashboard.js",
+  "lib/work-source.js",
+  "lib/github-issues.js",
+  "lib/orchestrator.js",
+  "lib/code-intelligence.js",
+  "lib/capability-registry.js",
+  "lib/workflow.js",
   "ui/index.html",
   "ui/dashboard.css",
-  "ui/dashboard.js"
+  "ui/dashboard.js",
+  "adapters/codebase-memory-mcp.example.json",
+  "docs/architecture/provider-neutral-control-plane.md"
 ]) {
   if (!fs.existsSync(file)) {
     errors.push(`Missing Agent Operations Console artifact: ${file}`);
