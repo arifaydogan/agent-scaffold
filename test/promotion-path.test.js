@@ -39,10 +39,10 @@ function runValidator({ BASE_REF = '', HEAD_REF = '' } = {}) {
 // ---------------------------------------------------------------------------
 
 describe('valid promotions', () => {
-  it('agent branch -> develop is permitted', () => {
+  it('task branch -> epic branch is permitted', () => {
     const { exitCode, stdout } = runValidator({
-      HEAD_REF: 'feature/my-agent-branch',
-      BASE_REF: 'develop',
+      HEAD_REF: 'task/pace-359-epic-runtime',
+      BASE_REF: 'epic/pace-124-agent-orchestration',
     });
     assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}`);
     assert.match(stdout, /OK/);
@@ -110,10 +110,7 @@ describe('bad promotion paths', () => {
       HEAD_REF: 'release',
       BASE_REF: 'develop',
     });
-    // develop accepts any non-empty head, so this actually passes
-    // but the direction semantics are captured: develop is open-target
-    // This test confirms develop truly is open (exit 0 expected)
-    assert.equal(exitCode, 0, `develop is open; any non-empty head is valid`);
+    assert.equal(exitCode, 1, `only epic branches may target develop`);
   });
 
   it('unsupported base branch is rejected', () => {
@@ -160,4 +157,11 @@ describe('missing refs', () => {
     assert.equal(exitCode, 1, `expected exit 1, got ${exitCode}`);
     assert.match(stderr, /missing/i);
   });
+});
+
+it('accepts story leaves and rejects bypassed targets', () => {
+  assert.equal(runValidator({ HEAD_REF: 'story/pace-400-api', BASE_REF: 'epic/pace-124-agent-orchestration' }).exitCode, 0);
+  assert.equal(runValidator({ HEAD_REF: 'epic/pace-124-agent-orchestration', BASE_REF: 'develop' }).exitCode, 0);
+  assert.equal(runValidator({ HEAD_REF: 'task/pace-359-epic-runtime', BASE_REF: 'develop' }).exitCode, 1);
+  assert.equal(runValidator({ HEAD_REF: 'epic/pace-124-agent-orchestration', BASE_REF: 'release' }).exitCode, 1);
 });

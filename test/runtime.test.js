@@ -35,3 +35,54 @@ test("dry-run does not claim the issue lock", () => {
   const secondRun = store.createRun(issue.key, {});
   assert.equal(store.acquireLock(issue.key, secondRun), true);
 });
+
+
+test("worktree setup failure releases the acquired issue lock", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-runtime-worktree-failure-"));
+  const settings = {
+    source: path.join(directory, "agent-scaffold.json"),
+    repoPath: directory,
+    worktreeRoot: path.join(directory, "worktrees"),
+    data: {
+      policy: {
+        allowedProjects: ["PACE"],
+        requiredLabels: ["agent-ready"],
+        humanOnlyStatuses: ["Done"],
+        maxConcurrency: 1,
+        pathScopes: { "backend-engineer": ["lib/**"] }
+      },
+      executor: {
+        defaultProvider: "codex",
+        providers: {
+          codex: {
+            command: ["codex", "exec", "{prompt}"],
+            defaultModel: "gpt-5",
+            defaultEffort: "medium",
+            mode: "accept-edits",
+            timeoutSeconds: 60
+          }
+        }
+      }
+    }
+  };
+  const issue = {
+    key: "PACE-11",
+    summary: "Add endpoint",
+    description: "Acceptance Criteria: returns HTTP 200",
+    issueType: "Story",
+    status: "In Progress",
+    labels: ["agent-ready"]
+  };
+
+  const result = runIssue(settings, issue, true, {
+    spawnSync: () => ({ status: 1, stdout: "", stderr: "worktree failed" }),
+    spawn: () => { throw new Error("provider must not start"); }
+  });
+
+  assert.equal(result.exitCode, 7);
+  const store = new RunStore(path.join(directory, ".agent-runtime", "runs.sqlite3"));
+  assert.equal(store.listLocks().length, 0);
+  const run = store.listRunsDetailed(1)[0];
+  assert.equal(run.state, "failed-retryable");
+  assert.match(run.latest_payload.reason, /worktree setup failed/i);
+});

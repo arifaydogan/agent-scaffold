@@ -418,3 +418,23 @@ Open items: [...]
 Switching to: [...]
 Human approval needed: [exact approval token]
 ```
+
+## PACE-124 epic hierarchy override
+
+For PACE-124 work, Phase 1 records the parent epic context before the first
+leaf implementation. Phase 2 uses develop -> epic/* -> task/* (or story/*)
+rather than creating a task branch directly from the remote default branch.
+
+- A task/story branch may target only its parent epic/* branch.
+- The epic integration queue is serialized; persisted conflicts block further
+  integration and the epic-ready gate.
+- The epic-ready signal is one-shot and local until an approved PM handoff
+  creates the Confluence epic dossier and Jira Task List child hierarchy.
+- Only an epic/* branch may target develop; develop -> release and
+  release -> master remain unchanged.
+- Agents never merge, push, modify an epic, or transition Jira to Done.
+
+Use profile labels to route work provider-neutrally: model-profile-luna,
+model-profile-terra, model-profile-sol, model-profile-gemini-flash, or
+model-profile-gemini-pro. Add review-claude only when a separate Claude
+review is warranted.

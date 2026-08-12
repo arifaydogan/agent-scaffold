@@ -11,10 +11,12 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
+import { recordReviewerOutcome, tick } from "../lib/reconciler.js";
+import { backfillExternalRun, requestExternalRetry } from "../lib/external-run.js";
 
 function usage() {
   console.error(
-    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop [args]"
+    "Usage: agentctl [--config file] doctor|dashboard|poll|dispatch|plan|run|local-run|runs|report|resume|unlock|supervise|supervisor-status|supervisor-stop|tick|review-result|backfill-external-run [args]"
   );
 }
 
@@ -32,6 +34,11 @@ function parseArguments(argv) {
 function commandAvailable(command) {
   const check = process.platform === "win32" ? "where" : "which";
   return spawnSync(check, [command], { stdio: "ignore" }).status === 0;
+}
+
+function stringArgument(args, name) {
+  const index = args.indexOf(name);
+  return index < 0 ? null : args[index + 1] || null;
 }
 
 function numericArgument(args, name, fallback) {
@@ -76,7 +83,7 @@ async function main() {
       checks.git &&
       spawnSync("git", [
         "-c",
-        "safe.directory=*",
+        `safe.directory=${settings.repoPath}`,
         "-C",
         settings.repoPath,
         "rev-parse",
@@ -95,13 +102,18 @@ async function main() {
   if (parsed.command === "dashboard") {
     const port = numericArgument(parsed.args, "--port", 4317);
     const demo = parsed.args.includes("--demo");
-    const dashboard = await startDashboardServer(settings, { port, demo });
+    const dashboard = await startDashboardServer(settings, {
+      port,
+      demo,
+      retryHandler: demo ? undefined : (request) => requestExternalRetry(settings, request)
+    });
     console.log(
       `Agent Operations Console${demo ? " (demo)" : ""}: ${dashboard.url}`
     );
     await new Promise((resolve) => {
       const shutdown = () => {
         dashboard.server.close(resolve);
+        dashboard.server.closeAllConnections?.();
       };
       process.once("SIGINT", shutdown);
       process.once("SIGTERM", shutdown);
@@ -135,6 +147,37 @@ async function main() {
       )
     );
     return released ? 0 : 1;
+  }
+
+  if (parsed.command === "tick") {
+    const store = getStore(settings);
+    const result = tick(settings, store);
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+
+  if (parsed.command === "review-result") {
+    const runId = parsed.args[0];
+    const implementationSha = stringArgument(parsed.args, "--sha");
+    const reviewerId = stringArgument(parsed.args, "--reviewer");
+    const verdict = stringArgument(parsed.args, "--verdict");
+    const evidence = stringArgument(parsed.args, "--evidence");
+    if (!runId || !implementationSha || !reviewerId || !verdict || !evidence) {
+      console.error(
+        "review-result requires <run-id> --sha <sha> --reviewer <id> " +
+        "--verdict <clean|changes-requested> --evidence <text>"
+      );
+      return 1;
+    }
+    const result = recordReviewerOutcome(getStore(settings), {
+      runId,
+      implementationSha,
+      reviewerId,
+      verdict,
+      evidence: [evidence]
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return result.recorded ? 0 : 1;
   }
 
   if (parsed.command === "report" || parsed.command === "resume") {
@@ -181,6 +224,27 @@ async function main() {
     console.log(
       JSON.stringify({ supervisorId, stopRequested: true }, null, 2)
     );
+    return 0;
+  }
+
+  /**
+   * backfill-external-run: Backfill an external run.
+   */
+  if (parsed.command === "backfill-external-run") {
+    const issueKey = parsed.args[parsed.args.indexOf("--issue") + 1];
+    const pid = numericArgument(parsed.args, "--pid", null);
+    const provider = parsed.args[parsed.args.indexOf("--provider") + 1];
+    const model = parsed.args[parsed.args.indexOf("--model") + 1];
+    const branch = parsed.args[parsed.args.indexOf("--branch") + 1];
+    const blocker = parsed.args.includes("--blocker") ? parsed.args[parsed.args.indexOf("--blocker") + 1] : null;
+
+    if (!issueKey || !provider || !model || !branch) {
+      console.error("Missing required arguments for backfill-external-run.");
+      return 1;
+    }
+
+    const runId = backfillExternalRun(settings, { issueKey, pid, provider, model, branch, blocker });
+    console.log(JSON.stringify({ runId, backfilled: true }, null, 2));
     return 0;
   }
 
