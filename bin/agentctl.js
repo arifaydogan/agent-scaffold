@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { loadSettings } from "../lib/config.js";
-import { JiraClient } from "../lib/jira.js";
+import { createWorkSourceProvider } from "../lib/work-source.js";
 import { configuredExecutors } from "../lib/executor.js";
 import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
@@ -108,7 +108,7 @@ async function main() {
       retryHandler: demo ? undefined : (request) => requestExternalRetry(settings, request)
     });
     console.log(
-      `Agent Operations Console${demo ? " (demo)" : ""}: ${dashboard.url}`
+      `Agent Scaffold Control Plane${demo ? " (demo)" : ""}: ${dashboard.url}`
     );
     await new Promise((resolve) => {
       const shutdown = () => {
@@ -297,8 +297,8 @@ async function main() {
     const maxConcurrency = numericArgument(parsed.args, "--concurrency", undefined);
 
     // --execute is fail-closed: if config doesn't have executeEnabled=true, supervisor
-    // will throw before any Jira polling or dispatch. This check is enforced inside
-    // runSupervisor; we surface it early for a clear CLI error message.
+    // will throw before any work-source polling or dispatch. This check is enforced
+    // inside runSupervisor; we surface it early for a clear CLI error message.
     if (execute && !settings.data.supervisor.executeEnabled) {
       console.error(
         "Error: --execute requires supervisor.executeEnabled = true in config. " +
@@ -346,15 +346,19 @@ async function main() {
     return 0;
   }
 
-  // ── Jira-dependent commands ───────────────────────────────────────────────
-  // JiraClient is instantiated here, AFTER all local-only commands have been
-  // handled. Commands above this point do not require Jira credentials.
-  const jira = new JiraClient(settings.data.jira);
+  // ── Work-source-dependent commands ───────────────────────────────────────────────
+  // The selected WorkSourceProvider is instantiated after local-only commands
+  // have been handled. Commands above this point need no provider credentials.
+  const workSource = createWorkSourceProvider(settings);
 
   if (parsed.command === "poll") {
     const limit = numericArgument(parsed.args, "--limit", 10);
     const label = settings.data.policy.requiredLabels[0];
-    const issues = await jira.poll(settings.projectKey, label, limit);
+    const issues = await workSource.poll({
+      projectKey: settings.projectKey,
+      requiredLabels: [label],
+      limit
+    });
     console.log(JSON.stringify(issues.map((issue) => issuePlan(settings, issue)), null, 2));
     return 0;
   }
@@ -374,7 +378,7 @@ async function main() {
       execute,
       limit,
       maxConcurrency,
-      jira
+      workSource
     });
 
     if (!execute) {
@@ -403,7 +407,7 @@ async function main() {
     usage();
     return 1;
   }
-  const issue = await jira.getIssue(issueKey);
+  const issue = await workSource.getWorkItem(issueKey);
   if (parsed.command === "plan") {
     console.log(JSON.stringify(issuePlan(settings, issue), null, 2));
     return 0;

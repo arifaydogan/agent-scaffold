@@ -11,6 +11,8 @@ const elements = {
   empty: document.querySelector("#empty-state"),
   activity: document.querySelector("#activity-body"),
   providers: document.querySelector("#provider-list"),
+  controlPlane: document.querySelector("#control-plane-list"),
+  capabilityCount: document.querySelector("#capability-count"),
   connectionDot: document.querySelector("#connection-dot"),
   connectionLabel: document.querySelector("#connection-label"),
   syncTime: document.querySelector("#sync-time"),
@@ -596,6 +598,31 @@ function renderCapacity() {
   elements.providers.replaceChildren(...capacity.providers.map(providerItem));
 }
 
+function renderControlPlane() {
+  if (!elements.controlPlane) return;
+  const snapshot = state.snapshot;
+  const selections = snapshot.config?.selections || {};
+  const labels = {
+    workSource: "Work source",
+    orchestrator: "Orchestrator",
+    executor: "Executor",
+    codeIntelligence: "Code intelligence"
+  };
+  const rows = Object.entries(labels).map(([key, label]) => {
+    const row = element("div", "control-plane-row");
+    row.append(element("span", "", label), element("strong", "", selections[key] || "kapalı"));
+    return row;
+  });
+  const capabilities = snapshot.capabilities?.registry || [];
+  const capabilityRow = element("div", "capability-preview");
+  capabilities.slice(0, 5).forEach((capability) => {
+    capabilityRow.append(element("span", "skill-chip", capability.id));
+  });
+  rows.push(capabilityRow);
+  elements.controlPlane.replaceChildren(...rows);
+  elements.capabilityCount.textContent = capabilities.length + " capability";
+}
+
 function renderSupervisor() {
   const snapshot = state.snapshot;
   if (!snapshot) return;
@@ -699,6 +726,7 @@ function render() {
   renderSummary();
   renderSupervisor();
   renderCapacity();
+  renderControlPlane();
   renderRuns();
   renderActivity();
 }

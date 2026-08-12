@@ -8,11 +8,11 @@ Turkish documentation:
 
 The primary operating model is the lightweight persona + skill + task-agent
 protocol in [ORCHESTRATION.md](ORCHESTRATION.md). It works without a framework.
-PaceBuild Jira execution is defined once in
-[PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md); adapters only expose it
-to their host.
-The JavaScript runtime is an optional automation layer for Jira polling, locks,
-worktrees, and Codex execution.
+PaceBuild execution policy is defined once in
+[PACEBUILD_ORCHESTRATOR.md](PACEBUILD_ORCHESTRATOR.md); providers only expose it
+to their host. Jira remains the first work-source adapter, not a runtime boundary.
+The JavaScript runtime is an optional automation layer for provider-neutral work
+intake, locks, worktrees, orchestration, and executor dispatch.
 
 ## What It Provides
 
@@ -20,7 +20,10 @@ worktrees, and Codex execution.
 - Mandatory phase handoffs that carry decisions and artifacts forward.
 - Four relevant upstream personas copied into `core/personas/`.
 - Eleven complete upstream skills copied with scripts, references, and assets.
-- Jira eligibility rules and human-only action boundaries.
+- Jira and GitHub Issues work sources with canonical workflow-state mapping.
+- Separate orchestrator and Codex/Antigravity executor provider registries.
+- Capability registry with Ponytail provenance and a codebase-memory-mcp integration point.
+- Provider-neutral eligibility rules and human-only action boundaries.
 - SQLite run history and exclusive issue locks.
 - Worktree planning with Codex and Antigravity CLI executor adapters.
 - Explicit Antigravity model profiles, structured results, and token telemetry.
@@ -97,12 +100,35 @@ Parallel dispatch is bounded by global and provider concurrency limits. Tasks wi
 overlapping path scopes are serialized, and cross-service tasks run in an exclusive
 wave.
 
-`dashboard` starts a localhost-only, read-only Agent Operations Console. It shows
-task summaries, states, personas, skills, provider/model capacity, token counters,
-worktrees, and blockers without exposing prompts, Jira descriptions, or log bodies.
+`dashboard` starts the localhost-only Agent Scaffold Control Plane on port 4317.
+Its snapshot shows project, provider selections, canonical workflow states,
+capabilities, runs, model capacity, and blockers without exposing prompts, work-item
+descriptions, credential values, or log bodies.
 
-Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`. Jira writes remain
-disabled until `jira.write_enabled = true` is set explicitly.
+Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`; GitHub Issues can use
+`GITHUB_TOKEN`. Work-source writes remain disabled in the example. Provider selection
+mutation is also fail-closed and requires `controlPlane.configMutationEnabled = true`.
+
+## Provider-neutral Control Plane
+
+The provider model and safety contract are documented in
+[docs/architecture/provider-neutral-control-plane.md](docs/architecture/provider-neutral-control-plane.md).
+The example config contains two work sources ('jira', 'github-issues'), a deterministic
+'builtin' orchestrator, existing Codex/Antigravity executors, and a disabled
+'codebase-memory-mcp' code-intelligence integration point. Legacy top-level 'jira'
+config remains supported.
+
+The local mutation API accepts provider names only:
+
+```http
+PATCH /api/config/providers
+Content-Type: application/json
+
+{"workSource":"github-issues","executor":"antigravity"}
+```
+
+It cannot modify commands, credentials, policies, execution gates, merge behavior, or
+Done transitions.
 
 ### Resident Supervisor
 
