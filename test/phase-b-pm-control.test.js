@@ -31,6 +31,7 @@ import {
 } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { reconcileReviewers, reconcileIntegrations } from "../lib/reconciler.js";
+import { selectReviewProfile } from "../lib/executor.js";
 
 class MockWorkSourceProvider extends WorkSourceProvider {
   constructor(initialIssues) {
@@ -131,22 +132,31 @@ function createTestSettings(overrides = {}) {
 
 function createMockRuntime() {
   let executions = 0;
+  const spawnedCommands = [];
+  const gitWorktreeCalls = [];
   return {
     get executionCount() {
       return executions;
     },
+    spawnedCommands,
+    gitWorktreeCalls,
     spawnSync(cmd, args) {
       if (cmd === "git") {
-        if (args.includes("status")) return { status: 0, stdout: "" };
-        if (args.includes("rev-parse")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
-        if (args.includes("commit-tree")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
+        if (args && args.includes("worktree")) {
+          gitWorktreeCalls.push({ cmd, args });
+        }
+        if (args && args.includes("status")) return { status: 0, stdout: "" };
+        if (args && args.includes("rev-parse")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
+        if (args && args.includes("commit-tree")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
         return { status: 0, stdout: "" };
       }
       executions++;
+      spawnedCommands.push({ type: "sync", cmd, args, command: [cmd, ...(args || [])] });
       return { status: 0, stdout: "build success", stderr: "" };
     },
     spawn(cmd, args) {
       executions++;
+      spawnedCommands.push({ type: "async", cmd, args, command: [cmd, ...(args || [])] });
       const child = new EventEmitter();
       child.pid = 12345;
       child.stdout = new EventEmitter();
@@ -731,3 +741,228 @@ test("Supervised Mode: approve implementation -> review fails -> rework waits fo
   assert.equal(dispatchRes3.waves.length, 1, "Rework launched after rework approval");
   assert.equal(runtime.executionCount, 2, "Execution count incremented for rework");
 });
+
+test("Action-Scoped Approval: manual + implementation approved + branchCreation not approved -> no branch/worktree mutation and no worker start", async () => {
+  const settings = createTestSettings({
+    project: { operatingMode: "manual" },
+    policy: {
+      autonomy: {
+        implementation: "approval",
+        branchCreation: "approval"
+      }
+    }
+  });
+  const store = getStore(settings);
+
+  const issue = {
+    key: "PACE-ACTION-SCOPE",
+    summary: "Implement feature",
+    description: "Acceptance Criteria: Must work.",
+    status: "In Progress",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  const plan = issuePlan(settings, issue, { store, action: "implementation" });
+  
+  // Record approval ONLY for implementation
+  store.recordApprovalDecision("PACE-ACTION-SCOPE", {
+    action: "implementation",
+    approved: true,
+    approver: "lead@example.com",
+    plan
+  });
+
+  const runtime = createMockRuntime();
+  const res = handleImplementation(settings, issue, true, runtime);
+
+  // Must fail closed because branchCreation is not approved
+  assert.equal(res.exitCode, 2, "handleImplementation must return exitCode 2 (blocked)");
+  assert.equal(runtime.executionCount, 0, "No worker process must start");
+  assert.equal(runtime.gitWorktreeCalls.length, 0, "No git worktree mutation must occur");
+
+  const run = store.getRun(res.output.runId);
+  assert.equal(run.state, "blocked");
+  assert.ok(run.events.at(-1)?.payload?.reasons?.some(r => r.includes("branchCreation")));
+});
+
+test("Review Authorization Enforcement: manual review without review approval -> reviewer does not start", async () => {
+  const settings = createTestSettings({
+    project: { operatingMode: "manual" },
+    policy: {
+      autonomy: {
+        implementation: "auto",
+        review: "approval"
+      }
+    }
+  });
+  const store = getStore(settings);
+
+  const issue = {
+    key: "PACE-REVIEW-AUTH",
+    summary: "Review feature",
+    description: "Acceptance Criteria: Must review.",
+    status: "In Review",
+    canonicalState: "review",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  const plan = issuePlan(settings, issue, { store, action: "implementation" });
+  const implRunId = store.createRun(issue.key, plan);
+  store.transition(implRunId, "review-queued", { implementationSha: "1111222233334444555566667777888899990000" });
+
+  const runtime = createMockRuntime();
+  const res = handleReview(settings, issue, true, runtime);
+
+  assert.equal(res.exitCode, 2, "handleReview must return exitCode 2 (blocked) when review is not approved");
+  assert.equal(runtime.executionCount, 0, "Reviewer provider must not be spawned");
+
+  const reviewRun = store.getRun(res.output.runId);
+  assert.equal(reviewRun.state, "blocked");
+  assert.ok(reviewRun.events.at(-1)?.payload?.reasons?.some(r => r.includes("review")));
+});
+
+test("Pinned Rework Actual Execution: initial run = codex/model-A -> global default becomes antigravity/model-B -> handleRework() invokes codex/model-A", async () => {
+  const settings = createTestSettings({
+    project: { operatingMode: "autonomous" },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: {
+          command: ["codex", "exec", "{prompt}"],
+          defaultModel: "model-A",
+          modelProfiles: { "custom-A": "model-A" },
+          defaultEffort: "low",
+          mode: "accept-edits"
+        },
+        antigravity: {
+          command: ["agy", "exec", "--model", "{model}", "{prompt}"],
+          defaultModel: "model-B",
+          modelProfiles: { "custom-B": "model-B" },
+          defaultEffort: "high",
+          mode: "accept-edits"
+        }
+      }
+    }
+  });
+  const store = getStore(settings);
+
+  const issue = {
+    key: "PACE-REWORK-EXEC",
+    summary: "Fix feature",
+    description: "Acceptance Criteria: Must fix.",
+    status: "In Progress",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  const runtime = createMockRuntime();
+
+  // 1. Run initial implementation on codex / model-A
+  const initialRes = handleImplementation(settings, issue, true, runtime);
+  assert.equal(initialRes.exitCode, 0);
+  assert.equal(runtime.executionCount, 1);
+  assert.equal(runtime.spawnedCommands[0].command[0], "codex");
+
+  // 2. Mark initial run review-failed and ready for rework
+  const implRun = store.listRunsDetailed(5).find(r => r.issue_key === issue.key);
+  const failedReviewOutcome = {
+    verdict: "changes-requested",
+    reviewerId: "reviewer-1",
+    implementationSha: "sha-1",
+    evidence: [{ id: "F1", severity: "major", category: "correctness", problem: "Bug", expected: "Fix", verification: "Test" }]
+  };
+  store.transition(implRun.id, "review-queued", { implementationSha: "sha-1" });
+  store.transition(implRun.id, "review-failed", { reviewOutcome: failedReviewOutcome });
+  store.transition(implRun.id, "failed-retryable", { attempt: 1, reviewOutcome: failedReviewOutcome });
+  store.releaseLock(issue.key, implRun.id);
+
+  // 3. Mutate global settings to defaultProvider = "antigravity" (with model-B)
+  settings.data.executor.defaultProvider = "antigravity";
+
+  // 4. Execute handleRework
+  issue.canonicalState = "rework";
+  const reworkRes = handleRework(settings, issue, true, runtime);
+  assert.equal(reworkRes.exitCode, 0);
+  assert.equal(runtime.executionCount, 2);
+
+  // 5. Assert actual executed command was pinned to codex/model-A, NOT antigravity/model-B!
+  const reworkCommand = runtime.spawnedCommands[1];
+  assert.equal(reworkCommand.command[0], "codex", "Rework command must use pinned codex provider");
+  const executingEvent = store.getRun(reworkRes.output.runId).events.find(e => e.state === "executing");
+  assert.equal(executingEvent.payload.provider, "codex", "Rework execution event must record pinned codex provider");
+  assert.equal(executingEvent.payload.model, "model-A", "Rework execution event must record pinned model-A");
+
+  // 6. Assert a brand-new issue uses the updated global default (antigravity/model-B)
+  const newIssue = {
+    key: "PACE-NEW-RUN",
+    summary: "New feature",
+    description: "Acceptance Criteria: New feature.",
+    status: "In Progress",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+  const newRes = await handleImplementation(settings, newIssue, true, runtime);
+  assert.equal(newRes.exitCode, 0);
+  assert.equal(runtime.spawnedCommands[2].command[0], "agy", "New run must use new global default antigravity");
+  assert.equal(newRes.output.provider, "antigravity");
+  assert.equal(newRes.output.model, "model-B");
+});
+
+test("Distinct Builder and Reviewer Snapshot Identities: builder and reviewer retain distinct persona, taskAgent, and effort", () => {
+  const settings = createTestSettings({
+    policy: {
+      review: {
+        provider: "antigravity",
+        persona: "qa-engineer",
+        taskAgent: "correctness-reviewer",
+        effort: "high",
+        modelProfile: "claude-review"
+      }
+    }
+  });
+
+  const issue = {
+    key: "PACE-DISTINCT-ID",
+    summary: "Complex algorithm",
+    description: "Acceptance Criteria: Pass tests.",
+    status: "In Progress",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  const builderPlan = {
+    persona: "backend-engineer",
+    taskAgent: "api-specialist",
+    skills: ["api-design", "minimal-change"],
+    risk: "normal"
+  };
+
+  const snapshot = createConfigSnapshot(settings, issue, builderPlan);
+
+  // Assert builder identity fields
+  assert.equal(snapshot.persona, "backend-engineer");
+  assert.equal(snapshot.taskAgent, "api-specialist");
+  assert.equal(snapshot.agentId, "api-specialist");
+
+  // Assert reviewer identity fields
+  assert.equal(snapshot.reviewPersona, "qa-engineer");
+  assert.equal(snapshot.reviewTaskAgent, "correctness-reviewer");
+  assert.equal(snapshot.reviewEffort, "high");
+
+  // Prove they remain distinct
+  assert.notEqual(snapshot.persona, snapshot.reviewPersona, "Builder persona and reviewer persona must be distinct");
+  assert.notEqual(snapshot.taskAgent, snapshot.reviewTaskAgent, "Builder taskAgent and reviewer taskAgent must be distinct");
+
+  // Check selectReviewProfile uses snapshot.reviewPersona / snapshot.reviewTaskAgent
+  const reviewProfile = selectReviewProfile(settings, issue, null, snapshot);
+  assert.equal(reviewProfile.persona, "qa-engineer");
+  assert.equal(reviewProfile.taskAgent, "correctness-reviewer");
+  assert.equal(reviewProfile.effort, "high");
+});
+
