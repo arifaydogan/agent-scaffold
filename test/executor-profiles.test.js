@@ -31,7 +31,9 @@ test("model profile selects its configured provider and optional Claude review i
   assert.equal(gemini.model, "gemini-3.1-pro-high");
 
   assert.equal(selectReviewProfile(settings, { labels: [] }), null);
-  const review = selectReviewProfile(settings, { labels: ["review-claude"] });
+  
+  settings.data.policy = { review: { provider: "antigravity", modelProfile: "claude-review" } };
+  const review = selectReviewProfile(settings, { labels: [] });
   assert.equal(review.provider, "antigravity");
   assert.equal(review.model, "claude-sonnet-4-6");
   assert.equal(review.reviewOnly, true);
