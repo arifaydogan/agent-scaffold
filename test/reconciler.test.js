@@ -26,6 +26,7 @@ function settings(overrides = {}) {
       policy: {
         maxConcurrency: 2,
         maxRetryAttempts: 3,
+        externalWrites: true,
         providerConcurrency: { codex: 1 },
         ...overrides.policy
       },

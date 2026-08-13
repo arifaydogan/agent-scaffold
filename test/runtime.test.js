@@ -67,10 +67,11 @@ test("worktree setup failure releases the acquired issue lock", () => {
   };
   const issue = {
     key: "PACE-11",
+    canonicalState: "ready",
     summary: "Add endpoint",
     description: "Acceptance Criteria: returns HTTP 200",
-    issueType: "Story",
-    status: "In Progress",
+    issueType: "Task",
+    status: "To Do",
     labels: ["agent-ready"]
   };
 

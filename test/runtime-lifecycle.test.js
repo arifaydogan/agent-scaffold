@@ -416,6 +416,7 @@ test("local-run: runIssueLocal produces dry-run result without Jira credentials"
 
   const issuePacket = {
     key: "PACE-354",
+    canonicalState: "ready",
     summary: "Runtime reconciliation",
     description: "## Acceptance Criteria\n- [ ] Passes",
     issueType: "Hikaye",
