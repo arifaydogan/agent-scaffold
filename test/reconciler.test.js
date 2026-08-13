@@ -26,7 +26,8 @@ function settings(overrides = {}) {
       policy: {
         maxConcurrency: 2,
         maxRetryAttempts: 3,
-        externalWrites: true,
+        gitIntegrationEnabled: true,
+        externalWritesEnabled: true,
         providerConcurrency: { codex: 1 },
         ...overrides.policy
       },
@@ -138,7 +139,7 @@ test("review outcome must independently persist matching SHA, reviewer, and evid
     implementationSha: SHA_B,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: ["npm run check: exit 0"]
+    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
   assert.equal(mismatch.recorded, false);
   assert.equal(store.getRun(runId).state, "review-queued");
@@ -148,7 +149,7 @@ test("review outcome must independently persist matching SHA, reviewer, and evid
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: ["npm run check: exit 0"]
+    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
   assert.equal(accepted.recorded, true);
   assert.equal(store.getRun(runId).state, "reviewed-clean");
@@ -166,13 +167,13 @@ test("review changes request becomes retryable and releases the issue lock", () 
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "changes-requested",
-    evidence: ["Finding P1"]
+    evidence: [{ id: "P1", severity: "error", category: "test", file: null, line: null, problem: "Finding P1", expected: null, verification: null }]
   }, { now: NOW });
 
   const result = tick(settings(), store, { now: NOW });
 
   assert.equal(result.reviewers.fixAttemptsRequested, 1);
-  assert.equal(store.getRun(runId).state, "failed-retryable");
+  assert.equal(store.getRun(runId).state, "transitioning-rework");
   assert.equal(store.listLocks().length, 0);
 });
 
@@ -205,7 +206,7 @@ test("integration remains queued without accepted review and real adapter eviden
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: ["npm run check: exit 0"]
+    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
 
   result = tick(settings(), store, { now: NOW });
@@ -232,7 +233,7 @@ test("accepted review is claimed once and integrated only with matching adapter 
     implementationSha: SHA_A,
     reviewerId: "review-agent-2",
     verdict: "clean",
-    evidence: ["npm run check: exit 0"]
+    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
 
   let calls = 0;
@@ -251,6 +252,7 @@ test("accepted review is claimed once and integrated only with matching adapter 
   assert.equal(result.integrations.integrationsCompleted, 1);
   assert.equal(store.getEpic("EPIC-2").integrations[0].state, "integrated");
   assert.equal(store.getEpic("EPIC-2").integrations[0].commit, SHA_B);
+  assert.equal(store.getRun(reviewRun).state, "reviewed-clean");
   tick(settings(), store, { now: NOW, integrationAdapter: () => { throw new Error("duplicate"); } });
 });
 
