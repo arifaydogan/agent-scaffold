@@ -87,12 +87,25 @@
           "review": [
             "Review"
           ],
+          "rework": [
+            "Agent Rework"
+          ],
+          "human_approval": [
+            "Human Approval"
+          ],
           "blocked": [
             "Bloke"
           ],
           "done": [
             "Tamam"
           ]
+        },
+        "writeMapping": {
+          "in_progress": "Devam Ediyor",
+          "review": "Review",
+          "rework": "Agent Rework",
+          "human_approval": "Human Approval",
+          "blocked": "Bloke"
         }
       },
       "github-issues": {

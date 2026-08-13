@@ -342,3 +342,77 @@ test("GitHub Issues addComment throws error on non-2xx response", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("JiraClient transition throws error when writeMapping is missing canonical state", async () => {
+  const jira = new JiraClient(
+    {
+      baseUrl: "https://example.atlassian.net",
+      emailEnv: "EMAIL",
+      tokenEnv: "TOKEN",
+      writeEnabled: true,
+      writeMapping: {} // Empty write mapping
+    },
+    { EMAIL: "agent@example.com", TOKEN: "secret" }
+  );
+
+  await assert.rejects(
+    () => jira.transition("PACE-10", "custom_state"),
+    /Jira writeMapping is missing target status for canonical state: "custom_state"/
+  );
+});
+
+test("JiraClient transition throws error when target status cannot be found in available transitions", async () => {
+  const jira = new JiraClient(
+    {
+      baseUrl: "https://example.atlassian.net",
+      emailEnv: "EMAIL",
+      tokenEnv: "TOKEN",
+      writeEnabled: true,
+      writeMapping: {
+        review: "Nonexistent Review Status"
+      }
+    },
+    { EMAIL: "agent@example.com", TOKEN: "secret" }
+  );
+
+  jira.request = async (method, route) => {
+    if (route.includes("/transitions")) {
+      return {
+        transitions: [
+          { id: "11", name: "In Progress", to: { name: "In Progress" } },
+          { id: "21", name: "Done", to: { name: "Done" } }
+        ]
+      };
+    }
+    return {};
+  };
+
+  await assert.rejects(
+    () => jira.transition("PACE-10", "review"),
+    /No available Jira transition found matching target status "Nonexistent Review Status" for issue PACE-10/
+  );
+});
+
+test("GitHub Issues listWorkItems propagates subquery errors without silently swallowing", async () => {
+  const github = new GitHubIssuesWorkSourceProvider({
+    owner: "test-owner",
+    repo: "test-repo",
+    projectKey: "GH"
+  });
+
+  github.request = async (route) => {
+    if (route.includes("agent-review")) {
+      throw new Error("GitHub API 500 Internal Error during review subquery");
+    }
+    return [];
+  };
+
+  await assert.rejects(
+    () => github.listWorkItems({
+      requiredLabels: ["agent-ready"],
+      canonicalStates: ["ready", "review"]
+    }),
+    /GitHub API 500 Internal Error during review subquery/
+  );
+});
+

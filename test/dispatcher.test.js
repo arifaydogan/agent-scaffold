@@ -426,3 +426,70 @@ test("durable reconciliation runs before a failing Jira poll", async () => {
   assert.equal(store.getRun(retryRunId).state, "retry-ready");
   assert.equal(store.getEpic("EPIC-1").integrations[0].state, "queued");
 });
+
+test("global active-worker capacity accounting accounts for running workers (maxConcurrency=3, 2 active -> 1 scheduled)", async () => {
+  const settings = makeSettings({ maxConcurrency: 3, pathScopes: {} });
+  const store = makeStore();
+
+  // Create 2 already-running active worker runs with matching project key TEST
+  const activePlan1 = issuePlan(settings, makeIssue("TEST-ACTIVE-1"));
+  const activeRun1 = store.createRun("TEST-ACTIVE-1", activePlan1);
+  store.transition(activeRun1, "executing", { provider: "codex" });
+
+  const activePlan2 = issuePlan(settings, makeIssue("TEST-ACTIVE-2"));
+  const activeRun2 = store.createRun("TEST-ACTIVE-2", activePlan2);
+  store.transition(activeRun2, "started", { provider: "codex" });
+
+  // 3 eligible new tasks polled from Jira
+  const newIssues = [
+    makeIssue("TEST-NEW-1"),
+    makeIssue("TEST-NEW-2"),
+    makeIssue("TEST-NEW-3")
+  ];
+
+  const result = await dispatchOnce(settings, {
+    execute: false,
+    jira: makeJira(newIssues),
+    store
+  });
+
+  // Exactly 1 new task may be scheduled in the first wave
+  assert.ok(result.waves.length >= 1);
+  assert.equal(result.waves[0].length, 1, "First wave has exactly 1 task scheduled due to 2 already-active workers out of maxConcurrency 3");
+  assert.equal(result.waves[0][0].issue, "TEST-NEW-1");
+});
+
+test("write-disabled operation prevents duplicate builder dispatch when Jira=ready, local=review-queued, unlocked", async () => {
+  const settings = makeSettings({ maxConcurrency: 3 });
+  const store = makeStore();
+
+  // Local run is in review-queued and lock is released
+  const issueKey = "PACE-WRITE-DISABLED";
+  const plan = issuePlan(settings, makeIssue(issueKey));
+  const runId = store.createRun(issueKey, plan);
+  store.transition(runId, "review-queued", { implementationSha: "abcd".repeat(10) });
+
+  // Lock is NOT held
+  assert.equal(store.listLocks().find(l => l.issue_key === issueKey), undefined);
+
+  // Jira poll still returns the issue as ready (because writes were disabled)
+  const polledIssue = {
+    ...makeIssue(issueKey),
+    canonicalState: "ready"
+  };
+
+  let builderDispatched = false;
+  const result = await dispatchOnce(settings, {
+    execute: true,
+    jira: makeJira([polledIssue]),
+    store,
+    runIssueImpl: async () => {
+      builderDispatched = true;
+      return { exitCode: 0, output: { runId: "duplicate-run" } };
+    }
+  });
+
+  assert.equal(builderDispatched, false, "Duplicate builder must not be dispatched for an issue already in review-queued");
+  assert.equal(result.waves.length, 0, "No new builder waves should be dispatched for this issue");
+});
+

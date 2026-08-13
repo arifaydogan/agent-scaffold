@@ -358,3 +358,57 @@ test("retry stays queued and consumes no capacity while provider is cooling down
   assert.equal(result.workers.active, 0);
   assert.equal(store.getRun(retryRunId).state, "retry_requested");
 });
+
+test("safeWorkSourceMutate returns explicit performed flag and reasons", async () => {
+  const { safeWorkSourceMutate } = await import("../lib/reconciler.js");
+
+  // 1. provider.writeEnabled === false
+  const ws1 = { writeEnabled: false, transition: async () => {} };
+  const res1 = await safeWorkSourceMutate(ws1, settings({ policy: { externalWritesEnabled: true, autonomyEnabled: true } }), "transition", "P-1", "review");
+  assert.deepEqual(res1, { performed: false, reason: "provider-write-disabled" });
+
+  // 2. policy.externalWritesEnabled === false
+  const ws2 = { writeEnabled: true, transition: async () => {} };
+  const res2 = await safeWorkSourceMutate(ws2, settings({ policy: { externalWritesEnabled: false, autonomyEnabled: true } }), "transition", "P-1", "review");
+  assert.deepEqual(res2, { performed: false, reason: "external-writes-disabled" });
+
+  // 3. policy.autonomyEnabled === false
+  const ws3 = { writeEnabled: true, transition: async () => {} };
+  const res3 = await safeWorkSourceMutate(ws3, settings({ policy: { externalWritesEnabled: true, autonomyEnabled: false } }), "transition", "P-1", "review");
+  assert.deepEqual(res3, { performed: false, reason: "autonomy-disabled" });
+
+  // 4. All permitted -> performed: true
+  let calledWith = null;
+  const ws4 = { writeEnabled: true, transition: async (k, s) => { calledWith = [k, s]; return "ok"; } };
+  const res4 = await safeWorkSourceMutate(ws4, settings({ policy: { externalWritesEnabled: true, autonomyEnabled: true } }), "transition", "P-1", "review");
+  assert.equal(res4.performed, true);
+  assert.equal(res4.result, "ok");
+  assert.deepEqual(calledWith, ["P-1", "review"]);
+});
+
+test("write-disabled operation does not advance transitioning-review or release lock", async () => {
+  const store = createTestStore();
+  const plan = canonicalPlan();
+  const runId = store.createRun("PACE-8", plan);
+  store.transition(runId, "transitioning-review", { commit: SHA_A });
+  store.acquireLock("PACE-8", runId);
+
+  const disabledWorkSource = {
+    writeEnabled: false,
+    transition: async () => {}
+  };
+
+  const promises = [];
+  tick(settings({ policy: { externalWritesEnabled: false } }), store, {
+    execute: true,
+    workSource: disabledWorkSource,
+    promises,
+    now: NOW
+  });
+  await Promise.allSettled(promises);
+
+  // Run remains in transitioning-review and lock is NOT released
+  assert.equal(store.getRun(runId).state, "transitioning-review");
+  assert.equal(store.listLocks().find(l => l.issue_key === "PACE-8")?.run_id, runId);
+});
+
