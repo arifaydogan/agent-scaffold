@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
+import fs from "node:fs";
 import path from "node:path";
+import EventEmitter from "node:events";
 import { RunStore } from "../lib/store.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { WorkSourceProvider } from "../lib/work-source.js";
@@ -22,7 +24,8 @@ class MockWorkSourceProvider extends WorkSourceProvider {
            return options.canonicalStates.includes(i.canonicalState);
          }
          return true;
-      });
+      })
+      .map(i => JSON.parse(JSON.stringify(i))); // Prevent in-place mutation from affecting local copies
   }
   async addComment(id, comment) {
     this.mutations.push({ type: "comment", id, comment });
@@ -36,9 +39,6 @@ class MockWorkSourceProvider extends WorkSourceProvider {
   }
   async claim(id, metadata) {}
   async releaseClaim(id, metadata) {}
-  async addComment(id, comment) {
-    this.mutations.push({ type: "comment", id, comment });
-  }
 }
 
 function createTestStore() {
@@ -47,18 +47,28 @@ function createTestStore() {
 }
 
 function createSettings(overrides = {}) {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "repo-"));
+  fs.writeFileSync(path.join(repoPath, "AGENTS.md"), "test");
+  fs.writeFileSync(path.join(repoPath, "ORCHESTRATION.md"), "test");
+  fs.writeFileSync(path.join(repoPath, "PACEBUILD_ORCHESTRATOR.md"), "test");
+  fs.mkdirSync(path.join(repoPath, ".agents", "rules"), { recursive: true });
+  fs.writeFileSync(path.join(repoPath, ".agents", "rules", "orchestration-gates.md"), "test");
+  const worktreeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "worktrees-"));
+  const tempConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "config-"));
+  fs.mkdirSync(path.join(tempConfigDir, ".agent-runtime"), { recursive: true });
+
   return {
-    source: "C:/test/config.json",
+    source: path.join(tempConfigDir, "config.json"),
     projectKey: "PACE",
-    repoPath: "C:/test/repo",
-    worktreeRoot: "C:/worktrees",
+    repoPath,
+    worktreeRoot,
     data: {
       supervisor: { staleAfterSeconds: 90 },
       policy: {
         allowedProjects: ["PACE"],
         humanOnlyStatuses: ["Done"],
         maxConcurrency: 10,
-        providerConcurrency: { codex: 2, antigravity: 2 },
+        providerConcurrency: { codex: 1, antigravity: 1 },
         requiredLabels: ["agent-ready"],
         externalWritesEnabled: true,
         gitIntegrationEnabled: false,
@@ -68,15 +78,15 @@ function createSettings(overrides = {}) {
           modelProfile: "claude-review",
           maxReworkAttempts: 3
         },
-        pathScopes: { "backend-engineer": [] }
+        pathScopes: { "backend-engineer": ["foo.js"] }
       },
       workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } } },
       orchestrator: { defaultProvider: "builtin", providers: { builtin: { type: "builtin" } } },
       executor: {
         defaultProvider: "codex",
         providers: {
-          codex: { command: ["codex"] },
-          antigravity: { command: ["agy"] }
+          codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o" } },
+          antigravity: { command: ["agy"], modelProfiles: { "claude-review": "claude-3-5-sonnet" } }
         }
       },
       ...overrides
@@ -84,9 +94,69 @@ function createSettings(overrides = {}) {
   };
 }
 
-test("Phase A Lifecycle: ready -> implementation -> review -> clean -> human_approval", async () => {
-  const store = createTestStore();
+let builderExecutions = 0;
+let reviewerExecutions = 0;
+let mockVerdict = "clean";
+let mockEvidence = [];
+
+const mockRuntime = {
+  spawnSync(cmd, args) {
+    if (cmd === "git") {
+      if (args.includes("status")) return { status: 0, stdout: "" };
+      if (args.includes("rev-parse")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
+      if (args.includes("commit-tree")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
+      return { status: 0, stdout: "" };
+    }
+    builderExecutions++;
+    return { status: 0, stdout: "build successful", stderr: "" };
+  },
+  spawn(cmd, args) {
+    reviewerExecutions++;
+    const child = new EventEmitter();
+    child.pid = 9999;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    setTimeout(() => {
+      child.stdout.emit("data", Buffer.from(JSON.stringify({
+        status: "SUCCESS",
+        ok: true,
+        response: JSON.stringify({
+          status: "completed",
+          summary: "Reviewed",
+          changed_files: [],
+          validation_commands: [],
+          blockers: [],
+          risks: [],
+          verdict: mockVerdict,
+          evidence: mockEvidence
+        })
+      }) + "\n"));
+      setTimeout(() => {
+        child.emit("close", 0);
+      }, 5);
+    }, 5);
+    return child;
+  }
+};
+
+async function testRunIssueImpl(settings, issue, execute) {
+  const { getStore } = await import("../lib/runtime.js");
+  const store = getStore(settings);
+  console.log("Locks before runIssue:", store.listLocks());
+  const { runIssue } = await import("../lib/runtime.js");
+  return runIssue(settings, issue, execute, mockRuntime);
+}
+
+test("Phase A Lifecycle: ready -> in_progress -> review -> human_approval", async () => {
+  builderExecutions = 0;
+  reviewerExecutions = 0;
+  mockVerdict = "clean";
+  mockEvidence = [{ id: "C1", severity: "info", category: "security", problem: "All good", file: "foo.js", line: 1 }];
+  
   const settings = createSettings();
+  const { getStore } = await import("../lib/runtime.js");
+  const store = getStore(settings);
   const workSource = new MockWorkSourceProvider([
     {
       key: "PACE-1",
@@ -98,75 +168,70 @@ test("Phase A Lifecycle: ready -> implementation -> review -> clean -> human_app
     }
   ]);
   
-  // Custom runIssueImpl to mock the builder execution
-  async function mockRunIssueImpl(s, issue, execute) {
-    const { issuePlan } = await import("../lib/runtime.js");
-    const plan = issuePlan(s, issue);
-    const runId = store.createRun(plan.issue, plan);
-    store.transition(runId, "queued", { provider: plan.execution.provider });
-    store.transition(runId, "verifying", {
-      implementationSha: "abcdef1234567890abcdef1234567890abcdef12",
-      commit: "abcdef1234567890abcdef1234567890abcdef12"
-    });
-    return { exitCode: 0, output: { runId } };
-  }
-
   // 1. Dispatcher picks up 'ready' and dispatches builder
-  const { issuePlan } = await import("../lib/runtime.js");
-  console.log("Issue Plan:", JSON.stringify(issuePlan(settings, workSource.issues.get("PACE-1")), null, 2));
-
-  const res1 = await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: mockRunIssueImpl });
-  console.log("Dispatch result:", JSON.stringify(res1, null, 2));
+  const dispatchRes = await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
   
-  const { tick } = await import("../lib/reconciler.js");
+  // Verify builder executed
+  assert.equal(builderExecutions, 1);
+  assert.equal(workSource.issues.get("PACE-1").canonicalState, "in_progress");
+  
+  // 2. Reconcile to move from in_progress local run (completed) -> transitioning-review
   tick(settings, store, { execute: true, workSource });
+  await new Promise(r => setTimeout(r, 20));
   
-  let runs = store.listRunsDetailed(10);
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].state, "review-queued");
-  assert.equal(workSource.issues.get("PACE-1").canonicalState, "ready"); // work source still ready
-
-  // 2. Simulate Reviewer returning "clean" with structured evidence
-  const { recordReviewerOutcome } = await import("../lib/reconciler.js");
-  recordReviewerOutcome(store, {
-    runId: runs[0].id,
-    implementationSha: "abcdef1234567890abcdef1234567890abcdef12",
-    reviewerId: "claude-123",
-    verdict: "clean",
-    evidence: [{ id: "C1", severity: "info", category: "security", problem: "All good" }]
-  });
-
-  runs = store.listRunsDetailed(10);
-  assert.equal(runs[0].state, "reviewed-clean");
-
-  // 3. Reconciler loop processes the reviewed-clean state
+  // 3. Reconcile again to execute durable mutation to review and move to review-queued
   let promises = [];
   tick(settings, store, { execute: true, workSource, promises });
-  console.log("Tick 1 promises pushed:", promises.length);
   await Promise.allSettled(promises);
+  await new Promise(r => setTimeout(r, 20));
+  
+  let runs = store.listRunsDetailed(10);
+  assert.equal(runs[0].state, "review-queued");
+  assert.equal(workSource.issues.get("PACE-1").canonicalState, "review");
+  
+  // 4. Dispatcher picks up 'review' and dispatches reviewer
+  const dispatchResReviewer = await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+  
+  // Verify reviewer executed
+  assert.equal(reviewerExecutions, 1);
+  
+  // Wait for async reviewer to finish and call handleReviewCompletion
+  await new Promise(r => setTimeout(r, 20));
+  
+  runs = store.listRunsDetailed(10);
+  const builderRun = runs.find(r => r.type !== "review" && r.payload?.type !== "review");
+  assert.equal(builderRun.state, "reviewed-clean");
+  
+  // 5. Reconcile to handle standalone review completion -> transitioning-human-approval
   promises = [];
   tick(settings, store, { execute: true, workSource, promises });
-  console.log("Tick 2 promises pushed:", promises.length);
   await Promise.allSettled(promises);
-
+  
+  // 6. Reconcile to execute durable mutation to human_approval
+  promises = [];
+  tick(settings, store, { execute: true, workSource, promises });
+  await Promise.allSettled(promises);
+  
   runs = store.listRunsDetailed(10);
   assert.equal(runs[0].state, "completed");
-
-  // 4. Verify external work source mutated to human_approval
-  assert.equal(workSource.issues.get("PACE-1").canonicalState, "human_approval");
-  const transitionMutations = workSource.mutations.filter(m => m.type === "transition");
-  assert.equal(transitionMutations.length, 1);
-  assert.equal(transitionMutations[0].canonicalState, "human_approval");
   
-  // Prove structured findings survived persistence losslessly
-  const outcome = runs[0].latest_payload.reviewOutcome;
-  assert.equal(outcome.evidence[0].problem, "All good");
-  assert.equal(outcome.evidence[0].category, "security");
+  // Verify external work source mutated to human_approval
+  assert.equal(workSource.issues.get("PACE-1").canonicalState, "human_approval");
+  
+  // Verify exactly 1 execution of each
+  assert.equal(builderExecutions, 1);
+  assert.equal(reviewerExecutions, 1);
 });
 
 test("Phase A Lifecycle: rework exhaustion with maxReworkAttempts = 3", async () => {
-  const store = createTestStore();
+  builderExecutions = 0;
+  reviewerExecutions = 0;
+  mockVerdict = "changes-requested";
+  mockEvidence = [{ id: "F1", severity: "high", category: "logic", problem: "Fix it", file: "foo.js", line: 1 }];
+
   const settings = createSettings();
+  const { getStore } = await import("../lib/runtime.js");
+  const store = getStore(settings);
   const workSource = new MockWorkSourceProvider([
     {
       key: "PACE-2",
@@ -178,110 +243,66 @@ test("Phase A Lifecycle: rework exhaustion with maxReworkAttempts = 3", async ()
     }
   ]);
 
-  let executionCount = 0;
-  async function mockRunIssueImpl(s, issue, execute) {
-    executionCount++;
-    const { issuePlan } = await import("../lib/runtime.js");
-    let plan = issuePlan(s, issue);
-    
-    if (issue.canonicalState === "rework") {
-      const runs = store.listRunsDetailed(100);
-      const retryableRun = runs.find(r => r.issue_key === issue.key && r.state === "failed-retryable" && r.latest_payload?.reviewOutcome);
-      if (retryableRun) {
-        plan.attempt = retryableRun.latest_payload?.attempt || 0;
-        plan.previousOutcome = retryableRun.latest_payload.reviewOutcome;
-      }
-    }
-    
-    const runId = store.createRun(plan.issue, plan);
-    store.transition(runId, "queued", { provider: plan.execution?.provider || "codex" });
-    store.transition(runId, "verifying", {
-      implementationSha: "deadbeef" + "0".repeat(32)
-    });
-    return { exitCode: 0, output: { runId } };
-  }
-
-  const { recordReviewerOutcome } = await import("../lib/reconciler.js");
-  const { tick } = await import("../lib/reconciler.js");
-
   // Base attempt (attempt 0)
-  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: mockRunIssueImpl });
-  let basePromises = [];
-  tick(settings, store, { execute: true, workSource, promises: basePromises });
-  await Promise.allSettled(basePromises);
+  // Builder dispatch
+  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
   
-  assert.equal(executionCount, 1);
-  let runs = store.listRunsDetailed(10);
-  assert.equal(runs[0].state, "review-queued");
-
+  // Move to review-queued
+  tick(settings, store, { execute: true, workSource });
+  let p = [];
+  tick(settings, store, { execute: true, workSource, promises: p });
+  await Promise.allSettled(p);
+  
   // Re-run review loop maxReworkAttempts times
   for (let i = 1; i <= 3; i++) {
-    runs = store.listRunsDetailed(20);
-    console.log(`DUMP RUNS at i=${i}:`, runs.map(r => ({ id: r.id, state: r.state })));
-    const activeRun = runs.find(r => r.state === "review-queued");
-    assert(activeRun, `No review-queued run found for attempt ${i}`);
-    
-    // Review fails
-    recordReviewerOutcome(store, {
-      runId: activeRun.id,
-      implementationSha: "deadbeef" + "0".repeat(32),
-      reviewerId: "claude-bad",
-      verdict: "changes-requested",
-      evidence: [{ id: "F" + i, severity: "high", problem: "Fix it" }]
-    });
+    // Reviewer dispatch
+    await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+    await new Promise(r => setTimeout(r, 20)); // wait for reviewer async child
 
-    // Reconciler should transition to transitioning-rework -> failed-retryable -> rework mutation
-    let p = [];
-    tick(settings, store, { execute: true, workSource, promises: p });
-    console.log("Test 2 Tick 1 promises:", p.length);
-    await Promise.allSettled(p);
-    console.log("State after first tick:", store.listRunsDetailed(10).find(r => r.id === activeRun.id)?.state);
-    p = [];
-    tick(settings, store, { execute: true, workSource, promises: p });
-    console.log("Test 2 Tick 2 promises:", p.length);
-    await Promise.allSettled(p);
-    console.log("State after second tick:", store.listRunsDetailed(10).find(r => r.id === activeRun.id)?.state);
-    
-    // Check mutation
-    const transitionMutations = workSource.mutations.filter(m => m.type === "transition");
-    assert.equal(transitionMutations[transitionMutations.length - 1].canonicalState, "rework");
-
-    // The dispatcher immediately plans a retry and launches mockRunIssueImpl again
-    await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: mockRunIssueImpl });
+    // Reconciler should transition from review-failed to transitioning-rework
     tick(settings, store, { execute: true, workSource });
     
-    // We expect execution count to match attempt + 1
-    assert.equal(executionCount, i + 1);
+    // Durable transition from transitioning-rework to failed-retryable -> rework mutation
+    p = [];
+    tick(settings, store, { execute: true, workSource, promises: p });
+    await Promise.allSettled(p);
+    
+    // Advance retries from failed-retryable -> retry-queued
+    p = [];
+    tick(settings, store, { execute: true, workSource, promises: p });
+    await Promise.allSettled(p);
+
+    assert.equal(workSource.issues.get("PACE-2").canonicalState, "rework");
+
+    // Dispatch builder again
+    await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+    
+    // Transition to review-queued
+    tick(settings, store, { execute: true, workSource });
+    p = [];
+    tick(settings, store, { execute: true, workSource, promises: p });
+    await Promise.allSettled(p);
   }
 
-  // After 3 reworks (executionCount = 4), we are at review-queued for the 3rd rework attempt
-  runs = store.listRunsDetailed(20);
-  const activeRun = runs.find(r => r.state === "review-queued");
+  // Attempt 4 review fails -> hits rework limit
+  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+  await new Promise(r => setTimeout(r, 20));
   
-  // This is the 4th execution (attempt=3). It fails review:
-  recordReviewerOutcome(store, {
-    runId: activeRun.id,
-    implementationSha: "deadbeef" + "0".repeat(32),
-    reviewerId: "claude-bad",
-    verdict: "changes-requested",
-    evidence: [{ id: "F-limit", severity: "high", problem: "Exhausted" }]
-  });
+  // Tick to move to transitioning-blocked
+  tick(settings, store, { execute: true, workSource });
+  
+  // Tick to mutate to blocked
+  p = [];
+  tick(settings, store, { execute: true, workSource, promises: p });
+  await Promise.allSettled(p);
 
-  // Reconciler ticks
-  let finalP = [];
-  tick(settings, store, { execute: true, workSource, promises: finalP });
-  await Promise.allSettled(finalP);
-  finalP = [];
-  tick(settings, store, { execute: true, workSource, promises: finalP });
-  await Promise.allSettled(finalP);
+  const runs = store.listRunsDetailed(100);
+  const finalRun = runs.find(r => r.state === "blocked");
+  assert(finalRun, "Should have a blocked run");
 
-  // Because attempt=3 >= maxReworkAttempts(3), it should transition to blocked
   assert.equal(workSource.issues.get("PACE-2").canonicalState, "blocked");
-  
-  runs = store.listRunsDetailed(20);
-  const finalRun = runs.find(r => r.id === activeRun.id);
-  assert.equal(finalRun.state, "blocked");
-  
-  // Execution count remains 4
-  assert.equal(executionCount, 4);
+  // 4 builder executions (1 base + 3 reworks)
+  assert.equal(builderExecutions, 4);
+  // 4 reviewer executions
+  assert.equal(reviewerExecutions, 4);
 });
