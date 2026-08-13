@@ -6,7 +6,6 @@
     "operatingMode": "autonomous"
   },
   "policy": {
-    "operatingMode": "autonomous",
     "autonomy": {
       "discovery": "auto",
       "planning": "auto",

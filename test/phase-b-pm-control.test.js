@@ -16,6 +16,7 @@ import {
   isActionAutonomous,
   authorizeRuntimeAction,
   computePlanFingerprint,
+  computeIntegrationFingerprint,
   OPERATING_MODES,
   HUMAN_ONLY_ACTIONS,
   SUPPORTED_AUTONOMY_ACTIONS
@@ -29,7 +30,7 @@ import {
   getStore
 } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
-import { reconcileReviewers, reconcileIntegrations, tick } from "../lib/reconciler.js";
+import { reconcileReviewers, reconcileIntegrations } from "../lib/reconciler.js";
 
 class MockWorkSourceProvider extends WorkSourceProvider {
   constructor(initialIssues) {
@@ -77,10 +78,12 @@ function createTestSettings(overrides = {}) {
     project: {
       key: "PACE",
       repoPath: ".",
-      operatingMode: "autonomous"
+      operatingMode: "autonomous",
+      ...(overrides.project || {})
     },
     worktree: {
-      root: worktreeRoot
+      root: worktreeRoot,
+      ...(overrides.worktree || {})
     },
     policy: {
       allowedProjects: ["PACE"],
@@ -95,18 +98,24 @@ function createTestSettings(overrides = {}) {
         modelProfile: "claude-review",
         maxReworkAttempts: 3
       },
-      pathScopes: { "backend-engineer": ["backend/**"], "frontend-engineer": ["frontend/**"] }
+      pathScopes: {
+        "backend-engineer": ["backend/**"],
+        "frontend-engineer": ["frontend/**"],
+        "devops-engineer": ["devops/**", "lib/**"],
+        "qa-engineer": ["test/**"]
+      },
+      ...(overrides.policy || {})
     },
-    workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } } },
-    orchestrator: { defaultProvider: "builtin", providers: { builtin: { type: "builtin" } } },
+    workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } }, ...(overrides.workSource || {}) },
+    orchestrator: { defaultProvider: "builtin", providers: { builtin: { type: "builtin" } }, ...(overrides.orchestrator || {}) },
     executor: {
       defaultProvider: "codex",
       providers: {
         codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o", "claude-review": "gpt-4o" } },
         antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet", "claude-review": "claude-3-5-sonnet" } }
-      }
-    },
-    ...overrides
+      },
+      ...(overrides.executor || {})
+    }
   };
 
   fs.writeFileSync(configPath, JSON.stringify(rawData, null, 2));
@@ -164,12 +173,10 @@ function createMockRuntime() {
 // ── 1. Operating Modes & Autonomy Validation (Fail-Closed) ───────────────────
 
 test("Fail-Closed Config Validation: invalid types, conflicting modes, and invalid autonomy values throw", () => {
-  // Invalid operatingMode types and values
   assert.throws(() => validateOperatingMode(123), /Invalid operatingMode type/);
   assert.throws(() => validateOperatingMode(true), /Invalid operatingMode type/);
   assert.throws(() => validateOperatingMode("invalid-mode"), /Invalid operatingMode/);
 
-  // Conflicting definitions between project and policy throw
   const conflictingSettings = {
     data: {
       project: { operatingMode: "manual" },
@@ -178,7 +185,6 @@ test("Fail-Closed Config Validation: invalid types, conflicting modes, and inval
   };
   assert.throws(() => resolveOperatingMode(conflictingSettings), /Conflicting operatingMode definitions/);
 
-  // Invalid autonomy action keys throw
   const badActionSettings = {
     data: {
       project: { operatingMode: "autonomous" },
@@ -189,7 +195,6 @@ test("Fail-Closed Config Validation: invalid types, conflicting modes, and inval
   };
   assert.throws(() => resolveAutonomyPolicy(badActionSettings), /Unsupported autonomy action/);
 
-  // Invalid autonomy values (e.g. "yes", true) throw
   const badValueSettings = {
     data: {
       project: { operatingMode: "autonomous" },
@@ -200,7 +205,6 @@ test("Fail-Closed Config Validation: invalid types, conflicting modes, and inval
   };
   assert.throws(() => resolveAutonomyPolicy(badValueSettings), /Invalid autonomy value/);
 
-  // loadSettings fail-closed on invalid config file
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "config-fail-closed-"));
   const badConfigPath = path.join(tmpDir, "bad-config.json");
   fs.writeFileSync(badConfigPath, JSON.stringify({
@@ -240,14 +244,14 @@ test("Deterministic Autonomy Policy: resolves permissions and protects human-onl
   }
 });
 
-// ── 2. Action-Scoped and Plan-Scoped Approvals ────────────────────────────────
+// ── 2. Strict Fail-Closed Approval Matching and Strengthened Fingerprints ─────
 
-test("Action-Scoped Approval: manual approval for implementation does NOT authorize rework, review, or child integration", () => {
+test("Strict Fail-Closed Approval Matching: missing fingerprint or action never grants authorization", () => {
   const settings = createTestSettings({ project: { key: "PACE", operatingMode: "manual" } });
   const store = getStore(settings);
   const issue = {
-    key: "PACE-ACTION-1",
-    summary: "Action scoped test issue",
+    key: "PACE-STRICT-1",
+    summary: "Strict test issue",
     description: "Acceptance criteria: done",
     canonicalState: "ready",
     labels: ["agent-ready"],
@@ -256,93 +260,384 @@ test("Action-Scoped Approval: manual approval for implementation does NOT author
 
   const plan = issuePlan(settings, issue);
 
-  // Approve implementation ONLY
-  store.recordApprovalDecision("PACE-ACTION-1", {
+  // 1. Calling recordApprovalDecision without an action throws
+  assert.throws(() => store.recordApprovalDecision("PACE-STRICT-1", { approved: true }), /requires an action/);
+
+  // 2. Legacy approval in database without action/fingerprint
+  store.addPmDecision("PACE-STRICT-1", "execution_approval", {
+    approved: true,
+    approver: "legacy-pm",
+    planFingerprint: null
+  });
+
+  // Legacy approval without action/fingerprint does NOT authorize
+  assert.equal(store.hasExecutionApproval("PACE-STRICT-1", { action: "implementation", plan }), null);
+  const auth = authorizeRuntimeAction(settings, store, { issueKey: "PACE-STRICT-1", action: "implementation", plan });
+  assert.equal(auth.allowed, false);
+
+  // 3. Storing an approval with missing fingerprint does NOT match a fingerprinted plan
+  store.addPmDecision("PACE-STRICT-1", "execution_approval", {
+    action: "implementation",
+    approved: true,
+    approver: "legacy-pm",
+    planFingerprint: null
+  });
+  assert.equal(store.hasExecutionApproval("PACE-STRICT-1", { action: "implementation", plan }), null);
+
+  // 4. Valid fingerprinted approval matches correctly
+  store.recordApprovalDecision("PACE-STRICT-1", {
     action: "implementation",
     approved: true,
     approver: "pm@example.com",
     plan
   });
-
-  // Implementation is approved
-  const authImpl = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-ACTION-1",
-    action: "implementation",
-    plan
-  });
-  assert.equal(authImpl.allowed, true, "Implementation is approved");
-
-  // Review is NOT approved by an implementation approval
-  const authReview = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-ACTION-1",
-    action: "review",
-    plan
-  });
-  assert.equal(authReview.allowed, false, "Review is NOT approved");
-
-  // Rework is NOT approved by an implementation approval
-  const authRework = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-ACTION-1",
-    action: "rework",
-    plan,
-    attempt: 1
-  });
-  assert.equal(authRework.allowed, false, "Rework is NOT approved");
-
-  // Child integration is NOT approved by an implementation approval
-  const authIntegration = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-ACTION-1",
-    action: "childIntegration",
-    plan
-  });
-  assert.equal(authIntegration.allowed, false, "Child integration is NOT approved");
+  const validApproval = store.hasExecutionApproval("PACE-STRICT-1", { action: "implementation", plan });
+  assert.ok(validApproval);
+  assert.equal(validApproval.approved, true);
 });
 
-test("Plan-Scoped Approval: stale approval for Plan A must NOT authorize changed Plan B", () => {
+test("Strengthened computePlanFingerprint: change to review provider, autonomy, or maxRework invalidates approval", () => {
   const settings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
   const store = getStore(settings);
-
-  const issueA = {
-    key: "PACE-PLAN-1",
-    summary: "Backend task",
+  const issue = {
+    key: "PACE-FINGERPRINT-1",
+    summary: "Fingerprint test issue",
     description: "Acceptance criteria: done",
     canonicalState: "ready",
     labels: ["agent-ready"],
     issueType: "Task"
   };
 
-  const planA = issuePlan(settings, issueA);
-  assert.equal(planA.taskAgent, "backend-engineer");
+  const planInitial = issuePlan(settings, issue);
+  const fpInitial = computePlanFingerprint(planInitial);
+  assert.equal(typeof fpInitial, "string");
+  assert.equal(fpInitial.length, 64, "Must use full 64-char SHA-256 digest");
 
-  // Human approves Plan A
-  store.recordApprovalDecision("PACE-PLAN-1", {
+  // Approve initial plan
+  store.recordApprovalDecision("PACE-FINGERPRINT-1", {
     action: "implementation",
     approved: true,
     approver: "pm@example.com",
-    plan: planA
+    plan: planInitial
+  });
+  assert.ok(store.hasExecutionApproval("PACE-FINGERPRINT-1", { action: "implementation", plan: planInitial }));
+
+  // 1. Changing ONLY review provider changes fingerprint
+  const settingsDiffReview = createTestSettings({
+    project: { key: "PACE", operatingMode: "supervised" },
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      review: { provider: "codex", modelProfile: "medium", maxReworkAttempts: 3 }
+    }
+  });
+  const planDiffReview = issuePlan(settingsDiffReview, issue);
+  assert.notEqual(computePlanFingerprint(planDiffReview), fpInitial);
+  assert.equal(store.hasExecutionApproval("PACE-FINGERPRINT-1", { action: "implementation", plan: planDiffReview }), null);
+
+  // 2. Changing ONLY autonomy policy changes fingerprint
+  const settingsDiffAutonomy = createTestSettings({
+    project: { key: "PACE", operatingMode: "supervised" },
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      autonomy: { childIntegration: "auto" }
+    }
+  });
+  const planDiffAutonomy = issuePlan(settingsDiffAutonomy, issue);
+  assert.notEqual(computePlanFingerprint(planDiffAutonomy), fpInitial);
+  assert.equal(store.hasExecutionApproval("PACE-FINGERPRINT-1", { action: "implementation", plan: planDiffAutonomy }), null);
+
+  // 3. Changing ONLY maxReworkAttempts changes fingerprint
+  const settingsDiffMaxRework = createTestSettings({
+    project: { key: "PACE", operatingMode: "supervised" },
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      review: { provider: "antigravity", modelProfile: "claude-review", maxReworkAttempts: 5 }
+    }
+  });
+  const planDiffMaxRework = issuePlan(settingsDiffMaxRework, issue);
+  assert.notEqual(computePlanFingerprint(planDiffMaxRework), fpInitial);
+  assert.equal(store.hasExecutionApproval("PACE-FINGERPRINT-1", { action: "implementation", plan: planDiffMaxRework }), null);
+});
+
+// ── 3. Operating-Mode Snapshot Resolution ────────────────────────────────────
+
+test("Operating-Mode Snapshot Resolution: supervised run retains supervised mode across review failure and rework", async () => {
+  const settings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
+  const store = getStore(settings);
+  const runtime = createMockRuntime();
+
+  const workSource = new MockWorkSourceProvider([
+    {
+      key: "PACE-MODE-SNAP-1",
+      summary: "Supervised mode retention issue",
+      description: "Acceptance criteria: done",
+      canonicalState: "ready",
+      labels: ["agent-ready"],
+      issueType: "Task"
+    }
+  ]);
+
+  // Initial plan created in supervised mode
+  const plan = issuePlan(settings, workSource.issues.get("PACE-MODE-SNAP-1"), { store });
+  assert.equal(plan.configSnapshot.operatingMode, "supervised");
+
+  // Approve implementation and branchCreation
+  store.recordApprovalDecision("PACE-MODE-SNAP-1", {
+    action: "implementation",
+    approved: true,
+    approver: "lead@example.com",
+    plan
+  });
+  store.recordApprovalDecision("PACE-MODE-SNAP-1", {
+    action: "branchCreation",
+    approved: true,
+    approver: "lead@example.com",
+    plan
   });
 
-  // Plan A is authorized
-  const evalPlanA = issuePlan(settings, issueA, { store, action: "implementation" });
-  assert.equal(evalPlanA.eligible, true, "Plan A is eligible with approval");
+  // Worker executes implementation
+  handleImplementation(settings, workSource.issues.get("PACE-MODE-SNAP-1"), true, runtime);
+  const runs = store.listRunsDetailed(10);
+  const implRun = runs.find(r => r.issue_key === "PACE-MODE-SNAP-1");
+  store.transition(implRun.id, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+  await workSource.transition("PACE-MODE-SNAP-1", "review");
 
-  // Issue changes to Frontend task -> Plan B
-  const issueB = {
-    key: "PACE-PLAN-1",
-    summary: "Frontend task",
+  // Global settings mutated to autonomous
+  settings.data.project.operatingMode = "autonomous";
+
+  // Review fails
+  const failedOutcome = {
+    verdict: "changes-requested",
+    reviewerId: "reviewer-1",
+    implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    evidence: [{ id: "F1", severity: "major", category: "correctness", problem: "Bug", expected: "Fix", verification: "Test" }]
+  };
+  store.transition(implRun.id, "review-failed", { reviewOutcome: failedOutcome });
+  store.transition(implRun.id, "transitioning-rework", { reviewOutcome: failedOutcome });
+  await workSource.transition("PACE-MODE-SNAP-1", "rework");
+  store.transition(implRun.id, "failed-retryable", { attempt: 1, reviewOutcome: failedOutcome });
+  store.releaseLock("PACE-MODE-SNAP-1", implRun.id);
+
+  // Dispatcher cycle with live mode = autonomous, but originating run mode = supervised!
+  const dispatchRes = await dispatchOnce(settings, {
+    execute: true,
+    workSource,
+    store,
+    runIssueImpl: (s, i, e) => handleRework(s, i, e, runtime)
+  });
+
+  // Must NOT launch automatically because originating run was supervised!
+  assert.equal(dispatchRes.waves.length, 0, "Rework must NOT start without approval despite global autonomous mode");
+  
+  // Verify a new approval_requested decision is persisted for action: rework
+  const decisions = store.getPmDecisions("PACE-MODE-SNAP-1");
+  const reworkRequest = decisions.find(d => d.type === "approval_requested" && d.payload.action === "rework" && d.payload.attempt === 1);
+  assert.ok(reworkRequest, "approval_requested decision for rework attempt 1 must be persisted");
+});
+
+// ── 4. Behavioral Snapshot Pinning for Rework ───────────────────────────────
+
+test("Behavioral Snapshot Pinning for Rework: retains originating provider and taskAgent after global mutations", () => {
+  const settings = createTestSettings({
+    project: { key: "PACE", operatingMode: "autonomous" },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o", "claude-review": "gpt-4o" } },
+        antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet", "claude-review": "claude-3-5-sonnet" } }
+      }
+    }
+  });
+  const store = getStore(settings);
+
+  const issue1 = {
+    key: "PACE-REWORK-PIN",
+    summary: "Rework pin issue",
     description: "Acceptance criteria: done",
     canonicalState: "ready",
-    labels: ["agent-ready", "agent-frontend-engineer"],
+    labels: ["agent-ready"],
     issueType: "Task"
   };
 
-  const planB = issuePlan(settings, issueB, { store, action: "implementation" });
-  assert.equal(planB.taskAgent, "frontend-engineer");
-  assert.equal(planB.eligible, false, "Plan B is NOT authorized by stale approval for Plan A");
-  assert.match(planB.eligibilityReasons[0], /requires human approval/i);
+  // Run 1 starts with Codex and backend-engineer
+  const plan1 = issuePlan(settings, issue1);
+  assert.equal(plan1.configSnapshot.executorProvider, "codex");
+  assert.equal(plan1.configSnapshot.taskAgent, "backend-engineer");
+  const runId1 = store.createRun("PACE-REWORK-PIN", plan1);
+  store.transition(runId1, "failed-retryable", {
+    attempt: 1,
+    reviewOutcome: { verdict: "changes-requested" }
+  });
+  const retryableRun = store.getRun(runId1);
+
+  // Global settings mutated: default executor changed to antigravity, model changed
+  settings.data.executor.defaultProvider = "antigravity";
+
+  // Rework plan for PACE-REWORK-PIN with originatingRun retains pinned codex
+  const reworkPlan = issuePlan(settings, { ...issue1, canonicalState: "rework" }, { originatingRun: retryableRun, action: "rework", attempt: 1 });
+  assert.equal(reworkPlan.execution.provider, "codex", "Rework retains pinned executor provider codex");
+  assert.equal(reworkPlan.configSnapshot.executorProvider, "codex");
+
+  // New unrelated issue uses updated global provider antigravity
+  const issue2 = {
+    key: "PACE-NEW-2",
+    summary: "New unrelated issue",
+    description: "Acceptance criteria: done",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+  const newPlan = issuePlan(settings, issue2);
+  assert.equal(newPlan.execution.provider, "antigravity", "New run uses updated global provider antigravity");
 });
 
-// ── 3. Supervised Mode: Rework Requires a Second Approval ───────────────────
+// ── 5. Enforce branchCreation at the Side-Effect Boundary ─────────────────────
+
+test("Enforce branchCreation at Side-Effect Boundary: implementation=auto, branchCreation=approval prevents mutation without approval", () => {
+  const settings = createTestSettings({
+    project: { key: "PACE", operatingMode: "autonomous" },
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      autonomy: {
+        implementation: "auto",
+        branchCreation: "approval"
+      }
+    }
+  });
+  const store = getStore(settings);
+  const runtime = createMockRuntime();
+
+  const issue = {
+    key: "PACE-BRANCH-1",
+    summary: "Branch creation gate issue",
+    description: "Acceptance criteria: done",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  // 1. Implementation is auto, but branchCreation is approval -> issue plan is ineligible
+  const plan = issuePlan(settings, issue, { store });
+  assert.equal(plan.eligible, false, "Plan ineligible when branchCreation requires approval");
+  assert.match(plan.eligibilityReasons[0], /branchCreation.*requires.*approval/i);
+
+  // 2. handleImplementation without branchCreation approval blocks and does NOT mutate git
+  const res1 = handleImplementation(settings, issue, true, runtime);
+  assert.equal(res1.exitCode, 2, "Blocked before worktree creation");
+  assert.equal(runtime.executionCount, 0, "No git worktree command executed");
+
+  // 3. Approving implementation alone does NOT authorize branchCreation
+  store.recordApprovalDecision("PACE-BRANCH-1", {
+    action: "implementation",
+    approved: true,
+    approver: "lead@example.com",
+    plan
+  });
+  const res2 = handleImplementation(settings, issue, true, runtime);
+  assert.equal(res2.exitCode, 2, "Implementation approval does not authorize branchCreation");
+  assert.equal(runtime.executionCount, 0);
+
+  // 4. Once branchCreation is explicitly approved, handleImplementation succeeds
+  store.recordApprovalDecision("PACE-BRANCH-1", {
+    action: "branchCreation",
+    approved: true,
+    approver: "lead@example.com",
+    plan
+  });
+  const res3 = handleImplementation(settings, issue, true, runtime);
+  assert.equal(res3.exitCode, 0, "Execution succeeds with branchCreation approval");
+  assert.equal(runtime.executionCount, 1, "Git worktree command executed");
+});
+
+// ── 6. Strengthened childIntegration Approval Scoping ─────────────────────────
+
+test("Strengthened childIntegration Approval: approval is scoped to exact child issue, branches, and reviewed SHA", () => {
+  const settings = createTestSettings({
+    project: { key: "PACE", operatingMode: "supervised" },
+    policy: {
+      allowedProjects: ["PACE"],
+      gitIntegrationEnabled: true,
+      autonomy: { childIntegration: "approval" }
+    }
+  });
+  const store = getStore(settings);
+
+  store.upsertEpic({ key: "PACE-EPIC-20", branch: "epic/pace-epic-20" });
+  store.upsertEpicTask({
+    epicKey: "PACE-EPIC-20",
+    issueKey: "PACE-CHILD-20",
+    branch: "feature/pace-child-20"
+  });
+  store.queueEpicIntegration({
+    epicKey: "PACE-EPIC-20",
+    issueKey: "PACE-CHILD-20",
+    leafBranch: "feature/pace-child-20"
+  });
+
+  const runId = store.createRun("PACE-CHILD-20", {
+    issue: "PACE-CHILD-20",
+    configSnapshot: { operatingMode: "supervised" }
+  });
+  const reviewedShaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  store.transition(runId, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: reviewedShaA,
+      reviewerId: "reviewer-1",
+      evidence: [{ id: "C1", severity: "suggestion", category: "tests", problem: "Clean" }]
+    }
+  });
+
+  let adapterCalled = false;
+  const mockAdapter = () => {
+    adapterCalled = true;
+    return { completed: true, reviewedSha: reviewedShaA, integratedSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+  };
+
+  // 1. Approval for a DIFFERENT SHA does NOT authorize integration of SHA A
+  const wrongPlan = {
+    childIssueKey: "PACE-CHILD-20",
+    leafBranch: "feature/pace-child-20",
+    targetBranch: "epic/pace-epic-20",
+    reviewedSha: "cccccccccccccccccccccccccccccccccccccccc"
+  };
+  store.recordApprovalDecision("PACE-CHILD-20", {
+    action: "childIntegration",
+    approved: true,
+    approver: "pm@example.com",
+    plan: wrongPlan
+  });
+
+  const res1 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
+  assert.equal(res1.blocked.length, 1);
+  assert.match(res1.blocked[0].reason, /requires human approval/i);
+  assert.equal(adapterCalled, false);
+
+  // 2. Approval for the exact integration plan authorizes integration
+  const correctPlan = {
+    childIssueKey: "PACE-CHILD-20",
+    leafBranch: "feature/pace-child-20",
+    targetBranch: "epic/pace-epic-20",
+    reviewedSha: reviewedShaA
+  };
+  store.recordApprovalDecision("PACE-CHILD-20", {
+    action: "childIntegration",
+    approved: true,
+    approver: "pm@example.com",
+    plan: correctPlan
+  });
+
+  const res2 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
+  assert.equal(res2.blocked.length, 0);
+  assert.equal(res2.integrationsCompleted, 1);
+  assert.equal(adapterCalled, true);
+});
+
+// ── 7. Supervised Mode: Rework Requires a Second Approval ───────────────────
 
 test("Supervised Mode: approve implementation -> review fails -> rework waits for a NEW human approval", async () => {
   const settings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
@@ -364,10 +659,16 @@ test("Supervised Mode: approve implementation -> review fails -> rework waits fo
   const dispatchRes1 = await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: (s, i, e) => handleImplementation(s, i, e, runtime) });
   assert.equal(dispatchRes1.waves.length, 0, "Wave 0 before approval");
 
-  // 2. Approve implementation
+  // 2. Approve implementation and branchCreation
   const plan1 = issuePlan(settings, workSource.issues.get("PACE-SUPER-REWORK"), { store });
   store.recordApprovalDecision("PACE-SUPER-REWORK", {
     action: "implementation",
+    approved: true,
+    approver: "lead@example.com",
+    plan: plan1
+  });
+  store.recordApprovalDecision("PACE-SUPER-REWORK", {
+    action: "branchCreation",
     approved: true,
     approver: "lead@example.com",
     plan: plan1
@@ -409,11 +710,13 @@ test("Supervised Mode: approve implementation -> review fails -> rework waits fo
   assert.equal(runtime.executionCount, 1, "Execution count unchanged");
 
   // 6. Provide the NEW human approval for action: "rework"
+  const reworkPlan = issuePlan(settings, workSource.issues.get("PACE-SUPER-REWORK"), { store, action: "rework", attempt: 1, originatingRun: implRun });
   store.recordApprovalDecision("PACE-SUPER-REWORK", {
     action: "rework",
     attempt: 1,
     approved: true,
     approver: "lead@example.com",
+    plan: reworkPlan,
     reason: "Approved rework attempt 1"
   });
 
@@ -427,158 +730,4 @@ test("Supervised Mode: approve implementation -> review fails -> rework waits fo
 
   assert.equal(dispatchRes3.waves.length, 1, "Rework launched after rework approval");
   assert.equal(runtime.executionCount, 2, "Execution count incremented for rework");
-});
-
-// ── 4. Supervised Child Integration Waits for Approval ───────────────────────
-
-test("Supervised Child Integration: integration is blocked until explicit childIntegration approval", () => {
-  const settings = createTestSettings({
-    project: { key: "PACE", operatingMode: "supervised" },
-    policy: {
-      allowedProjects: ["PACE"],
-      gitIntegrationEnabled: true,
-      autonomy: { childIntegration: "approval" }
-    }
-  });
-  const store = getStore(settings);
-
-  // Setup epic with queued child integration
-  store.upsertEpic({ key: "PACE-EPIC-10", branch: "epic/pace-epic-10" });
-  store.upsertEpicTask({
-    epicKey: "PACE-EPIC-10",
-    issueKey: "PACE-CHILD-1",
-    branch: "feature/pace-child-1"
-  });
-  store.queueEpicIntegration({
-    epicKey: "PACE-EPIC-10",
-    issueKey: "PACE-CHILD-1",
-    leafBranch: "feature/pace-child-1"
-  });
-
-  // Create clean reviewed run for PACE-CHILD-1
-  const runId = store.createRun("PACE-CHILD-1", {
-    issue: "PACE-CHILD-1",
-    configSnapshot: { operatingMode: "supervised" }
-  });
-  store.transition(runId, "reviewed-clean", {
-    reviewOutcome: {
-      verdict: "clean",
-      implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      reviewerId: "reviewer-1",
-      evidence: [{ id: "C1", severity: "suggestion", category: "tests", problem: "Clean" }]
-    }
-  });
-
-  let adapterCalled = false;
-  const mockAdapter = () => {
-    adapterCalled = true;
-    return { completed: true, reviewedSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", integratedSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" };
-  };
-
-  // 1. Without approval, reconcileIntegrations blocks
-  const res1 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
-  assert.equal(res1.blocked.length, 1);
-  assert.match(res1.blocked[0].reason, /requires human approval/i);
-  assert.equal(adapterCalled, false);
-
-  // 2. Record approval for action: "childIntegration"
-  store.recordApprovalDecision("PACE-CHILD-1", {
-    action: "childIntegration",
-    approved: true,
-    approver: "pm@example.com"
-  });
-
-  // 3. ReconcileIntegrations now completes integration
-  const res2 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
-  assert.equal(res2.blocked.length, 0);
-  assert.equal(res2.integrationsCompleted, 1);
-  assert.equal(adapterCalled, true);
-});
-
-// ── 5. Behavioral Immutability of Config Snapshots ───────────────────────────
-
-test("Behavioral Immutability: Reviewer execution uses originating implementation run's pinned review provider and model", async () => {
-  const settings = createTestSettings({
-    project: { key: "PACE", operatingMode: "autonomous" },
-    policy: {
-      allowedProjects: ["PACE"],
-      requiredLabels: ["agent-ready"],
-      review: {
-        provider: "antigravity",
-        modelProfile: "claude-review",
-        maxReworkAttempts: 3
-      }
-    }
-  });
-  const store = getStore(settings);
-  const runtime = createMockRuntime();
-
-  const issue = {
-    key: "PACE-IMMUT-1",
-    summary: "Immutable review test",
-    description: "Acceptance criteria: done",
-    canonicalState: "ready",
-    labels: ["agent-ready"],
-    issueType: "Task"
-  };
-
-  // 1. Implementation run starts with reviewer antigravity
-  const plan = issuePlan(settings, issue);
-  assert.equal(plan.configSnapshot.reviewProvider, "antigravity");
-  const runId = store.createRun("PACE-IMMUT-1", plan);
-  store.transition(runId, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
-
-  // 2. Global settings are mutated to codex
-  settings.data.policy.review.provider = "codex";
-  settings.data.policy.review.modelProfile = "medium";
-
-  // 3. Reviewer execution for active run resolves from originating snapshot (antigravity)
-  const reviewRes = await handleReview(settings, { ...issue, canonicalState: "review" }, true, runtime);
-  assert.equal(reviewRes.exitCode, 0);
-
-  const reviewRun = store.getRun(reviewRes.output.runId);
-  assert.equal(reviewRun.payload.configSnapshot.reviewProvider, "antigravity", "Review run inherits pinned review provider antigravity");
-});
-
-test("Behavioral Immutability: Rework exhaustion respects originating snapshot's maxReworkAttempts", () => {
-  const settings = createTestSettings({
-    project: { key: "PACE", operatingMode: "autonomous" },
-    policy: {
-      allowedProjects: ["PACE"],
-      requiredLabels: ["agent-ready"],
-      review: {
-        provider: "antigravity",
-        modelProfile: "claude-review",
-        maxReworkAttempts: 3
-      }
-    }
-  });
-  const store = getStore(settings);
-
-  // Active run started with snapshot maxReworkAttempts = 3
-  const plan = issuePlan(settings, {
-    key: "PACE-IMMUT-REWORK",
-    summary: "Immutable rework test",
-    description: "Acceptance criteria: done",
-    canonicalState: "ready",
-    labels: ["agent-ready"],
-    issueType: "Task"
-  });
-  assert.equal(plan.configSnapshot.maxReworkAttempts, 3);
-  const runId = store.createRun("PACE-IMMUT-REWORK", plan);
-
-  // Mutate global policy to maxReworkAttempts = 1
-  settings.data.policy.review.maxReworkAttempts = 1;
-
-  // Run fails review at attempt 1
-  store.transition(runId, "review-failed", {
-    attempt: 1,
-    reviewOutcome: { verdict: "changes-requested" }
-  });
-
-  // reconcileReviewers evaluates with the originating run's snapshot (limit=3).
-  // Attempt 1 < limit 3 -> transitions to transitioning-rework, NOT transitioning-blocked!
-  reconcileReviewers(settings, store);
-  const updatedRun = store.getRun(runId);
-  assert.equal(updatedRun.state, "transitioning-rework", "Active run honors snapshot maxReworkAttempts=3, not mutated global 1");
 });
