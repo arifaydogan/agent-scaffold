@@ -88,6 +88,7 @@ function makeIssue(key, { eligible = true } = {}) {
     summary: `Test issue ${key}`,
     description: "Implement feature with Acceptance Criteria fulfilled.",
     status: "In Progress",
+    canonicalState: "ready",
     labels: eligible ? ["agent-ready"] : [],
     issueType: "Story"
   };

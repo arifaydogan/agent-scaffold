@@ -729,6 +729,7 @@ function render() {
   renderControlPlane();
   renderRuns();
   renderActivity();
+  if (typeof renderTabs === "function") renderTabs();
 }
 
 function setConnection(connected) {
@@ -775,6 +776,102 @@ document.querySelectorAll("[data-filter]").forEach((button) => {
 elements.search.addEventListener("input", (event) => {
   state.query = event.target.value;
   renderRuns();
+});
+
+function renderPmMessages() {
+  const container = document.getElementById("pm-messages");
+  if (!container || !state.snapshot.pmMessages) return;
+  container.innerHTML = "";
+  if (state.snapshot.pmMessages.length === 0) {
+    container.innerHTML = '<div class="empty-state">Mesaj bulunmuyor</div>';
+    return;
+  }
+  state.snapshot.pmMessages.forEach(msg => {
+    const div = element("div", `pm-message ${msg.role}`);
+    div.append(
+      element("strong", "", msg.role === 'user' ? 'Sen' : 'PM Agent'),
+      element("span", "time", formatTime(msg.createdAt)),
+      element("p", "", msg.content)
+    );
+    container.append(div);
+  });
+}
+
+function renderPmDecisions() {
+  const container = document.getElementById("pm-decisions");
+  if (!container || !state.snapshot.pmDecisions) return;
+  container.innerHTML = "";
+  if (state.snapshot.pmDecisions.length === 0) {
+    container.innerHTML = '<div class="empty-state">Karar kaydı bulunmuyor</div>';
+    return;
+  }
+  state.snapshot.pmDecisions.forEach(decision => {
+    const div = element("div", "pm-decision");
+    div.append(
+      element("strong", "", decision.type),
+      element("span", "time", formatTime(decision.createdAt)),
+      element("pre", "", JSON.stringify(decision.payload, null, 2))
+    );
+    container.append(div);
+  });
+}
+
+function renderAgentDefinitions() {
+  const container = document.getElementById("agent-definitions");
+  if (!container || !state.snapshot.agentDefinitions) return;
+  container.innerHTML = "";
+  if (state.snapshot.agentDefinitions.length === 0) {
+    container.innerHTML = '<div class="empty-state">Kayıtlı agent bulunmuyor</div>';
+    return;
+  }
+  state.snapshot.agentDefinitions.forEach(agent => {
+    const div = element("div", "agent-definition");
+    div.append(
+      element("strong", "", agent.id),
+      element("span", "version", `v${agent.version}`),
+      element("pre", "", JSON.stringify(agent.definition, null, 2))
+    );
+    container.append(div);
+  });
+}
+
+function renderUsageEvents() {
+  const container = document.getElementById("usage-events");
+  if (!container || !state.snapshot.usageEvents) return;
+  container.innerHTML = "";
+  if (state.snapshot.usageEvents.length === 0) {
+    container.innerHTML = '<div class="empty-state">Kullanım verisi bulunmuyor</div>';
+    return;
+  }
+  state.snapshot.usageEvents.forEach(event => {
+    const div = element("div", "usage-event");
+    div.append(
+      element("strong", "", `${event.provider} · ${event.model}`),
+      element("span", "time", formatTime(event.createdAt)),
+      element("p", "", `Run: ${event.runId} | Süre: ${event.durationMs}ms | Token: In ${event.inputTokens} / Out ${event.outputTokens}`)
+    );
+    container.append(div);
+  });
+}
+
+function renderTabs() {
+  renderPmMessages();
+  renderPmDecisions();
+  renderAgentDefinitions();
+  renderUsageEvents();
+}
+
+document.querySelectorAll('.tab-button').forEach(button => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('is-active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.hidden = true);
+    
+    button.classList.add('is-active');
+    const target = document.getElementById(button.dataset.target);
+    target.classList.add('is-active');
+    target.hidden = false;
+  });
 });
 
 refresh();

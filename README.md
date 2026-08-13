@@ -22,10 +22,11 @@ intake, locks, worktrees, orchestration, and executor dispatch.
 - Eleven complete upstream skills copied with scripts, references, and assets.
 - Jira and GitHub Issues work sources with canonical workflow-state mapping.
 - Separate orchestrator and Codex/Antigravity executor provider registries.
-- Capability registry with Ponytail provenance and a codebase-memory-mcp integration point.
+- Capability registry with Ponytail provenance and a real-time `CodeIntelligenceProvider` MCP integration point.
 - Provider-neutral eligibility rules and human-only action boundaries.
-- SQLite run history and exclusive issue locks.
-- Worktree planning with Codex and Antigravity CLI executor adapters.
+- SQLite run history, exclusive issue locks, and PM telemetry (messages, decisions, usage metrics).
+- Worktree planning with Parent/Child dependency DAG (Directed Acyclic Graph) support.
+- Localhost Control Plane Dashboard with PM Workspace, Agents, and Usage tabs.
 - Explicit Antigravity model profiles, structured results, and token telemetry.
 - Antigravity, Claude Code, GitHub Copilot, and Codex instruction adapters.
 - PaceBuild-specific CV, TimescaleDB, and demo reliability rules.

@@ -29,9 +29,11 @@ protokolunu temel alir:
 - Jira ve GitHub Issues WorkSourceProvider adapter'lari
 - Canonical workflow state mapping
 - Ayri OrchestratorProvider ve ExecutorProvider registry'leri
-- Ponytail minimal-change ve codebase-memory-mcp Capability Registry gorunumu
+- Ponytail minimal-change ve gercek zamanli `CodeIntelligenceProvider` MCP entegrasyon noktasi
 - Jira ve Confluence calisma kurallari
-- Git worktree modeli
+- Git worktree modeli ve Parent/Child bagimlilik DAG (Directed Acyclic Graph) destegi
+- SQLite run history, exclusive issue locks ve PM telemetrisi (mesajlar, kararlar, kullanim metrikleri)
+- Localhost Control Plane Dashboard (PM Workspace, Agent'lar ve Kullanım sekmeleri)
 - Antigravity, Claude Code, Copilot ve Codex adapter'lari
 - PaceBuild extension pack
 - Opsiyonel provider-neutral worktree/orchestration/executor runtime'i

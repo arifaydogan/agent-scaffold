@@ -326,7 +326,8 @@ node bin/agentctl.js --config agent-scaffold.json dispatch --limit 10 --concurre
 Dispatcher `policy.maxConcurrency` degerini asamaz. Ayni provider icin
 `policy.providerConcurrency` limiti uygulanir. Ayni dosya sahiplik alanina
 ornegin `frontend/**` yazacak iki task ayni dalgada calistirilmaz. Cross-service
-tasklar tek basina bir dalgaya alinir.
+tasklar tek basina bir dalgaya alinir. Ek olarak, Parent/Child DAG (Directed Acyclic Graph)
+destegi ile birbirine bagimli olan (dependencies) task'lar siralandirilir; child task'lar, ebeveyn task'lari bitene kadar sonraki dalgalara (wave) guvenle ertelenir.
 
 ### Resident Supervisor
 
@@ -420,7 +421,8 @@ node bin/agentctl.js --config agent-scaffold.json dashboard --port 4417
 
 Snapshot API proje bilgisini, work-source/orchestrator/executor/code-intelligence
 provider'larini, canonical workflow state'lerini, capability registry'yi ve run
-telemetrisini gosterir. Prompt, work-item aciklamasi, credential degeri ve log
+telemetrisini gosterir. Ayrica UI uzerindeki **PM Workspace, Kararlar (Decisions), Agent Tanimlari ve Kullanim (Token/Sure)** sekmelerinden SQLite icinde biriken analiz gecmisini anlik takip edebilirsiniz.
+Prompt, work-item aciklamasi, credential degeri ve log
 govdesi API'ye cikmaz.
 
 Server yalnizca `127.0.0.1` adresine bind olur. GET/HEAD endpoint'leri her zaman

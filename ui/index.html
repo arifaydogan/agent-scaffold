@@ -100,8 +100,15 @@
         </article>
       </section>
 
-      <div class="workspace-grid">
-        <section class="panel fleet-panel" aria-labelledby="agents-heading">
+      <nav class="main-tabs" aria-label="Ana Navigasyon">
+        <button class="tab-button is-active" data-target="workspace-view">İşletim Paneli</button>
+        <button class="tab-button" data-target="pm-view">PM Workspace</button>
+        <button class="tab-button" data-target="agents-view">Agent & Telemetry</button>
+      </nav>
+
+      <div id="workspace-view" class="tab-content is-active">
+        <div class="workspace-grid">
+          <section class="panel fleet-panel" aria-labelledby="agents-heading">
           <div class="panel-heading fleet-toolbar">
             <div>
               <p class="eyebrow">Task görünümü</p>
@@ -185,6 +192,53 @@
           </table>
         </div>
       </section>
+      </div> <!-- End of workspace-view -->
+
+      <div id="pm-view" class="tab-content" hidden>
+        <section class="panel pm-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Product Management</p>
+              <h2>Conversation & Journal</h2>
+            </div>
+          </div>
+          <div class="pm-layout">
+            <div class="pm-conversation">
+              <h3>Conversation</h3>
+              <div id="pm-messages" class="pm-messages-list"></div>
+              <form id="pm-form" class="pm-form">
+                <input type="text" id="pm-input" placeholder="Enter message to PM..." required />
+                <button type="submit">Gönder</button>
+              </form>
+            </div>
+            <div class="pm-journal">
+              <h3>Decision Journal</h3>
+              <div id="pm-decisions" class="pm-decisions-list"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="agents-view" class="tab-content" hidden>
+        <section class="panel agents-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Registry & Tracking</p>
+              <h2>Agents & Telemetry</h2>
+            </div>
+          </div>
+          <div class="agents-layout">
+            <div class="agent-registry">
+              <h3>Agent Registry</h3>
+              <div id="agent-definitions" class="agent-definitions-list"></div>
+            </div>
+            <div class="agent-telemetry">
+              <h3>Usage Telemetry</h3>
+              <div id="usage-events" class="usage-events-list"></div>
+            </div>
+          </div>
+        </section>
+      </div>
     </main>
 
     <footer class="page-footer">

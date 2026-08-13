@@ -450,3 +450,47 @@ tbody tr:last-child td { border-bottom: 0; }
 .control-plane-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 0.69rem; }
 .control-plane-row strong { max-width: 55%; overflow: hidden; color: var(--muted-strong); font-family: var(--font-code); font-size: 0.67rem; text-overflow: ellipsis; white-space: nowrap; }
 .capability-preview { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; border-top: 1px solid rgba(148,163,184,0.1); padding-top: 10px; }
+
+/* Tabs */
+.main-tabs {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--layer-03);
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  padding: 0.75rem 1.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-button:hover {
+  color: var(--text-primary);
+}
+
+.tab-button.is-active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.is-active {
+  display: block;
+  animation: fade-in 0.3s ease;
+}
+
+.pm-layout, .agents-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}

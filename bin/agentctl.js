@@ -59,6 +59,11 @@ async function main() {
   }
   const settings = loadSettings(parsed.config);
 
+  const agentOverride = stringArgument(parsed.args, "--agent");
+  if (agentOverride && settings.data.executor) {
+    settings.data.executor.overrideProvider = agentOverride;
+  }
+
   // ── Local-only commands: do NOT require Jira credentials ──────────────────
   if (parsed.command === "doctor") {
     const executorCommands = Object.fromEntries(
