@@ -7,22 +7,29 @@ import { EventEmitter } from "node:events";
 
 import { RunStore } from "../lib/store.js";
 import { WorkSourceProvider } from "../lib/work-source.js";
+import { loadSettings } from "../lib/config.js";
 import {
   evaluateIssue,
   validateOperatingMode,
   resolveOperatingMode,
   resolveAutonomyPolicy,
   isActionAutonomous,
+  authorizeRuntimeAction,
+  computePlanFingerprint,
   OPERATING_MODES,
-  HUMAN_ONLY_ACTIONS
+  HUMAN_ONLY_ACTIONS,
+  SUPPORTED_AUTONOMY_ACTIONS
 } from "../lib/policy.js";
 import {
   issuePlan,
   createConfigSnapshot,
   handleImplementation,
+  handleReview,
+  handleRework,
   getStore
 } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
+import { reconcileReviewers, reconcileIntegrations, tick } from "../lib/reconciler.js";
 
 class MockWorkSourceProvider extends WorkSourceProvider {
   constructor(initialIssues) {
@@ -65,42 +72,51 @@ function createTestSettings(overrides = {}) {
   const tempConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "config-phase-b-"));
   fs.mkdirSync(path.join(tempConfigDir, ".agent-runtime"), { recursive: true });
 
+  const configPath = path.join(tempConfigDir, "config.json");
+  const rawData = {
+    project: {
+      key: "PACE",
+      repoPath: ".",
+      operatingMode: "autonomous"
+    },
+    worktree: {
+      root: worktreeRoot
+    },
+    policy: {
+      allowedProjects: ["PACE"],
+      humanOnlyStatuses: ["Done"],
+      maxConcurrency: 5,
+      requiredLabels: ["agent-ready"],
+      externalWritesEnabled: true,
+      gitIntegrationEnabled: true,
+      autonomyEnabled: true,
+      review: {
+        provider: "antigravity",
+        modelProfile: "claude-review",
+        maxReworkAttempts: 3
+      },
+      pathScopes: { "backend-engineer": ["backend/**"], "frontend-engineer": ["frontend/**"] }
+    },
+    workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } } },
+    orchestrator: { defaultProvider: "builtin", providers: { builtin: { type: "builtin" } } },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o", "claude-review": "gpt-4o" } },
+        antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet", "claude-review": "claude-3-5-sonnet" } }
+      }
+    },
+    ...overrides
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(rawData, null, 2));
+
   return {
-    source: path.join(tempConfigDir, "config.json"),
+    source: configPath,
     projectKey: "PACE",
     repoPath,
     worktreeRoot,
-    data: {
-      project: {
-        key: "PACE",
-        operatingMode: "autonomous"
-      },
-      policy: {
-        allowedProjects: ["PACE"],
-        humanOnlyStatuses: ["Done"],
-        maxConcurrency: 5,
-        requiredLabels: ["agent-ready"],
-        externalWritesEnabled: true,
-        gitIntegrationEnabled: false,
-        autonomyEnabled: true,
-        review: {
-          provider: "antigravity",
-          modelProfile: "claude-review",
-          maxReworkAttempts: 3
-        },
-        pathScopes: { "backend-engineer": ["backend/**"] }
-      },
-      workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } } },
-      orchestrator: { defaultProvider: "builtin", providers: { builtin: { type: "builtin" } } },
-      executor: {
-        defaultProvider: "codex",
-        providers: {
-          codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o" } },
-          antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet", "claude-review": "claude-3-5-sonnet" } }
-        }
-      },
-      ...overrides
-    }
+    data: rawData
   };
 }
 
@@ -145,45 +161,61 @@ function createMockRuntime() {
   };
 }
 
-// ── 1. Operating Modes Validation & Autonomy Policy ──────────────────────────
+// ── 1. Operating Modes & Autonomy Validation (Fail-Closed) ───────────────────
 
-test("Operating Modes: validate and resolve operatingMode with defaults and validation", () => {
-  assert.equal(validateOperatingMode("manual"), "manual");
-  assert.equal(validateOperatingMode("supervised"), "supervised");
-  assert.equal(validateOperatingMode("autonomous"), "autonomous");
+test("Fail-Closed Config Validation: invalid types, conflicting modes, and invalid autonomy values throw", () => {
+  // Invalid operatingMode types and values
+  assert.throws(() => validateOperatingMode(123), /Invalid operatingMode type/);
+  assert.throws(() => validateOperatingMode(true), /Invalid operatingMode type/);
   assert.throws(() => validateOperatingMode("invalid-mode"), /Invalid operatingMode/);
 
-  const defaultSettings = createTestSettings();
-  assert.equal(resolveOperatingMode(defaultSettings), "autonomous");
+  // Conflicting definitions between project and policy throw
+  const conflictingSettings = {
+    data: {
+      project: { operatingMode: "manual" },
+      policy: { operatingMode: "autonomous" }
+    }
+  };
+  assert.throws(() => resolveOperatingMode(conflictingSettings), /Conflicting operatingMode definitions/);
 
-  const manualSettings = createTestSettings({ project: { key: "PACE", operatingMode: "manual" } });
-  assert.equal(resolveOperatingMode(manualSettings), "manual");
+  // Invalid autonomy action keys throw
+  const badActionSettings = {
+    data: {
+      project: { operatingMode: "autonomous" },
+      policy: {
+        autonomy: { unsupportedActionKey: "auto" }
+      }
+    }
+  };
+  assert.throws(() => resolveAutonomyPolicy(badActionSettings), /Unsupported autonomy action/);
 
-  const supervisedSettings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
-  assert.equal(resolveOperatingMode(supervisedSettings), "supervised");
+  // Invalid autonomy values (e.g. "yes", true) throw
+  const badValueSettings = {
+    data: {
+      project: { operatingMode: "autonomous" },
+      policy: {
+        autonomy: { implementation: "yes" }
+      }
+    }
+  };
+  assert.throws(() => resolveAutonomyPolicy(badValueSettings), /Invalid autonomy value/);
+
+  // loadSettings fail-closed on invalid config file
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "config-fail-closed-"));
+  const badConfigPath = path.join(tmpDir, "bad-config.json");
+  fs.writeFileSync(badConfigPath, JSON.stringify({
+    project: { key: "PACE", repoPath: ".", operatingMode: "non-existent-mode" },
+    policy: {},
+    worktree: { root: "." },
+    executor: { defaultProvider: "codex", providers: { codex: { command: ["codex"] } } },
+    workSource: { defaultProvider: "mock", providers: { mock: { type: "mock" } } }
+  }));
+
+  assert.throws(() => loadSettings(badConfigPath), /Invalid operatingMode/);
 });
 
-test("Deterministic Autonomy Policy: resolves permissions and protects human-only gates", () => {
-  const manualSettings = createTestSettings({ project: { key: "PACE", operatingMode: "manual" } });
-  assert.equal(isActionAutonomous(manualSettings, "discovery"), true);
-  assert.equal(isActionAutonomous(manualSettings, "planning"), true);
-  assert.equal(isActionAutonomous(manualSettings, "implementation"), false);
-  assert.equal(isActionAutonomous(manualSettings, "review"), false);
-
-  const supervisedSettings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
-  assert.equal(isActionAutonomous(supervisedSettings, "discovery"), true);
-  assert.equal(isActionAutonomous(supervisedSettings, "planning"), true);
-  assert.equal(isActionAutonomous(supervisedSettings, "implementation"), false);
-  assert.equal(isActionAutonomous(supervisedSettings, "review"), true);
-
-  const autonomousSettings = createTestSettings({ project: { key: "PACE", operatingMode: "autonomous" } });
-  assert.equal(isActionAutonomous(autonomousSettings, "discovery"), true);
-  assert.equal(isActionAutonomous(autonomousSettings, "planning"), true);
-  assert.equal(isActionAutonomous(autonomousSettings, "implementation"), true);
-  assert.equal(isActionAutonomous(autonomousSettings, "review"), true);
-
-  // Human-only gates remain human-only even if user policy config attempts to set them to auto
-  const overrideSettings = createTestSettings({
+test("Deterministic Autonomy Policy: resolves permissions and protects human-only gates against hostile overrides", () => {
+  const hostileSettings = createTestSettings({
     project: { key: "PACE", operatingMode: "autonomous" },
     policy: {
       allowedProjects: ["PACE"],
@@ -199,73 +231,126 @@ test("Deterministic Autonomy Policy: resolves permissions and protects human-onl
     }
   });
 
-  const resolved = resolveAutonomyPolicy(overrideSettings);
+  const resolved = resolveAutonomyPolicy(hostileSettings);
   for (const humanAction of HUMAN_ONLY_ACTIONS) {
     assert.equal(resolved[humanAction], "human", `${humanAction} must remain human-only`);
-    assert.equal(isActionAutonomous(overrideSettings, humanAction), false);
+    assert.equal(isActionAutonomous(hostileSettings, humanAction), false);
+    const auth = authorizeRuntimeAction(hostileSettings, null, { issueKey: "PACE-1", action: humanAction });
+    assert.equal(auth.allowed, false, `${humanAction} must be denied at runtime`);
   }
 });
 
-// ── 2. Manual Mode Behavior ──────────────────────────────────────────────────
+// ── 2. Action-Scoped and Plan-Scoped Approvals ────────────────────────────────
 
-test("Manual Mode: discovery and planning allowed, automatic dispatch denied, explicit execution allowed", async () => {
+test("Action-Scoped Approval: manual approval for implementation does NOT authorize rework, review, or child integration", () => {
   const settings = createTestSettings({ project: { key: "PACE", operatingMode: "manual" } });
   const store = getStore(settings);
-  const workSource = new MockWorkSourceProvider([
-    {
-      key: "PACE-MANUAL-1",
-      summary: "Manual test issue",
-      description: "Acceptance criteria: done",
-      canonicalState: "ready",
-      labels: ["agent-ready"],
-      issueType: "Task"
-    }
-  ]);
+  const issue = {
+    key: "PACE-ACTION-1",
+    summary: "Action scoped test issue",
+    description: "Acceptance criteria: done",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
 
-  // 1. Planning is allowed
-  const plan = issuePlan(settings, workSource.issues.get("PACE-MANUAL-1"));
-  assert.ok(plan);
-  assert.equal(plan.issue, "PACE-MANUAL-1");
-  assert.equal(plan.taskAgent, "backend-engineer");
-  assert.equal(plan.eligible, false, "Plan is ineligible for automatic execution in manual mode");
-  assert.match(plan.eligibilityReasons[0], /manual operating mode/i);
+  const plan = issuePlan(settings, issue);
 
-  // 2. Automatic dispatch does not schedule workers
-  const runtime = createMockRuntime();
-  const dispatchRes = await dispatchOnce(settings, {
-    execute: true,
-    workSource,
-    store,
-    runIssueImpl: async (s, issue, exec) => {
-      return handleImplementation(s, issue, exec, runtime);
-    }
+  // Approve implementation ONLY
+  store.recordApprovalDecision("PACE-ACTION-1", {
+    action: "implementation",
+    approved: true,
+    approver: "pm@example.com",
+    plan
   });
 
-  assert.equal(dispatchRes.waves.length, 0, "No waves scheduled in manual mode");
-  assert.equal(runtime.executionCount, 0, "0 workers started automatically in manual mode");
+  // Implementation is approved
+  const authImpl = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-ACTION-1",
+    action: "implementation",
+    plan
+  });
+  assert.equal(authImpl.allowed, true, "Implementation is approved");
 
-  // 3. Explicit approved execution is allowed
-  const execRes = handleImplementation(
-    settings,
-    workSource.issues.get("PACE-MANUAL-1"),
-    true,
-    runtime,
-    { approved: true }
-  );
+  // Review is NOT approved by an implementation approval
+  const authReview = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-ACTION-1",
+    action: "review",
+    plan
+  });
+  assert.equal(authReview.allowed, false, "Review is NOT approved");
 
-  assert.equal(execRes.exitCode, 0);
-  assert.equal(runtime.executionCount, 1, "Worker started on explicit approved execution");
+  // Rework is NOT approved by an implementation approval
+  const authRework = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-ACTION-1",
+    action: "rework",
+    plan,
+    attempt: 1
+  });
+  assert.equal(authRework.allowed, false, "Rework is NOT approved");
+
+  // Child integration is NOT approved by an implementation approval
+  const authIntegration = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-ACTION-1",
+    action: "childIntegration",
+    plan
+  });
+  assert.equal(authIntegration.allowed, false, "Child integration is NOT approved");
 });
 
-// ── 3. Supervised Mode Behavior ──────────────────────────────────────────────
+test("Plan-Scoped Approval: stale approval for Plan A must NOT authorize changed Plan B", () => {
+  const settings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
+  const store = getStore(settings);
 
-test("Supervised Mode: plan generated, worker not started without approval, approval starts worker, rejection denies", async () => {
+  const issueA = {
+    key: "PACE-PLAN-1",
+    summary: "Backend task",
+    description: "Acceptance criteria: done",
+    canonicalState: "ready",
+    labels: ["agent-ready"],
+    issueType: "Task"
+  };
+
+  const planA = issuePlan(settings, issueA);
+  assert.equal(planA.taskAgent, "backend-engineer");
+
+  // Human approves Plan A
+  store.recordApprovalDecision("PACE-PLAN-1", {
+    action: "implementation",
+    approved: true,
+    approver: "pm@example.com",
+    plan: planA
+  });
+
+  // Plan A is authorized
+  const evalPlanA = issuePlan(settings, issueA, { store, action: "implementation" });
+  assert.equal(evalPlanA.eligible, true, "Plan A is eligible with approval");
+
+  // Issue changes to Frontend task -> Plan B
+  const issueB = {
+    key: "PACE-PLAN-1",
+    summary: "Frontend task",
+    description: "Acceptance criteria: done",
+    canonicalState: "ready",
+    labels: ["agent-ready", "agent-frontend-engineer"],
+    issueType: "Task"
+  };
+
+  const planB = issuePlan(settings, issueB, { store, action: "implementation" });
+  assert.equal(planB.taskAgent, "frontend-engineer");
+  assert.equal(planB.eligible, false, "Plan B is NOT authorized by stale approval for Plan A");
+  assert.match(planB.eligibilityReasons[0], /requires human approval/i);
+});
+
+// ── 3. Supervised Mode: Rework Requires a Second Approval ───────────────────
+
+test("Supervised Mode: approve implementation -> review fails -> rework waits for a NEW human approval", async () => {
   const settings = createTestSettings({ project: { key: "PACE", operatingMode: "supervised" } });
   const store = getStore(settings);
   const workSource = new MockWorkSourceProvider([
     {
-      key: "PACE-SUPERVISED-1",
-      summary: "Supervised test issue",
+      key: "PACE-SUPER-REWORK",
+      summary: "Supervised rework issue",
       description: "Acceptance criteria: done",
       canonicalState: "ready",
       labels: ["agent-ready"],
@@ -275,204 +360,225 @@ test("Supervised Mode: plan generated, worker not started without approval, appr
 
   const runtime = createMockRuntime();
 
-  // 1. First dispatch cycle: discovers, creates plan and awaiting-approval decision, but does NOT start worker
-  const dispatchRes1 = await dispatchOnce(settings, {
-    execute: true,
-    workSource,
-    store,
-    runIssueImpl: async (s, issue, exec) => {
-      return handleImplementation(s, issue, exec, runtime);
-    }
-  });
+  // 1. Initial ready state: requires approval
+  const dispatchRes1 = await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: (s, i, e) => handleImplementation(s, i, e, runtime) });
+  assert.equal(dispatchRes1.waves.length, 0, "Wave 0 before approval");
 
-  assert.equal(dispatchRes1.waves.length, 0);
-  assert.equal(runtime.executionCount, 0, "Worker must not start before human approval");
-
-  // Verify awaiting-approval decision was recorded in store
-  const decisions = store.getPmDecisions("PACE-SUPERVISED-1");
-  const requested = decisions.find(d => d.type === "approval_requested");
-  assert.ok(requested, "approval_requested decision must be recorded");
-  assert.equal(requested.payload.state, "awaiting-approval");
-
-  // 2. Human explicitly approves
-  store.recordApprovalDecision("PACE-SUPERVISED-1", {
+  // 2. Approve implementation
+  const plan1 = issuePlan(settings, workSource.issues.get("PACE-SUPER-REWORK"), { store });
+  store.recordApprovalDecision("PACE-SUPER-REWORK", {
+    action: "implementation",
     approved: true,
-    approver: "lead-pm@example.com",
-    reason: "Approved for sprint 1"
+    approver: "lead@example.com",
+    plan: plan1
   });
 
-  // Verify approval decision persists
-  assert.equal(store.hasExecutionApproval("PACE-SUPERVISED-1").approved, true);
+  // 3. Worker executes implementation
+  const execRes = handleImplementation(settings, workSource.issues.get("PACE-SUPER-REWORK"), true, runtime);
+  assert.equal(execRes.exitCode, 0);
+  assert.equal(runtime.executionCount, 1);
 
-  // 3. Next dispatch cycle starts worker now that approval is recorded
+  // Implementation run moves to review-queued and work source transitions to review
+  const runs = store.listRunsDetailed(10);
+  const implRun = runs.find(r => r.issue_key === "PACE-SUPER-REWORK");
+  store.transition(implRun.id, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+  await workSource.transition("PACE-SUPER-REWORK", "review");
+
+  // 4. Review runs and fails (changes-requested)
+  const failedReviewOutcome = {
+    verdict: "changes-requested",
+    reviewerId: "test-reviewer",
+    implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    evidence: [{ id: "R1", severity: "major", category: "correctness", problem: "Bug found", expected: "Fix it", verification: "Test" }]
+  };
+  store.transition(implRun.id, "review-failed", { reviewOutcome: failedReviewOutcome });
+  store.transition(implRun.id, "transitioning-rework", { reviewOutcome: failedReviewOutcome });
+  await workSource.transition("PACE-SUPER-REWORK", "rework");
+  store.transition(implRun.id, "failed-retryable", { attempt: 1, reviewOutcome: failedReviewOutcome });
+  store.releaseLock("PACE-SUPER-REWORK", implRun.id);
+
+  // 5. Work source is now in rework. Supervised dispatcher must NOT launch rework automatically!
   const dispatchRes2 = await dispatchOnce(settings, {
     execute: true,
     workSource,
     store,
-    runIssueImpl: async (s, issue, exec) => {
-      return handleImplementation(s, issue, exec, runtime);
-    }
+    runIssueImpl: (s, i, e) => handleRework(s, i, e, runtime)
   });
 
-  assert.equal(dispatchRes2.waves.length, 1);
-  assert.equal(runtime.executionCount, 1, "Worker started after approval");
+  assert.equal(dispatchRes2.waves.length, 0, "Rework must NOT start without a new approval for action: rework");
+  assert.equal(runtime.executionCount, 1, "Execution count unchanged");
 
-  // 4. Rejection scenario with another issue
-  workSource.issues.set("PACE-SUPERVISED-2", {
-    key: "PACE-SUPERVISED-2",
-    summary: "Supervised reject issue",
-    description: "Acceptance criteria: done",
-    canonicalState: "ready",
-    labels: ["agent-ready"],
-    issueType: "Task"
+  // 6. Provide the NEW human approval for action: "rework"
+  store.recordApprovalDecision("PACE-SUPER-REWORK", {
+    action: "rework",
+    attempt: 1,
+    approved: true,
+    approver: "lead@example.com",
+    reason: "Approved rework attempt 1"
   });
 
-  // Human rejects PACE-SUPERVISED-2
-  store.recordApprovalDecision("PACE-SUPERVISED-2", {
-    approved: false,
-    approver: "lead-pm@example.com",
-    reason: "Out of scope for this milestone"
-  });
-
-  const planReject = issuePlan(settings, workSource.issues.get("PACE-SUPERVISED-2"), { store });
-  assert.equal(planReject.eligible, false);
-  assert.match(planReject.eligibilityReasons[0], /rejected/i);
-
+  // 7. Next dispatcher cycle now launches rework
   const dispatchRes3 = await dispatchOnce(settings, {
     execute: true,
     workSource,
     store,
-    runIssueImpl: async (s, issue, exec) => {
-      return handleImplementation(s, issue, exec, runtime);
-    }
+    runIssueImpl: (s, i, e) => handleRework(s, i, e, runtime)
   });
 
-  // No worker scheduled for rejected issue
-  assert.equal(dispatchRes3.waves.length, 0);
-  assert.equal(runtime.executionCount, 1, "Execution count unchanged on rejection");
+  assert.equal(dispatchRes3.waves.length, 1, "Rework launched after rework approval");
+  assert.equal(runtime.executionCount, 2, "Execution count incremented for rework");
 });
 
-// ── 4. Autonomous Mode Behavior ──────────────────────────────────────────────
+// ── 4. Supervised Child Integration Waits for Approval ───────────────────────
 
-test("Autonomous Mode: ready work starts automatically, Phase A lifecycle continues, human-only gates remain blocked", async () => {
-  const settings = createTestSettings({ project: { key: "PACE", operatingMode: "autonomous" } });
-  const store = getStore(settings);
-  const workSource = new MockWorkSourceProvider([
-    {
-      key: "PACE-AUTO-1",
-      summary: "Autonomous test issue",
-      description: "Acceptance criteria: done",
-      canonicalState: "ready",
-      labels: ["agent-ready"],
-      issueType: "Task"
+test("Supervised Child Integration: integration is blocked until explicit childIntegration approval", () => {
+  const settings = createTestSettings({
+    project: { key: "PACE", operatingMode: "supervised" },
+    policy: {
+      allowedProjects: ["PACE"],
+      gitIntegrationEnabled: true,
+      autonomy: { childIntegration: "approval" }
     }
-  ]);
+  });
+  const store = getStore(settings);
 
-  const runtime = createMockRuntime();
+  // Setup epic with queued child integration
+  store.upsertEpic({ key: "PACE-EPIC-10", branch: "epic/pace-epic-10" });
+  store.upsertEpicTask({
+    epicKey: "PACE-EPIC-10",
+    issueKey: "PACE-CHILD-1",
+    branch: "feature/pace-child-1"
+  });
+  store.queueEpicIntegration({
+    epicKey: "PACE-EPIC-10",
+    issueKey: "PACE-CHILD-1",
+    leafBranch: "feature/pace-child-1"
+  });
 
-  // Ready work starts automatically
-  const dispatchRes = await dispatchOnce(settings, {
-    execute: true,
-    workSource,
-    store,
-    runIssueImpl: async (s, issue, exec) => {
-      return handleImplementation(s, issue, exec, runtime);
+  // Create clean reviewed run for PACE-CHILD-1
+  const runId = store.createRun("PACE-CHILD-1", {
+    issue: "PACE-CHILD-1",
+    configSnapshot: { operatingMode: "supervised" }
+  });
+  store.transition(runId, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      reviewerId: "reviewer-1",
+      evidence: [{ id: "C1", severity: "suggestion", category: "tests", problem: "Clean" }]
     }
   });
 
-  assert.equal(dispatchRes.waves.length, 1);
-  assert.equal(runtime.executionCount, 1, "Worker started automatically in autonomous mode");
+  let adapterCalled = false;
+  const mockAdapter = () => {
+    adapterCalled = true;
+    return { completed: true, reviewedSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", integratedSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" };
+  };
 
-  // Human-only items (e.g. Epic, Done state) remain blocked
-  const epicPlan = issuePlan(settings, {
-    key: "PACE-EPIC-1",
-    summary: "Epic test",
+  // 1. Without approval, reconcileIntegrations blocks
+  const res1 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
+  assert.equal(res1.blocked.length, 1);
+  assert.match(res1.blocked[0].reason, /requires human approval/i);
+  assert.equal(adapterCalled, false);
+
+  // 2. Record approval for action: "childIntegration"
+  store.recordApprovalDecision("PACE-CHILD-1", {
+    action: "childIntegration",
+    approved: true,
+    approver: "pm@example.com"
+  });
+
+  // 3. ReconcileIntegrations now completes integration
+  const res2 = reconcileIntegrations(settings, store, { integrationAdapter: mockAdapter });
+  assert.equal(res2.blocked.length, 0);
+  assert.equal(res2.integrationsCompleted, 1);
+  assert.equal(adapterCalled, true);
+});
+
+// ── 5. Behavioral Immutability of Config Snapshots ───────────────────────────
+
+test("Behavioral Immutability: Reviewer execution uses originating implementation run's pinned review provider and model", async () => {
+  const settings = createTestSettings({
+    project: { key: "PACE", operatingMode: "autonomous" },
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      review: {
+        provider: "antigravity",
+        modelProfile: "claude-review",
+        maxReworkAttempts: 3
+      }
+    }
+  });
+  const store = getStore(settings);
+  const runtime = createMockRuntime();
+
+  const issue = {
+    key: "PACE-IMMUT-1",
+    summary: "Immutable review test",
     description: "Acceptance criteria: done",
     canonicalState: "ready",
     labels: ["agent-ready"],
-    issueType: "Epic"
-  });
-  assert.equal(epicPlan.eligible, false);
-  assert.match(epicPlan.eligibilityReasons[0], /Epic issues are human-only/i);
-
-  const donePlan = issuePlan(settings, {
-    key: "PACE-DONE-1",
-    summary: "Done test",
-    description: "Acceptance criteria: done",
-    canonicalState: "done",
-    labels: ["agent-ready"],
     issueType: "Task"
-  });
-  assert.equal(donePlan.eligible, false);
-  assert.match(donePlan.eligibilityReasons[0], /human-only canonical state/i);
+  };
+
+  // 1. Implementation run starts with reviewer antigravity
+  const plan = issuePlan(settings, issue);
+  assert.equal(plan.configSnapshot.reviewProvider, "antigravity");
+  const runId = store.createRun("PACE-IMMUT-1", plan);
+  store.transition(runId, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+
+  // 2. Global settings are mutated to codex
+  settings.data.policy.review.provider = "codex";
+  settings.data.policy.review.modelProfile = "medium";
+
+  // 3. Reviewer execution for active run resolves from originating snapshot (antigravity)
+  const reviewRes = await handleReview(settings, { ...issue, canonicalState: "review" }, true, runtime);
+  assert.equal(reviewRes.exitCode, 0);
+
+  const reviewRun = store.getRun(reviewRes.output.runId);
+  assert.equal(reviewRun.payload.configSnapshot.reviewProvider, "antigravity", "Review run inherits pinned review provider antigravity");
 });
 
-// ── 5. Immutable Run Configuration Snapshot ──────────────────────────────────
-
-test("Immutable Run Configuration Snapshot: run retains original snapshot after global config changes", () => {
+test("Behavioral Immutability: Rework exhaustion respects originating snapshot's maxReworkAttempts", () => {
   const settings = createTestSettings({
     project: { key: "PACE", operatingMode: "autonomous" },
-    executor: {
-      defaultProvider: "codex",
-      providers: {
-        codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o" } },
-        antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet", "claude-review": "claude-3-5-sonnet" } }
+    policy: {
+      allowedProjects: ["PACE"],
+      requiredLabels: ["agent-ready"],
+      review: {
+        provider: "antigravity",
+        modelProfile: "claude-review",
+        maxReworkAttempts: 3
       }
     }
   });
   const store = getStore(settings);
 
-  const issue1 = {
-    key: "PACE-SNAP-1",
-    summary: "Snapshot issue 1",
+  // Active run started with snapshot maxReworkAttempts = 3
+  const plan = issuePlan(settings, {
+    key: "PACE-IMMUT-REWORK",
+    summary: "Immutable rework test",
     description: "Acceptance criteria: done",
     canonicalState: "ready",
     labels: ["agent-ready"],
     issueType: "Task"
-  };
+  });
+  assert.equal(plan.configSnapshot.maxReworkAttempts, 3);
+  const runId = store.createRun("PACE-IMMUT-REWORK", plan);
 
-  const plan1 = issuePlan(settings, issue1);
-  assert.ok(plan1.configSnapshot, "Plan must contain configSnapshot");
-  assert.equal(plan1.configSnapshot.operatingMode, "autonomous");
-  assert.equal(plan1.configSnapshot.executorProvider, "codex");
-  assert.equal(plan1.configSnapshot.reviewProvider, "antigravity");
-  assert.equal(plan1.configSnapshot.taskAgent, "backend-engineer");
-  assert.equal(plan1.configSnapshot.maxReworkAttempts, 3);
+  // Mutate global policy to maxReworkAttempts = 1
+  settings.data.policy.review.maxReworkAttempts = 1;
 
-  const runId1 = store.createRun("PACE-SNAP-1", plan1);
-  const initialRun = store.getRun(runId1);
-  assert.equal(initialRun.payload.configSnapshot.executorProvider, "codex");
-  assert.equal(initialRun.payload.configSnapshot.operatingMode, "autonomous");
+  // Run fails review at attempt 1
+  store.transition(runId, "review-failed", {
+    attempt: 1,
+    reviewOutcome: { verdict: "changes-requested" }
+  });
 
-  // Mutate global settings
-  settings.data.project.operatingMode = "manual";
-  settings.data.executor.defaultProvider = "antigravity";
-  settings.data.policy.review.maxReworkAttempts = 5;
-
-  // Run 1 in store still retains its immutable original config snapshot!
-  const fetchedRun1 = store.getRun(runId1);
-  assert.equal(fetchedRun1.payload.configSnapshot.executorProvider, "codex", "Historical run retains original provider codex");
-  assert.equal(fetchedRun1.payload.configSnapshot.operatingMode, "autonomous", "Historical run retains original operatingMode autonomous");
-  assert.equal(fetchedRun1.payload.configSnapshot.maxReworkAttempts, 3, "Historical run retains original maxReworkAttempts 3");
-
-  // New Run 2 created after global config mutation receives the updated snapshot
-  const issue2 = {
-    key: "PACE-SNAP-2",
-    summary: "Snapshot issue 2",
-    description: "Acceptance criteria: done",
-    canonicalState: "ready",
-    labels: ["agent-ready"],
-    issueType: "Task"
-  };
-
-  const plan2 = issuePlan(settings, issue2);
-  assert.equal(plan2.configSnapshot.operatingMode, "manual");
-  assert.equal(plan2.configSnapshot.executorProvider, "antigravity");
-  assert.equal(plan2.configSnapshot.maxReworkAttempts, 5);
-
-  const runId2 = store.createRun("PACE-SNAP-2", plan2);
-  const fetchedRun2 = store.getRun(runId2);
-  assert.equal(fetchedRun2.payload.configSnapshot.executorProvider, "antigravity");
-  assert.equal(fetchedRun2.payload.configSnapshot.operatingMode, "manual");
-  assert.equal(fetchedRun2.payload.configSnapshot.maxReworkAttempts, 5);
+  // reconcileReviewers evaluates with the originating run's snapshot (limit=3).
+  // Attempt 1 < limit 3 -> transitions to transitioning-rework, NOT transitioning-blocked!
+  reconcileReviewers(settings, store);
+  const updatedRun = store.getRun(runId);
+  assert.equal(updatedRun.state, "transitioning-rework", "Active run honors snapshot maxReworkAttempts=3, not mutated global 1");
 });
