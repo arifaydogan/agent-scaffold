@@ -2,9 +2,27 @@
   "project": {
     "key": "PACE",
     "repoPath": ".",
-    "name": "PaceBuild"
+    "name": "PaceBuild",
+    "operatingMode": "autonomous"
   },
   "policy": {
+    "operatingMode": "autonomous",
+    "autonomy": {
+      "discovery": "auto",
+      "planning": "auto",
+      "routing": "auto",
+      "implementation": "auto",
+      "review": "auto",
+      "rework": "auto",
+      "createBranch": "auto",
+      "integrateChildren": "auto",
+      "createPullRequest": "auto",
+      "finalMerge": "human",
+      "markDone": "human",
+      "productionDeploy": "human",
+      "destructiveMigration": "human",
+      "secretMutation": "human"
+    },
     "allowedProjects": [
       "PACE"
     ],
