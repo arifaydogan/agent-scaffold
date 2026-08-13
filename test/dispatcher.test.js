@@ -422,7 +422,7 @@ test("durable reconciliation runs before a failing Jira poll", async () => {
   );
 
   assert.equal(store.getRun(staleRunId).state, "failed-retryable");
-  assert.equal(store.getRun(reviewRunId).state, "review-queued");
+  assert.equal(store.getRun(reviewRunId).state, "transitioning-review");
   assert.equal(store.getRun(retryRunId).state, "retry-ready");
   assert.equal(store.getEpic("EPIC-1").integrations[0].state, "queued");
 });

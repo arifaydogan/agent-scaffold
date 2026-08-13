@@ -141,9 +141,6 @@ const mockRuntime = {
 };
 
 async function testRunIssueImpl(settings, issue, execute) {
-  const { getStore } = await import("../lib/runtime.js");
-  const store = getStore(settings);
-  console.log("Locks before runIssue:", store.listLocks());
   const { runIssue } = await import("../lib/runtime.js");
   return runIssue(settings, issue, execute, mockRuntime);
 }

@@ -28,6 +28,7 @@ function settings(overrides = {}) {
         maxRetryAttempts: 3,
         gitIntegrationEnabled: true,
         externalWritesEnabled: true,
+        autonomyEnabled: true,
         providerConcurrency: { codex: 1 },
         ...overrides.policy
       },
@@ -111,7 +112,7 @@ test("fresh queued lease is not reclaimed", () => {
   assert.equal(store.listLocks().length, 1);
 });
 
-test("verifying revision queues exactly one review and never self-accepts", () => {
+test("verifying revision queues exactly one review and never self-accepts", async () => {
   const store = createTestStore();
   const runId = store.createRun("PACE-2", canonicalPlan());
   store.transition(runId, "verifying", { commit: SHA_A });
@@ -119,8 +120,14 @@ test("verifying revision queues exactly one review and never self-accepts", () =
   const first = tick(settings(), store, { now: NOW });
   assert.equal(first.reviewers.reviewsRequested, 1);
   assert.equal(first.reviewers.reviewsAccepted, 0);
-  assert.equal(store.getRun(runId).state, "review-queued");
+  assert.equal(store.getRun(runId).state, "transitioning-review");
   assert.equal(store.getRun(runId).events.at(-1).payload.implementationSha, SHA_A);
+
+  const workSource = { writeEnabled: true, transition: async () => {} };
+  const promises = [];
+  tick(settings(), store, { now: NOW, execute: true, workSource, promises });
+  await Promise.all(promises);
+  assert.equal(store.getRun(runId).state, "review-queued");
 
   const second = tick(settings(), store, { now: NOW });
   assert.equal(second.reviewers.reviewsRequested, 0);
@@ -128,11 +135,16 @@ test("verifying revision queues exactly one review and never self-accepts", () =
   assert.equal(store.getRun(runId).state, "review-queued");
 });
 
-test("review outcome must independently persist matching SHA, reviewer, and evidence", () => {
+test("review outcome must independently persist matching SHA, reviewer, and evidence", async () => {
   const store = createTestStore();
   const runId = store.createRun("PACE-2", canonicalPlan());
   store.transition(runId, "verifying", { commit: SHA_A });
   tick(settings(), store, { now: NOW });
+
+  const workSource = { writeEnabled: true, transition: async () => {} };
+  const promises = [];
+  tick(settings(), store, { now: NOW, execute: true, workSource, promises });
+  await Promise.all(promises);
 
   const mismatch = recordReviewerOutcome(store, {
     runId,
@@ -156,12 +168,18 @@ test("review outcome must independently persist matching SHA, reviewer, and evid
   assert.equal(store.getRun(runId).events.at(-1).payload.reviewOutcome.implementationSha, SHA_A);
 });
 
-test("review changes request becomes retryable and releases the issue lock", () => {
+test("review changes request becomes retryable and releases the issue lock", async () => {
   const store = createTestStore();
   const runId = store.createRun("PACE-3", canonicalPlan());
   store.transition(runId, "verifying", { commit: SHA_A });
   store.acquireLock("PACE-3", runId);
   tick(settings(), store, { now: NOW });
+
+  const workSource = { writeEnabled: true, transition: async () => {}, addComment: async () => {} };
+  const promises = [];
+  tick(settings(), store, { now: NOW, execute: true, workSource, promises });
+  await Promise.all(promises);
+
   recordReviewerOutcome(store, {
     runId,
     implementationSha: SHA_A,
@@ -177,7 +195,7 @@ test("review changes request becomes retryable and releases the issue lock", () 
   assert.equal(store.listLocks().length, 0);
 });
 
-test("integration remains queued without accepted review and real adapter evidence", () => {
+test("integration remains queued without accepted review and real adapter evidence", async () => {
   const store = createTestStore();
   store.upsertEpic({
     key: "EPIC-1",
@@ -201,6 +219,11 @@ test("integration remains queued without accepted review and real adapter eviden
   const reviewRun = store.createRun("TASK-1", canonicalPlan());
   store.transition(reviewRun, "verifying", { commit: SHA_A });
   tick(settings(), store, { now: NOW });
+  const workSource = { writeEnabled: true, transition: async () => {} };
+  const promises = [];
+  tick(settings(), store, { now: NOW, execute: true, workSource, promises });
+  await Promise.all(promises);
+
   recordReviewerOutcome(store, {
     runId: reviewRun,
     implementationSha: SHA_A,
@@ -215,7 +238,7 @@ test("integration remains queued without accepted review and real adapter eviden
   assert.equal(store.getEpic("EPIC-1").integrations[0].state, "queued");
 });
 
-test("accepted review is claimed once and integrated only with matching adapter evidence", () => {
+test("accepted review is claimed once and integrated only with matching adapter evidence", async () => {
   const store = createTestStore();
   store.upsertEpic({ key: "EPIC-2", summary: "Test Epic", branch: "epic/epic-2", baseBranch: "develop" });
   store.upsertEpicTask({
@@ -228,6 +251,11 @@ test("accepted review is claimed once and integrated only with matching adapter 
   const reviewRun = store.createRun("TASK-2", canonicalPlan());
   store.transition(reviewRun, "verifying", { commit: SHA_A });
   tick(settings(), store, { now: NOW });
+  const workSource = { writeEnabled: true, transition: async () => {} };
+  const promises = [];
+  tick(settings(), store, { now: NOW, execute: true, workSource, promises });
+  await Promise.all(promises);
+
   recordReviewerOutcome(store, {
     runId: reviewRun,
     implementationSha: SHA_A,

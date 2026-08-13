@@ -130,3 +130,93 @@ test("supervisor config: does not mutate the raw parsed data object", () => {
   // Verify supervisor defaults (not in raw) didn't bleed into raw.
   assert.equal("executeEnabled" in raw.supervisor, false);
 });
+
+test("policy safety flags: rejects non-boolean externalWritesEnabled", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    policy: { externalWritesEnabled: "true" }
+  });
+  assert.throws(() => loadSettings(configPath), /policy\.externalWritesEnabled must be a boolean/);
+});
+
+test("policy safety flags: rejects non-boolean gitIntegrationEnabled", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    policy: { gitIntegrationEnabled: 1 }
+  });
+  assert.throws(() => loadSettings(configPath), /policy\.gitIntegrationEnabled must be a boolean/);
+});
+
+test("policy safety flags: rejects non-boolean autonomyEnabled", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    policy: { autonomyEnabled: "yes" }
+  });
+  assert.throws(() => loadSettings(configPath), /policy\.autonomyEnabled must be a boolean/);
+});
+
+test("policy review: rejects negative maxReworkAttempts", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    policy: { review: { maxReworkAttempts: -1 } }
+  });
+  assert.throws(() => loadSettings(configPath), /policy\.review\.maxReworkAttempts must be a non-negative integer/);
+});
+
+test("policy review: rejects unknown review provider", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    policy: { review: { provider: "nonexistent" } }
+  });
+  assert.throws(() => loadSettings(configPath), /Configured review provider 'nonexistent' does not exist/);
+});
+
+test("policy review: rejects unknown model profile for configured review provider", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    executor: {
+      defaultProvider: "antigravity",
+      providers: {
+        antigravity: {
+          command: ["agy"],
+          modelProfiles: { medium: "claude-3-5-sonnet" }
+        }
+      }
+    },
+    policy: {
+      review: {
+        provider: "antigravity",
+        modelProfile: "unknown-profile"
+      }
+    }
+  });
+  assert.throws(() => loadSettings(configPath), /Configured review model profile 'unknown-profile' does not exist/);
+});
+
+test("policy review: accepts valid review provider and model profile", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    executor: {
+      defaultProvider: "antigravity",
+      providers: {
+        antigravity: {
+          command: ["agy"],
+          modelProfiles: { "claude-review": "claude-3-5-sonnet" }
+        }
+      }
+    },
+    policy: {
+      externalWritesEnabled: true,
+      gitIntegrationEnabled: true,
+      autonomyEnabled: true,
+      review: {
+        provider: "antigravity",
+        modelProfile: "claude-review",
+        maxReworkAttempts: 3
+      }
+    }
+  });
+  const settings = loadSettings(configPath);
+  assert.equal(settings.data.policy.review.provider, "antigravity");
+  assert.equal(settings.data.policy.review.maxReworkAttempts, 3);
+});
