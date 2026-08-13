@@ -151,7 +151,7 @@ test("review outcome must independently persist matching SHA, reviewer, and evid
     implementationSha: SHA_B,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
+    evidence: [{ id: "C1", severity: "suggestion", category: "tests", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
   assert.equal(mismatch.recorded, false);
   assert.equal(store.getRun(runId).state, "review-queued");
@@ -161,7 +161,7 @@ test("review outcome must independently persist matching SHA, reviewer, and evid
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
+    evidence: [{ id: "C1", severity: "suggestion", category: "tests", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
   assert.equal(accepted.recorded, true);
   assert.equal(store.getRun(runId).state, "reviewed-clean");
@@ -185,7 +185,7 @@ test("review changes request becomes retryable and releases the issue lock", asy
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "changes-requested",
-    evidence: [{ id: "P1", severity: "error", category: "test", file: null, line: null, problem: "Finding P1", expected: null, verification: null }]
+    evidence: [{ id: "P1", severity: "major", category: "tests", file: null, line: null, problem: "Finding P1", expected: null, verification: null }]
   }, { now: NOW });
 
   const result = tick(settings(), store, { now: NOW });
@@ -229,7 +229,7 @@ test("integration remains queued without accepted review and real adapter eviden
     implementationSha: SHA_A,
     reviewerId: "review-agent-1",
     verdict: "clean",
-    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
+    evidence: [{ id: "C1", severity: "suggestion", category: "tests", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
 
   result = tick(settings(), store, { now: NOW });
@@ -261,7 +261,7 @@ test("accepted review is claimed once and integrated only with matching adapter 
     implementationSha: SHA_A,
     reviewerId: "review-agent-2",
     verdict: "clean",
-    evidence: [{ id: "C1", severity: "info", category: "test", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
+    evidence: [{ id: "C1", severity: "suggestion", category: "tests", file: null, line: null, problem: "npm run check: exit 0", expected: null, verification: null }]
   }, { now: NOW });
 
   let calls = 0;
@@ -411,4 +411,58 @@ test("write-disabled operation does not advance transitioning-review or release 
   assert.equal(store.getRun(runId).state, "transitioning-review");
   assert.equal(store.listLocks().find(l => l.issue_key === "PACE-8")?.run_id, runId);
 });
+
+test("recordReviewerOutcome rejects unknown severity values", () => {
+  const store = createTestStore();
+  const runId = store.createRun("PACE-SEV", canonicalPlan());
+  store.transition(runId, "review-queued", { implementationSha: SHA_A });
+
+  assert.throws(
+    () => {
+      recordReviewerOutcome(store, {
+        runId,
+        implementationSha: SHA_A,
+        reviewerId: "reviewer-1",
+        verdict: "changes-requested",
+        evidence: [{ id: "F1", severity: "invalid-severity", category: "correctness", problem: "Bug" }]
+      });
+    },
+    /Invalid reviewer finding severity/
+  );
+});
+
+test("recordReviewerOutcome rejects unknown or missing category values without defaulting", () => {
+  const store = createTestStore();
+  const runId = store.createRun("PACE-CAT", canonicalPlan());
+  store.transition(runId, "review-queued", { implementationSha: SHA_A });
+
+  // Missing category
+  assert.throws(
+    () => {
+      recordReviewerOutcome(store, {
+        runId,
+        implementationSha: SHA_A,
+        reviewerId: "reviewer-1",
+        verdict: "changes-requested",
+        evidence: [{ id: "F1", severity: "major", problem: "Bug" }]
+      });
+    },
+    /category is required/
+  );
+
+  // Unknown category
+  assert.throws(
+    () => {
+      recordReviewerOutcome(store, {
+        runId,
+        implementationSha: SHA_A,
+        reviewerId: "reviewer-1",
+        verdict: "changes-requested",
+        evidence: [{ id: "F1", severity: "major", category: "general", problem: "Bug" }]
+      });
+    },
+    /Invalid reviewer finding category/
+  );
+});
+
 

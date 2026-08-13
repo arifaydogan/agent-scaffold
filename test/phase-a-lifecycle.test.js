@@ -98,6 +98,8 @@ let builderExecutions = 0;
 let reviewerExecutions = 0;
 let mockVerdict = "clean";
 let mockEvidence = [];
+let mockReviewerExitCode = 0;
+let mockReviewerOutput = null;
 
 const mockRuntime = {
   spawnSync(cmd, args) {
@@ -118,22 +120,26 @@ const mockRuntime = {
     child.stderr = new EventEmitter();
     child.kill = () => {};
     setTimeout(() => {
-      child.stdout.emit("data", Buffer.from(JSON.stringify({
-        status: "SUCCESS",
-        ok: true,
-        response: JSON.stringify({
-          status: "completed",
-          summary: "Reviewed",
-          changed_files: [],
-          validation_commands: [],
-          blockers: [],
-          risks: [],
-          verdict: mockVerdict,
-          evidence: mockEvidence
-        })
-      }) + "\n"));
+      if (mockReviewerOutput !== null) {
+        child.stdout.emit("data", Buffer.from(mockReviewerOutput + "\n"));
+      } else {
+        child.stdout.emit("data", Buffer.from(JSON.stringify({
+          status: mockReviewerExitCode === 0 ? "SUCCESS" : "FAILED",
+          ok: mockReviewerExitCode === 0,
+          response: JSON.stringify({
+            status: "completed",
+            summary: "Reviewed",
+            changed_files: [],
+            validation_commands: [],
+            blockers: [],
+            risks: [],
+            verdict: mockVerdict,
+            evidence: mockEvidence
+          })
+        }) + "\n"));
+      }
       setTimeout(() => {
-        child.emit("close", 0);
+        child.emit("close", mockReviewerExitCode);
       }, 5);
     }, 5);
     return child;
@@ -149,7 +155,7 @@ test("Phase A Lifecycle: ready -> in_progress -> review -> human_approval", asyn
   builderExecutions = 0;
   reviewerExecutions = 0;
   mockVerdict = "clean";
-  mockEvidence = [{ id: "C1", severity: "info", category: "security", problem: "All good", file: "foo.js", line: 1 }];
+  mockEvidence = [{ id: "C1", severity: "suggestion", category: "security", problem: "All good", file: "foo.js", line: 1 }];
   
   const settings = createSettings();
   const { getStore } = await import("../lib/runtime.js");
@@ -224,7 +230,7 @@ test("Phase A Lifecycle: rework exhaustion with maxReworkAttempts = 3", async ()
   builderExecutions = 0;
   reviewerExecutions = 0;
   mockVerdict = "changes-requested";
-  mockEvidence = [{ id: "F1", severity: "high", category: "logic", problem: "Fix it", file: "foo.js", line: 1 }];
+  mockEvidence = [{ id: "F1", severity: "critical", category: "correctness", problem: "Fix it", file: "foo.js", line: 1 }];
 
   const settings = createSettings();
   const { getStore } = await import("../lib/runtime.js");
@@ -303,3 +309,122 @@ test("Phase A Lifecycle: rework exhaustion with maxReworkAttempts = 3", async ()
   // 4 reviewer executions
   assert.equal(reviewerExecutions, 4);
 });
+
+test("Reviewer infrastructure failure: reviewer exits non-zero", async () => {
+  builderExecutions = 0;
+  reviewerExecutions = 0;
+  mockReviewerExitCode = 1;
+  mockReviewerOutput = null;
+
+  const settings = createSettings();
+  const { getStore, issuePlan } = await import("../lib/runtime.js");
+  const store = getStore(settings);
+  const workSource = new MockWorkSourceProvider([
+    {
+      key: "PACE-FAIL-EXIT",
+      summary: "Implement feature",
+      description: "Acceptance criteria: done",
+      canonicalState: "review",
+      labels: ["agent-ready"],
+      issueType: "Task"
+    }
+  ]);
+  const plan = issuePlan(settings, workSource.issues.get("PACE-FAIL-EXIT"));
+  const builderRunId = store.createRun("PACE-FAIL-EXIT", plan);
+  store.transition(builderRunId, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+
+  // Dispatch reviewer
+  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+  await new Promise(r => setTimeout(r, 20));
+
+  // Check state
+  const runs = store.listRunsDetailed(10);
+  const reviewerRun = runs.find(r => r.id !== builderRunId);
+  const builderRun = store.getRun(builderRunId);
+
+  assert.equal(reviewerExecutions, 1);
+  assert.equal(reviewerRun.state, "failed-retryable");
+  assert.equal(builderRun.state, "review-queued", "Implementation run remains in review-queued on reviewer exit failure");
+  assert.equal(store.listLocks().length, 0, "Issue lock must be released");
+  assert.equal(workSource.issues.get("PACE-FAIL-EXIT").canonicalState, "review", "Work source state must remain review");
+});
+
+test("Reviewer infrastructure failure: reviewer returns malformed output", async () => {
+  builderExecutions = 0;
+  reviewerExecutions = 0;
+  mockReviewerExitCode = 0;
+  mockReviewerOutput = "NOT VALID JSON AT ALL {[[";
+
+  const settings = createSettings();
+  const { getStore, issuePlan } = await import("../lib/runtime.js");
+  const store = getStore(settings);
+  const workSource = new MockWorkSourceProvider([
+    {
+      key: "PACE-FAIL-JSON",
+      summary: "Implement feature",
+      description: "Acceptance criteria: done",
+      canonicalState: "review",
+      labels: ["agent-ready"],
+      issueType: "Task"
+    }
+  ]);
+  const plan = issuePlan(settings, workSource.issues.get("PACE-FAIL-JSON"));
+  const builderRunId = store.createRun("PACE-FAIL-JSON", plan);
+  store.transition(builderRunId, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+
+  // Dispatch reviewer
+  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+  await new Promise(r => setTimeout(r, 20));
+
+  // Check state
+  const runs = store.listRunsDetailed(10);
+  const reviewerRun = runs.find(r => r.id !== builderRunId);
+  const builderRun = store.getRun(builderRunId);
+
+  assert.equal(reviewerExecutions, 1);
+  assert.equal(reviewerRun.state, "failed-retryable");
+  assert.equal(builderRun.state, "review-queued", "Implementation run remains in review-queued on malformed reviewer output");
+  assert.equal(store.listLocks().length, 0, "Issue lock must be released");
+});
+
+test("Reviewer infrastructure failure: reviewer returns changes-requested with no evidence", async () => {
+  builderExecutions = 0;
+  reviewerExecutions = 0;
+  mockReviewerExitCode = 0;
+  mockReviewerOutput = null;
+  mockVerdict = "changes-requested";
+  mockEvidence = [];
+
+  const settings = createSettings();
+  const { getStore, issuePlan } = await import("../lib/runtime.js");
+  const store = getStore(settings);
+  const workSource = new MockWorkSourceProvider([
+    {
+      key: "PACE-FAIL-NO-EVID",
+      summary: "Implement feature",
+      description: "Acceptance criteria: done",
+      canonicalState: "review",
+      labels: ["agent-ready"],
+      issueType: "Task"
+    }
+  ]);
+  const plan = issuePlan(settings, workSource.issues.get("PACE-FAIL-NO-EVID"));
+  const builderRunId = store.createRun("PACE-FAIL-NO-EVID", plan);
+  store.transition(builderRunId, "review-queued", { implementationSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
+
+  // Dispatch reviewer
+  await dispatchOnce(settings, { execute: true, workSource, store, runIssueImpl: testRunIssueImpl });
+  await new Promise(r => setTimeout(r, 20));
+
+  // Check state
+  const runs = store.listRunsDetailed(10);
+  const reviewerRun = runs.find(r => r.id !== builderRunId);
+  const builderRun = store.getRun(builderRunId);
+
+  assert.equal(reviewerExecutions, 1);
+  assert.equal(reviewerRun.state, "failed-retryable");
+  assert.equal(builderRun.state, "review-queued", "Implementation run remains in review-queued when reviewer returns no structured findings");
+  assert.equal(store.listLocks().length, 0, "Issue lock must be released");
+  assert.equal(workSource.issues.get("PACE-FAIL-NO-EVID").canonicalState, "review", "Work source state must not transition to rework");
+});
+
