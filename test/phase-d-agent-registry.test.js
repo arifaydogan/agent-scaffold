@@ -3,11 +3,13 @@
  *
  * Phase D — Agent Registry:
  * - Dual-table immutable versioning (agent_definitions + agent_versions)
- * - Deterministic lifecycle (enabled, disabled, archived)
+ * - Automatic, idempotent, and non-destructive builtin agent seeding
+ * - Deterministic lifecycle (enabled, disabled, archived) vs immutable definition versions
  * - Fail-closed deletion safety (hard delete prevented if referenced by runs)
  * - Strict schema validation & SHA-256 definition hash computation
- * - Runtime eligibility gate & immutable snapshot pinning
- * - HTTP Management API endpoints with loopback enforcement and audit journal
+ * - Runtime authoritative check: unknown, disabled, or archived agents fail closed
+ * - Plan approval identity: plan fingerprint binds agentId, agentVersion, and agentHash
+ * - HTTP Management API endpoints with mutation gating (controlPlane flag), loopback enforcement, and audit journal
  */
 
 import fs from "node:fs";
@@ -20,17 +22,19 @@ import { RunStore } from "../lib/store.js";
 import {
   validateAgentDefinition,
   computeAgentDefinitionHash,
-  AgentValidationError
+  AgentValidationError,
+  BUILTIN_AGENT_SEEDS
 } from "../lib/agent-registry.js";
-import { issuePlan, getStore, createConfigSnapshot } from "../lib/runtime.js";
+import { issuePlan, getStore, createConfigSnapshot, handleImplementation } from "../lib/runtime.js";
 import { createDashboardServer } from "../lib/dashboard.js";
+import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
 
 function makeTestStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-reg-test-"));
   return new RunStore(path.join(dir, "runs.sqlite3"));
 }
 
-function makeSettings(store, policyOverrides = {}) {
+function makeSettings(store, policyOverrides = {}, controlPlaneOverrides = {}) {
   return {
     source: "/tmp/test.json",
     projectKey: "PACE",
@@ -46,7 +50,8 @@ function makeSettings(store, policyOverrides = {}) {
         maxConcurrency: 2,
         pathScopes: {
           "backend-engineer": ["lib/**", "backend/**"],
-          "custom-worker": ["src/**"]
+          "custom-worker": ["src/**"],
+          "unregistered-agent": ["src/**"]
         },
         ...policyOverrides
       },
@@ -74,7 +79,9 @@ function makeSettings(store, policyOverrides = {}) {
         }
       },
       controlPlane: {
-        configMutationEnabled: true
+        agentRegistryMutationEnabled: true,
+        configMutationEnabled: true,
+        ...controlPlaneOverrides
       }
     }
   };
@@ -90,9 +97,24 @@ const sampleIssue = {
   issueType: "Story"
 };
 
+function makeCodexEvent(plan) {
+  return [
+    JSON.stringify({ type: "thread.started", thread_id: "th-1" }),
+    JSON.stringify({ type: "turn.started", turn_id: "tu-1" }),
+    JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        text: JSON.stringify(plan)
+      }
+    }),
+    JSON.stringify({ type: "turn.completed", turn_id: "tu-1" })
+  ].join("\n");
+}
+
 // ── 1. Schema Validation & Hash Computation ────────────────────────────────────
 
-test("Agent Model: strict schema validation rejects malformed definitions", () => {
+test("Agent Model: strict schema validation rejects malformed definitions, invalid roles, and empty strings", () => {
   // Missing or invalid ID
   assert.throws(() => validateAgentDefinition({}), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "invalid space", displayName: "Test" }), AgentValidationError);
@@ -101,16 +123,28 @@ test("Agent Model: strict schema validation rejects malformed definitions", () =
   // Missing displayName
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "" }), AgentValidationError);
 
+  // Invalid role (must be one of AGENT_ROLES)
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", role: "wizard" }), /Invalid agent role/);
+
   // Invalid status
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", status: "destroyed" }), AgentValidationError);
+
+  // Invalid defaultPersona
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", defaultPersona: "invalid persona spaces" }), AgentValidationError);
 
   // Invalid maxConcurrency
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", maxConcurrency: 0 }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", maxConcurrency: -2 }), AgentValidationError);
 
-  // Invalid skills / allowedPaths
+  // Invalid skills / capabilities / allowedPaths containing empty strings or non-arrays
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", skills: "not-array" }), AgentValidationError);
-  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", allowedPaths: "not-array" }), AgentValidationError);
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", skills: ["valid", "  "] }), AgentValidationError);
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", capabilities: [""] }), AgentValidationError);
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", allowedPaths: ["   "] }), AgentValidationError);
+
+  // Malformed executor
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", executor: "not-object" }), AgentValidationError);
+  assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", executor: { provider: "" } }), AgentValidationError);
 
   // Valid agent definition normalizes correctly
   const valid = validateAgentDefinition({
@@ -122,6 +156,7 @@ test("Agent Model: strict schema validation rejects malformed definitions", () =
     allowedPaths: ["src/**"]
   });
   assert.equal(valid.id, "custom-worker");
+  assert.equal(valid.role, "implementation");
   assert.equal(valid.status, "enabled");
   assert.deepEqual(valid.skills, ["api-design"]);
 });
@@ -153,9 +188,50 @@ test("Agent Model: computeAgentDefinitionHash is deterministic and detects field
   assert.notEqual(hashA, hashC, "Hash must change when skills change");
 });
 
-// ── 2. Dual-Table Immutable Version History ──────────────────────────────────
+// ── 2. Automatic, Idempotent Builtin Agent Seeding ────────────────────────────
 
-test("Agent Registry Store: create and update produces immutable version history", () => {
+test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-destructive", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-reg-seed-test-"));
+  const dbPath = path.join(dir, "runs.sqlite3");
+
+  // 1. Fresh store initializes with all builtin seeds
+  const store1 = new RunStore(dbPath);
+  const initialAgents = store1.listAgentDefinitions();
+  const seedIds = BUILTIN_AGENT_SEEDS.map(s => s.id);
+  assert.ok(initialAgents.length >= seedIds.length);
+  for (const id of seedIds) {
+    assert.ok(initialAgents.some(a => a.id === id), `Builtin agent '${id}' must be seeded`);
+  }
+
+  // 2. Modify one builtin agent (e.g. backend-engineer) to v2
+  store1.updateAgentDefinition("backend-engineer", {
+    displayName: "Customized Backend Engineer",
+    skills: ["api-design", "custom-skill"]
+  });
+  const modified = store1.getAgentDefinition("backend-engineer");
+  assert.equal(modified.version, 2);
+  assert.equal(modified.definition.displayName, "Customized Backend Engineer");
+
+  // 3. Add a custom agent
+  store1.createAgentDefinition({
+    id: "my-custom-agent",
+    displayName: "My Custom Agent",
+    allowedPaths: ["custom/**"]
+  });
+
+  // 4. Re-open / bootstrap store: must not overwrite modified builtin, bump version, or remove custom agent
+  const store2 = new RunStore(dbPath);
+  const backendAfterBootstrap = store2.getAgentDefinition("backend-engineer");
+  assert.equal(backendAfterBootstrap.version, 2, "Bootstrap must not bump version of modified builtin");
+  assert.equal(backendAfterBootstrap.definition.displayName, "Customized Backend Engineer", "Bootstrap must not overwrite modified builtin");
+
+  const customAgent = store2.getAgentDefinition("my-custom-agent");
+  assert.ok(customAgent, "Custom agent must remain intact after bootstrap");
+});
+
+// ── 3. Dual-Table Immutable Version History ──────────────────────────────────
+
+test("Agent Registry Store: create and update produces immutable version history with transactions", () => {
   const store = makeTestStore();
 
   // 1. Create v1
@@ -209,40 +285,44 @@ test("Agent Registry Store: create and update produces immutable version history
   assert.equal(versions[1].version, 2);
 });
 
-// ── 3. Lifecycle States (Enabled, Disabled, Archived) ──────────────────────────
+// ── 4. Lifecycle States vs Immutable Definition Version ────────────────────────
 
-test("Agent Registry Store: lifecycle transitions and list filtering", () => {
+test("Agent Registry Store: lifecycle transitions vs definition version semantics", () => {
   const store = makeTestStore();
-  store.createAgentDefinition({ id: "agent-1", displayName: "Agent 1" });
-  store.createAgentDefinition({ id: "agent-2", displayName: "Agent 2" });
-  store.createAgentDefinition({ id: "agent-3", displayName: "Agent 3" });
+  store.createAgentDefinition({ id: "agent-1", displayName: "Agent 1", skills: ["s1"] });
+  store.createAgentDefinition({ id: "agent-2", displayName: "Agent 2", skills: ["s2"] });
 
-  // Disable agent-2
+  const initialHash = store.getAgentDefinition("agent-2").definitionHash;
+
+  // Disable agent-2: updates live status without bumping version or corrupting historical definition
   store.setAgentStatus("agent-2", "disabled");
-  assert.equal(store.getAgentDefinition("agent-2").status, "disabled");
+  const disabledAgent = store.getAgentDefinition("agent-2");
+  assert.equal(disabledAgent.status, "disabled");
+  assert.equal(disabledAgent.currentStatus, "disabled");
+  assert.equal(disabledAgent.version, 1, "Disabling must not increment version");
+  assert.equal(disabledAgent.definitionHash, initialHash, "Definition hash must remain identical");
+  assert.equal(store.listAgentVersions("agent-2").length, 1, "Disabling must not create extra versions");
 
-  // Archive agent-3
-  store.setAgentStatus("agent-3", "archived");
-  assert.equal(store.getAgentDefinition("agent-3").status, "archived");
+  // Archive agent-2
+  store.setAgentStatus("agent-2", "archived");
+  assert.equal(store.getAgentDefinition("agent-2").status, "archived");
 
   // Default list excludes archived
   const activeList = store.listAgentDefinitions();
   const ids = activeList.map(a => a.id);
   assert.ok(ids.includes("agent-1"), "Enabled agent must be in default list");
-  assert.ok(ids.includes("agent-2"), "Disabled agent must be in default list");
-  assert.ok(!ids.includes("agent-3"), "Archived agent must be excluded from default list");
+  assert.ok(!ids.includes("agent-2"), "Archived agent must be excluded from default list");
 
-  // List with includeArchived includes agent-3
+  // List with includeArchived includes agent-2
   const allList = store.listAgentDefinitions({ includeArchived: true });
-  assert.equal(allList.length, 3);
+  assert.ok(allList.some(a => a.id === "agent-2"));
 
   // List by status
-  const disabledList = store.listAgentDefinitions({ status: "disabled" });
-  assert.equal(disabledList.length, 1);
-  assert.equal(disabledList[0].id, "agent-2");
+  const archivedList = store.listAgentDefinitions({ status: "archived" });
+  assert.ok(archivedList.some(a => a.id === "agent-2"));
 });
 
-// ── 4. Deletion Safety (Fail-Closed on Used Agents) ────────────────────────────
+// ── 5. Deletion Safety (Fail-Closed on Used Agents) ────────────────────────────
 
 test("Agent Registry Store: hard deletion is permitted ONLY for never-used agents", () => {
   const store = makeTestStore();
@@ -271,22 +351,68 @@ test("Agent Registry Store: hard deletion is permitted ONLY for never-used agent
   assert.ok(store.getAgentDefinition("used-agent"), "Used agent must remain in store");
 });
 
-// ── 5. Runtime & Snapshot Integration ─────────────────────────────────────────
+// ── 6. Runtime Authoritative Registry Check ────────────────────────────────────
 
-function makeCodexEvent(plan) {
-  return [
-    JSON.stringify({ type: "thread.started", thread_id: "th-1" }),
-    JSON.stringify({ type: "turn.started", turn_id: "tu-1" }),
-    JSON.stringify({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: JSON.stringify(plan)
+test("Runtime Integration: unknown taskAgent fails closed with not-registered reason and null version/hash", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  const planPayload = {
+    issue: "PACE-500",
+    summary: sampleIssue.summary,
+    persona: "startup-cto",
+    taskAgent: "unregistered-agent",
+    skills: ["api-design"],
+    risk: "normal",
+    parallelSafe: true,
+    allowedPaths: ["src/**"],
+    dependencies: [],
+    rationale: ["Valid plan with unregistered agent"],
+    reasons: ["Valid plan with unregistered agent"]
+  };
+
+  const plan = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(planPayload),
+        stderr: ""
+      })
+    }
+  });
+
+  assert.equal(plan.eligible, false, "Unregistered agent must be ineligible");
+  assert.ok(
+    plan.eligibilityReasons.some(r => r.includes("Agent 'unregistered-agent' is not registered")),
+    "Eligibility reasons must explicitly state agent is not registered"
+  );
+  assert.equal(plan.agentVersion, null, "Unregistered agent must not have an invented agentVersion");
+  assert.equal(plan.agentHash, null, "Unregistered agent must have null agentHash");
+
+  // Pre-execution execution gate blocks implementation
+  let workerSpawned = false;
+  const result = handleImplementation(
+    settings,
+    sampleIssue,
+    true,
+    {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(planPayload),
+        stderr: ""
+      }),
+      spawn: () => {
+        workerSpawned = true;
+        return { pid: 9999, unref: () => {} };
       }
-    }),
-    JSON.stringify({ type: "turn.completed", turn_id: "tu-1" })
-  ].join("\n");
-}
+    }
+  );
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.output.eligible, false);
+  assert.equal(workerSpawned, false, "Worker must NOT be spawned for unregistered agent");
+});
 
 test("Runtime Integration: disabled or archived agents fail closed and block dispatch", () => {
   const store = makeTestStore();
@@ -315,7 +441,6 @@ test("Runtime Integration: disabled or archived agents fail closed and block dis
 
   const planDisabled = issuePlan(settings, sampleIssue, {
     store,
-    planOverrides: { taskAgent: "custom-worker" },
     runtime: {
       spawnSync: () => ({
         status: 0,
@@ -408,7 +533,95 @@ test("Snapshot Pinning: run retains immutable agent version across global agent 
   assert.equal(storedRun.payload.configSnapshot.agentHash, v1.definitionHash, "Run snapshot must retain v1 hash");
 });
 
-// ── 6. Control Plane Agent Management API ─────────────────────────────────────
+// ── 7. Plan Approval Identity Binding ─────────────────────────────────────────
+
+test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and agentHash", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, { operatingMode: "supervised" });
+
+  const v1 = store.createAgentDefinition({
+    id: "custom-worker",
+    displayName: "Custom Worker v1",
+    skills: ["api-design"],
+    allowedPaths: ["src/**"]
+  });
+
+  const validPlanPayload = {
+    issue: "PACE-500",
+    summary: sampleIssue.summary,
+    persona: "startup-cto",
+    taskAgent: "custom-worker",
+    skills: ["api-design"],
+    risk: "normal",
+    parallelSafe: true,
+    allowedPaths: ["src/**"],
+    dependencies: [],
+    rationale: ["Valid test plan"],
+    reasons: ["Valid test plan"]
+  };
+
+  const planV1 = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(validPlanPayload),
+        stderr: ""
+      })
+    }
+  });
+
+  const fpV1 = computePlanFingerprint(planV1);
+  assert.ok(fpV1);
+
+  // Record human approval for planV1
+  store.recordApprovalDecision("PACE-500", {
+    action: "implementation",
+    approved: true,
+    approver: "admin",
+    planFingerprint: fpV1
+  });
+
+  // Verify planV1 is authorized
+  const authV1 = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-500",
+    action: "implementation",
+    plan: planV1
+  });
+  assert.equal(authV1.allowed, true, "Plan with agent v1 must be authorized by v1 approval");
+
+  // Update agent in registry to v2
+  store.updateAgentDefinition("custom-worker", {
+    displayName: "Custom Worker v2",
+    skills: ["api-design", "kafka-streams"]
+  });
+
+  // Generate new plan (now resolves to agent v2)
+  const planV2 = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(validPlanPayload),
+        stderr: ""
+      })
+    }
+  });
+
+  const fpV2 = computePlanFingerprint(planV2);
+  assert.notEqual(fpV1, fpV2, "Fingerprint must change when agent version/hash changes");
+
+  // Verify planV2 is NOT authorized by old v1 approval
+  const authV2 = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-500",
+    action: "implementation",
+    plan: planV2
+  });
+  assert.equal(authV2.allowed, false, "Plan with agent v2 MUST NOT be authorized by v1 approval");
+  assert.ok(authV2.reason.includes("requires human approval") || authV2.reason.includes("fingerprint mismatch"));
+});
+
+// ── 8. Control Plane Agent Management API ─────────────────────────────────────
 
 test("Agent Management API: full HTTP lifecycle, loopback protection, and audit logging", async () => {
   const store = makeTestStore();
@@ -420,11 +633,11 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    // 1. GET /api/agents (initially empty)
+    // 1. GET /api/agents (initially has builtin seeds)
     const listRes1 = await fetch(`${baseUrl}/api/agents`);
     assert.equal(listRes1.status, 200);
     const listData1 = await listRes1.json();
-    assert.deepEqual(listData1.agents, []);
+    assert.ok(listData1.agents.length >= BUILTIN_AGENT_SEEDS.length);
 
     // 2. POST /api/agents (create new agent)
     const createPayload = {
@@ -507,6 +720,51 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
     assert.ok(decisionTypes.includes("agent-enabled"));
     assert.ok(decisionTypes.includes("agent-archived"));
     assert.ok(decisionTypes.includes("agent-deleted"));
+  } finally {
+    server.close();
+  }
+});
+
+test("Agent Management API: controlPlane mutation flag rejects mutations with 403 when disabled", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {}, { agentRegistryMutationEnabled: false, configMutationEnabled: false });
+
+  const server = createDashboardServer(settings, { store });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    // POST create blocked
+    const postRes = await fetch(`${baseUrl}/api/agents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "blocked-agent", displayName: "Blocked Agent" })
+    });
+    assert.equal(postRes.status, 403);
+    const postData = await postRes.json();
+    assert.ok(postData.error.includes("Agent registry mutation is disabled"));
+
+    // PATCH blocked
+    const patchRes = await fetch(`${baseUrl}/api/agents/backend-engineer`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "Should Fail" })
+    });
+    assert.equal(patchRes.status, 403);
+
+    // disable blocked
+    const disableRes = await fetch(`${baseUrl}/api/agents/backend-engineer/disable`, { method: "POST" });
+    assert.equal(disableRes.status, 403);
+
+    // DELETE blocked
+    const deleteRes = await fetch(`${baseUrl}/api/agents/backend-engineer`, { method: "DELETE" });
+    assert.equal(deleteRes.status, 403);
+
+    // DB remains unchanged
+    const backend = store.getAgentDefinition("backend-engineer");
+    assert.equal(backend.version, 1);
+    assert.equal(backend.status, "enabled");
   } finally {
     server.close();
   }
