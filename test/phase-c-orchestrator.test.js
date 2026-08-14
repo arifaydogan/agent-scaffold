@@ -613,6 +613,119 @@ test("TaskAgent-Based Path Scope Resolution: hard scope resolved from taskAgent 
   assert.deepEqual(plan3.allowedPaths, [], "taskAgent explicitly mapped to [] must have effective allowedPaths = []");
 });
 
+test("Pre-Execution No-Write-Scope Guard: empty allowedPaths blocks implementation and rework before side effects or worker spawn", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex"
+    },
+    policy: {
+      pathScopes: {
+        "backend-engineer": ["lib/**"],
+        "security-engineer": []
+      }
+    }
+  });
+  const store = getStore(settings);
+
+  // 1. Unknown taskAgent -> effective [] -> handleImplementation(... execute: true) returns blocked
+  let spawnCallCount = 0;
+  let worktreeCallCount = 0;
+  let currentMockPlan = null;
+  const mockRuntime = {
+    spawnSync: (cmd, args) => {
+      if (cmd === "codex" && args && args.includes("exec") && args.includes("--json")) {
+        return { status: 0, stdout: JSON.stringify(currentMockPlan || sampleValidPlanJson), stderr: "" };
+      }
+      if (cmd === "codex" || cmd === "agy") {
+        spawnCallCount++;
+      }
+      if (cmd === "git" && args && args.includes("worktree")) {
+        worktreeCallCount++;
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  };
+
+  const planUnknown = {
+    ...sampleValidPlanJson,
+    persona: "startup-cto",
+    taskAgent: "unmapped-agent",
+    allowedPaths: ["lib/**"]
+  };
+  currentMockPlan = planUnknown;
+
+  const resUnknown = handleImplementation(settings, sampleIssue, true, mockRuntime, planUnknown);
+  assert.equal(resUnknown.exitCode, 2, "Must exit with blocked code");
+  assert.equal(spawnCallCount, 0, "Worker spawn count must be 0");
+  assert.equal(worktreeCallCount, 0, "Branch/worktree mutation count must be 0");
+
+  const runUnknown = store.getRun(resUnknown.output.runId);
+  assert.equal(runUnknown.state, "blocked");
+  assert.match(runUnknown.events.at(-1).payload.reasons[0], /No authorized write scope for taskAgent/i);
+
+  // 2. security-engineer explicitly mapped to [] -> handleImplementation(... execute: true) returns blocked
+  const planSecurity = {
+    ...sampleValidPlanJson,
+    persona: "startup-cto",
+    taskAgent: "security-engineer",
+    allowedPaths: ["lib/**"]
+  };
+  currentMockPlan = planSecurity;
+
+  const resSecurity = handleImplementation(settings, sampleIssue, true, mockRuntime, planSecurity);
+  assert.equal(resSecurity.exitCode, 2, "Must exit with blocked code");
+  assert.equal(spawnCallCount, 0, "Worker spawn count must be 0");
+  assert.equal(worktreeCallCount, 0, "Branch/worktree mutation count must be 0");
+
+  const runSecurity = store.getRun(resSecurity.output.runId);
+  assert.equal(runSecurity.state, "blocked");
+  assert.match(runSecurity.events.at(-1).payload.reasons[0], /No authorized write scope for taskAgent/i);
+
+  // 3. Rework with pinned empty allowedPaths -> rework worker does not start
+  const retryableRunId = store.createRun(sampleIssue.key, {
+    ...sampleValidPlanJson,
+    configSnapshot: {
+      ...createConfigSnapshot(settings, sampleIssue, sampleValidPlanJson),
+      allowedPaths: [] // Pinned empty scope
+    }
+  });
+  store.transition(retryableRunId, "failed-retryable", {
+    attempt: 0,
+    reviewOutcome: { reviewerId: "reviewer-1", verdict: "changes-requested", evidence: [] }
+  });
+
+  const resRework = handleRework(settings, sampleIssue, true, mockRuntime);
+  assert.equal(resRework.exitCode, 2, "Rework must exit with blocked code when pinned scope is []");
+  assert.equal(spawnCallCount, 0, "Rework worker must not start");
+  assert.equal(worktreeCallCount, 0, "Rework worktree must not mutate");
+
+  // 4. Normal valid taskAgent scope -> unaffected and still executes
+  let validWorkerSpawned = false;
+  const validRuntime = {
+    spawnSync: (cmd, args) => {
+      if (cmd === "codex" && args && args.includes("exec") && args.includes("--json")) {
+        return { status: 0, stdout: JSON.stringify(planValid), stderr: "" };
+      }
+      if (cmd === "codex") {
+        validWorkerSpawned = true;
+        return { status: 0, stdout: "Implementation completed successfully", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  };
+
+  const planValid = {
+    ...sampleValidPlanJson,
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    allowedPaths: ["lib/**"]
+  };
+
+  const resValid = handleImplementation(settings, sampleIssue, true, validRuntime, planValid);
+  assert.equal(validWorkerSpawned, true, "Valid scope must allow worker execution");
+  assert.equal(resValid.exitCode, 0);
+});
+
 // ── 6. Full Stable Orchestrator Decision in Fingerprint ────────────────────────
 
 test("Plan Fingerprint: changing dependencies, parallelSafe, or executor recommendations changes fingerprint", () => {

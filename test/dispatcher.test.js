@@ -428,15 +428,15 @@ test("durable reconciliation runs before a failing Jira poll", async () => {
 });
 
 test("global active-worker capacity accounting accounts for running workers (maxConcurrency=3, 2 active -> 1 scheduled)", async () => {
-  const settings = makeSettings({ maxConcurrency: 3, pathScopes: {} });
+  const settings = makeSettings({ maxConcurrency: 3 });
   const store = makeStore();
 
   // Create 2 already-running active worker runs with matching project key TEST
-  const activePlan1 = issuePlan(settings, makeIssue("TEST-ACTIVE-1"));
+  const activePlan1 = { ...issuePlan(settings, makeIssue("TEST-ACTIVE-1")), allowedPaths: ["active1/**"] };
   const activeRun1 = store.createRun("TEST-ACTIVE-1", activePlan1);
   store.transition(activeRun1, "executing", { provider: "codex" });
 
-  const activePlan2 = issuePlan(settings, makeIssue("TEST-ACTIVE-2"));
+  const activePlan2 = { ...issuePlan(settings, makeIssue("TEST-ACTIVE-2")), allowedPaths: ["active2/**"] };
   const activeRun2 = store.createRun("TEST-ACTIVE-2", activePlan2);
   store.transition(activeRun2, "started", { provider: "codex" });
 
