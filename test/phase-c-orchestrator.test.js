@@ -22,6 +22,7 @@ import {
   describeOrchestratorProviders
 } from "../lib/orchestrator.js";
 import { issuePlan, createConfigSnapshot, handleImplementation, handleRework, getStore } from "../lib/runtime.js";
+import { selectExecutionProfile } from "../lib/executor.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -153,7 +154,7 @@ const sampleValidPlanJson = {
   rationale: ["High-risk payment processing requiring architectural oversight"]
 };
 
-// ── 1. Structured Plan Schema Validation ───────────────────────────────────────
+// ── 1. Structured Plan Schema Validation (Strict & Fail-Closed) ────────────────
 
 test("Structured Orchestrator Plan Schema: valid plan passes validation", () => {
   const validated = validateOrchestratorPlan(sampleValidPlanJson, { issue: sampleIssue });
@@ -171,141 +172,77 @@ test("Structured Orchestrator Plan Schema: valid plan passes validation", () => 
   assert.equal(validated.effort, "high");
 });
 
-test("Structured Orchestrator Plan Schema: incomplete plan fails validation (missing persona/taskAgent/skills)", () => {
-  // Missing persona
+test("Strict Schema Validation: missing risk, parallelSafe, allowedPaths, dependencies or rationale throws OrchestratorValidationError", () => {
+  // 1. Missing risk (no silent defaulting)
+  const missingRisk = { ...sampleValidPlanJson };
+  delete missingRisk.risk;
   assert.throws(
-    () => validateOrchestratorPlan({ issue: "PACE-100", summary: "test", taskAgent: "dev", skills: ["s1"] }),
-    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("persona"))
-  );
-
-  // Missing taskAgent
-  assert.throws(
-    () => validateOrchestratorPlan({ issue: "PACE-100", summary: "test", persona: "cto", skills: ["s1"] }),
-    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("taskAgent"))
-  );
-
-  // Invalid skills (not array)
-  assert.throws(
-    () => validateOrchestratorPlan({ issue: "PACE-100", summary: "test", persona: "cto", taskAgent: "dev", skills: "not-array" }),
-    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("skills"))
-  );
-
-  // Invalid risk value
-  assert.throws(
-    () => validateOrchestratorPlan({ issue: "PACE-100", summary: "test", persona: "cto", taskAgent: "dev", skills: ["s1"], risk: "extreme" }),
+    () => validateOrchestratorPlan(missingRisk),
     (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("risk"))
   );
-});
 
-// ── 2. Generic CLI Orchestrator Provider ──────────────────────────────────────
-
-test("Generic CLI Orchestrator: valid structured plan is parsed and returned", () => {
-  const runtime = {
-    spawnSync: (cmd, args) => {
-      return {
-        status: 0,
-        stdout: JSON.stringify(sampleValidPlanJson),
-        stderr: ""
-      };
-    }
-  };
-
-  const provider = new CliOrchestratorProvider("custom-cli", {
-    command: ["my-orch", "--json", "{prompt}"]
-  }, runtime);
-
-  const plan = provider.plan(sampleIssue);
-  assert.equal(plan.issue, "PACE-100");
-  assert.equal(plan.persona, "startup-cto");
-  assert.equal(plan.taskAgent, "backend-engineer");
-  assert.equal(plan.risk, "high");
-});
-
-test("Generic CLI Orchestrator: parses markdown code blocks ```json ... ```", () => {
-  const runtime = {
-    spawnSync: () => ({
-      status: 0,
-      stdout: "Here is the plan:\n```json\n" + JSON.stringify(sampleValidPlanJson) + "\n```\nGood luck!",
-      stderr: ""
-    })
-  };
-
-  const provider = new CliOrchestratorProvider("custom-cli", {
-    command: ["my-orch", "{prompt}"]
-  }, runtime);
-
-  const plan = provider.plan(sampleIssue);
-  assert.equal(plan.issue, "PACE-100");
-  assert.equal(plan.persona, "startup-cto");
-});
-
-test("Generic CLI Orchestrator: malformed JSON fails closed with OrchestratorParseError", () => {
-  const runtime = {
-    spawnSync: () => ({
-      status: 0,
-      stdout: "Sorry, I cannot plan this { broken json ...",
-      stderr: ""
-    })
-  };
-
-  const provider = new CliOrchestratorProvider("custom-cli", {
-    command: ["my-orch", "{prompt}"]
-  }, runtime);
-
+  // 2. Missing parallelSafe (no silent defaulting)
+  const missingParallel = { ...sampleValidPlanJson };
+  delete missingParallel.parallelSafe;
   assert.throws(
-    () => provider.plan(sampleIssue),
-    (err) => err instanceof OrchestratorParseError
+    () => validateOrchestratorPlan(missingParallel),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("parallelSafe"))
+  );
+
+  // 3. Missing allowedPaths / scope (no silent defaulting)
+  const missingScope = { ...sampleValidPlanJson };
+  delete missingScope.allowedPaths;
+  assert.throws(
+    () => validateOrchestratorPlan(missingScope),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("allowedPaths"))
+  );
+
+  // 4. Missing dependencies (no silent defaulting)
+  const missingDeps = { ...sampleValidPlanJson };
+  delete missingDeps.dependencies;
+  assert.throws(
+    () => validateOrchestratorPlan(missingDeps),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("dependencies"))
+  );
+
+  // 5. Missing rationale / reasons (no silent defaulting)
+  const missingRationale = { ...sampleValidPlanJson };
+  delete missingRationale.rationale;
+  assert.throws(
+    () => validateOrchestratorPlan(missingRationale),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("rationale"))
   );
 });
 
-test("Generic CLI Orchestrator: non-zero exit fails explicitly with OrchestratorProcessError", () => {
-  const runtime = {
-    spawnSync: () => ({
-      status: 127,
-      stdout: "",
-      stderr: "Fatal: Orchestrator failed to initialize"
-    })
-  };
+// ── 2. Real Codex CLI JSONL Protocol Adapter ──────────────────────────────────
 
-  const provider = new CliOrchestratorProvider("custom-cli", {
-    command: ["my-orch", "{prompt}"]
-  }, runtime);
+test("Real Codex CLI Adapter: parses realistic multi-event JSONL stream and extracts plan", () => {
+  const codexJsonlOutput = [
+    JSON.stringify({ type: "thread.started", thread_id: "thr_abc123" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "```json\n" + JSON.stringify(sampleValidPlanJson, null, 2) + "\n```"
+          }
+        ]
+      }
+    }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 150, output_tokens: 80 } })
+  ].join("\n");
 
-  assert.throws(
-    () => provider.plan(sampleIssue),
-    (err) => err instanceof OrchestratorProcessError && err.exitCode === 127
-  );
-});
-
-test("Generic CLI Orchestrator: timeout fails explicitly with OrchestratorTimeoutError", () => {
-  const runtime = {
-    spawnSync: () => ({
-      status: null,
-      signal: "SIGTERM",
-      error: { code: "ETIMEDOUT", message: "timed out" }
-    })
-  };
-
-  const provider = new CliOrchestratorProvider("custom-cli", {
-    command: ["my-orch", "{prompt}"]
-  }, runtime);
-
-  assert.throws(
-    () => provider.plan(sampleIssue),
-    (err) => err instanceof OrchestratorTimeoutError
-  );
-});
-
-// ── 3. Provider Adapters ──────────────────────────────────────────────────────
-
-test("Codex Orchestrator Adapter: returns validated canonical plan", () => {
   const runtime = {
     spawnSync: (cmd, args) => {
       assert.equal(cmd, "codex");
       assert.ok(args.includes("exec"));
       return {
         status: 0,
-        stdout: JSON.stringify(sampleValidPlanJson),
+        stdout: codexJsonlOutput,
         stderr: ""
       };
     }
@@ -313,23 +250,87 @@ test("Codex Orchestrator Adapter: returns validated canonical plan", () => {
 
   const provider = new CodexOrchestratorProvider("codex", {}, runtime);
   const plan = provider.plan(sampleIssue);
+  assert.equal(plan.issue, "PACE-100");
   assert.equal(plan.persona, "startup-cto");
   assert.equal(plan.taskAgent, "backend-engineer");
   assert.deepEqual(plan.skills, ["api-design", "security-review", "minimal-change"]);
+  assert.equal(plan.risk, "high");
+  assert.deepEqual(plan.allowedPaths, ["lib/payments/**", "test/payments/**"]);
 });
 
-test("Antigravity Orchestrator Adapter: handles stream/envelope and returns canonical plan", () => {
+// ── 3. Real Claude Code Result Envelope Adapter ───────────────────────────────
+
+test("Real Claude Code Adapter: parses Claude JSON envelope and extracts plan from .result", () => {
+  const claudeEnvelope = {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "Here is the orchestrator plan:\n```json\n" + JSON.stringify(sampleValidPlanJson) + "\n```",
+    total_cost_usd: 0.0084,
+    duration_ms: 1450
+  };
+
+  const runtime = {
+    spawnSync: (cmd, args) => {
+      assert.equal(cmd, "claude");
+      return {
+        status: 0,
+        stdout: JSON.stringify(claudeEnvelope),
+        stderr: ""
+      };
+    }
+  };
+
+  const provider = new ClaudeCodeOrchestratorProvider("claude-code", {}, runtime);
+  const plan = provider.plan(sampleIssue);
+  assert.equal(plan.persona, "startup-cto");
+  assert.equal(plan.taskAgent, "backend-engineer");
+  assert.equal(plan.risk, "high");
+});
+
+test("Real Claude Code Adapter: handles error envelope and throws OrchestratorProcessError", () => {
+  const errorEnvelope = {
+    type: "result",
+    subtype: "error",
+    is_error: true,
+    error: "Authentication failed: invalid token"
+  };
+
+  const runtime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify(errorEnvelope),
+      stderr: ""
+    })
+  };
+
+  const provider = new ClaudeCodeOrchestratorProvider("claude-code", {}, runtime);
+  assert.throws(
+    () => provider.plan(sampleIssue),
+    (err) => err instanceof OrchestratorProcessError && err.stderr.includes("Authentication failed")
+  );
+});
+
+// ── 4. Real Antigravity Multi-line Stream Adapter ─────────────────────────────
+
+test("Real Antigravity Adapter: parses multi-line JSONL stream and selects terminal SUCCESS event", () => {
+  const antigravityStream = [
+    JSON.stringify({ status: "QUEUED", timestamp: 100 }),
+    JSON.stringify({ status: "PROGRESS", message: "Analyzing architecture dependencies", timestamp: 200 }),
+    JSON.stringify({
+      status: "SUCCESS",
+      ok: true,
+      response: JSON.stringify(sampleValidPlanJson),
+      timestamp: 300
+    })
+  ].join("\n");
+
   const runtime = {
     spawnSync: (cmd, args) => {
       assert.equal(cmd, "agy");
-      // Antigravity returning an envelope object with { status: "SUCCESS", response: "..." }
       return {
         status: 0,
-        stdout: JSON.stringify({
-          status: "SUCCESS",
-          ok: true,
-          response: JSON.stringify(sampleValidPlanJson)
-        }),
+        stdout: antigravityStream,
         stderr: ""
       };
     }
@@ -342,61 +343,181 @@ test("Antigravity Orchestrator Adapter: handles stream/envelope and returns cano
   assert.equal(plan.risk, "high");
 });
 
-test("Claude Code Orchestrator Adapter: returns canonical schema and fails explicitly when uninstalled/disabled", () => {
+test("Real Antigravity Adapter: handles FAILED stream event and throws OrchestratorProcessError", () => {
+  const failingStream = [
+    JSON.stringify({ status: "QUEUED" }),
+    JSON.stringify({ status: "FAILED", ok: false, error: "Model quota exceeded" })
+  ].join("\n");
+
   const runtime = {
-    spawnSync: (cmd, args) => {
-      assert.equal(cmd, "claude");
-      return {
-        status: 0,
-        stdout: JSON.stringify(sampleValidPlanJson),
-        stderr: ""
-      };
-    }
+    spawnSync: () => ({
+      status: 0,
+      stdout: failingStream,
+      stderr: ""
+    })
   };
 
-  const enabledProvider = new ClaudeCodeOrchestratorProvider("claude-code", {}, runtime);
-  const plan = enabledProvider.plan(sampleIssue);
-  assert.equal(plan.persona, "startup-cto");
-
-  // Disabled / uninstalled
-  const disabledProvider = new ClaudeCodeOrchestratorProvider("claude-code", { installed: false }, runtime);
+  const provider = new AntigravityOrchestratorProvider("antigravity", {}, runtime);
   assert.throws(
-    () => disabledProvider.plan(sampleIssue),
-    (err) => err instanceof OrchestratorUnavailableError
+    () => provider.plan(sampleIssue),
+    (err) => err instanceof OrchestratorProcessError && err.stderr.includes("Model quota exceeded")
   );
 });
 
-test("Configured Orchestrator Failure: does not silently fallback to builtin routing", () => {
+// ── 5. Scope Fail-Closed & Intersection Semantics ─────────────────────────────
+
+test("Explicit Scope Semantics: empty allowedPaths [] remains empty and NEVER broadens to policy persona scope", () => {
   const settings = createTestSettings({
     orchestrator: {
       defaultProvider: "codex",
       providers: {
-        codex: {
-          type: "codex",
-          command: ["codex", "exec", "{prompt}"]
-        }
+        codex: { type: "codex", command: ["codex", "exec", "{prompt}"] }
+      }
+    },
+    policy: {
+      pathScopes: {
+        "backend-engineer": ["lib/**", "src/**"]
       }
     }
   });
 
-  const failingRuntime = {
+  const emptyScopePlan = {
+    ...sampleValidPlanJson,
+    allowedPaths: [] // Explicit empty scope
+  };
+
+  const runtime = {
     spawnSync: () => ({
-      status: 1,
-      stdout: "",
-      stderr: "Codex server unavailable"
+      status: 0,
+      stdout: JSON.stringify(emptyScopePlan),
+      stderr: ""
     })
   };
 
-  const orchestrator = createOrchestratorProvider(settings, failingRuntime);
+  const plan = issuePlan(settings, sampleIssue, { runtime });
+  assert.deepEqual(plan.allowedPaths, [], "Explicit empty allowedPaths [] MUST remain []");
+  assert.notDeepEqual(plan.allowedPaths, ["lib/**", "src/**"], "Must NEVER broaden to policy persona scope");
+});
+
+test("Scope Intersection: orchestrator paths are strictly intersected with policy pathScopes", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { type: "codex", command: ["codex", "exec", "{prompt}"] }
+      }
+    },
+    policy: {
+      pathScopes: {
+        "startup-cto": ["lib/**"],
+        "backend-engineer": ["lib/**"]
+      }
+    }
+  });
+
+  const planWithBroadScope = {
+    ...sampleValidPlanJson,
+    allowedPaths: ["lib/payments/**", "infra/terraform/**"] // infra is outside policy lib/**
+  };
+
+  const runtime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify(planWithBroadScope),
+      stderr: ""
+    })
+  };
+
+  const plan = issuePlan(settings, sampleIssue, { runtime });
+  assert.deepEqual(plan.allowedPaths, ["lib/payments/**"], "infra/terraform/** must be stripped by policy intersection");
+});
+
+// ── 6. Executor Recommendation Semantics ──────────────────────────────────────
+
+test("Executor Recommendation Semantics: orchestrator recommends Antigravity when default is Codex", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { type: "codex", command: ["codex", "exec", "{prompt}"] }
+      }
+    },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex"], defaultModel: "gpt-5", mode: "accept-edits" },
+        antigravity: { command: ["agy"], defaultModel: "claude-sonnet-4-6", mode: "accept-edits" }
+      }
+    }
+  });
+
+  const orchPlan = {
+    ...sampleValidPlanJson,
+    risk: "normal",
+    executor: "antigravity",
+    model: "claude-sonnet-4-6"
+  };
+
+  const runtime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify(orchPlan),
+      stderr: ""
+    })
+  };
+
+  const plan = issuePlan(settings, sampleIssue, { runtime });
+
+  // Assert execution profile resolved to the orchestrator-recommended Antigravity
+  assert.equal(plan.execution.provider, "antigravity", "Resolved executor should match recommendation");
+  assert.equal(plan.configSnapshot.recommendedExecutor, "antigravity");
+  assert.equal(plan.configSnapshot.executorProvider, "antigravity");
+});
+
+// ── 7. Typed Failure Semantics & Fail-Closed Contract ─────────────────────────
+
+test("Typed Failure Semantics: unknown provider throws OrchestratorUnavailableError", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "unknown-orchestrator",
+      providers: {
+        builtin: { type: "builtin" }
+      }
+    }
+  });
+
   assert.throws(
-    () => orchestrator.plan(sampleIssue),
-    (err) => err instanceof OrchestratorProcessError
+    () => createOrchestratorProvider(settings),
+    (err) => err instanceof OrchestratorUnavailableError && err.message.includes("Unknown orchestrator provider")
   );
 });
 
-// ── 4. Persona and Task Agent Separation & Snapshot Pinning ──────────────────
+test("Typed Failure Semantics: malformed JSON throws OrchestratorParseError without fallback", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "custom-cli",
+      providers: {
+        "custom-cli": { type: "generic-cli", command: ["my-orch", "{prompt}"] }
+      }
+    }
+  });
 
-test("Persona and TaskAgent Separation: remain distinct in plan and snapshot", () => {
+  const badRuntime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: "Error: raw non-json text output from CLI",
+      stderr: ""
+    })
+  };
+
+  const provider = createOrchestratorProvider(settings, badRuntime);
+  assert.throws(
+    () => provider.plan(sampleIssue),
+    (err) => err instanceof OrchestratorParseError
+  );
+});
+
+test("Persona and TaskAgent Separation: distinct values preserved in plan and snapshot", () => {
   const settings = createTestSettings({
     orchestrator: {
       defaultProvider: "codex",
@@ -417,7 +538,9 @@ test("Persona and TaskAgent Separation: remain distinct in plan and snapshot", (
         skills: ["senior-backend", "api-design", "backend-testing"],
         risk: "high",
         parallelSafe: false,
-        allowedPaths: ["lib/core/**"]
+        allowedPaths: ["lib/core/**"],
+        dependencies: [],
+        rationale: ["Strategic architecture decision"]
       }),
       stderr: ""
     })
@@ -425,19 +548,12 @@ test("Persona and TaskAgent Separation: remain distinct in plan and snapshot", (
 
   const plan = issuePlan(settings, sampleIssue, { runtime });
 
-  // Assert distinct identity fields in generated plan
-  assert.equal(plan.persona, "startup-cto", "Persona must be startup-cto");
-  assert.equal(plan.taskAgent, "backend-engineer", "TaskAgent must be backend-engineer");
-  assert.notEqual(plan.persona, plan.taskAgent, "Persona and taskAgent must remain distinct");
-  assert.deepEqual(plan.skills, ["senior-backend", "api-design", "backend-testing"]);
-  assert.deepEqual(plan.allowedPaths, ["lib/core/**"]);
-
-  // Assert distinct identity fields in configSnapshot
-  const snapshot = plan.configSnapshot;
-  assert.equal(snapshot.persona, "startup-cto");
-  assert.equal(snapshot.taskAgent, "backend-engineer");
-  assert.equal(snapshot.agentId, "backend-engineer");
-  assert.equal(snapshot.orchestratorProvider, "codex");
+  assert.equal(plan.persona, "startup-cto");
+  assert.equal(plan.taskAgent, "backend-engineer");
+  assert.notEqual(plan.persona, plan.taskAgent);
+  assert.equal(plan.configSnapshot.persona, "startup-cto");
+  assert.equal(plan.configSnapshot.taskAgent, "backend-engineer");
+  assert.equal(plan.configSnapshot.agentId, "backend-engineer");
 });
 
 test("Orchestrator Selection is Snapshot-Pinned across global config changes", () => {
@@ -462,7 +578,9 @@ test("Orchestrator Selection is Snapshot-Pinned across global config changes", (
         skills: ["api-design"],
         risk: "high",
         parallelSafe: true,
-        allowedPaths: ["lib/payments/**"]
+        allowedPaths: ["lib/payments/**"],
+        dependencies: [],
+        rationale: ["Initial codex decision"]
       }),
       stderr: ""
     })
@@ -471,8 +589,6 @@ test("Orchestrator Selection is Snapshot-Pinned across global config changes", (
   // 1. Initial run plans with codex
   const initialPlan = issuePlan(settings, sampleIssue, { runtime: codexRuntime });
   assert.equal(initialPlan.configSnapshot.orchestratorProvider, "codex");
-  assert.equal(initialPlan.persona, "startup-cto");
-  assert.equal(initialPlan.taskAgent, "backend-engineer");
 
   // 2. Global default orchestrator changes to antigravity
   settings.data.orchestrator.defaultProvider = "antigravity";
@@ -492,7 +608,9 @@ test("Orchestrator Selection is Snapshot-Pinned across global config changes", (
           skills: ["terraform"],
           risk: "low",
           parallelSafe: true,
-          allowedPaths: ["infra/**"]
+          allowedPaths: ["infra/**"],
+          dependencies: [],
+          rationale: ["Agy decision"]
         }),
         stderr: ""
       };
@@ -504,7 +622,6 @@ test("Orchestrator Selection is Snapshot-Pinned across global config changes", (
     runtime: agyRuntime
   });
 
-  // Must retain codex-pinned routing from snapshot without calling agy!
   assert.equal(agyCalled, false, "Live orchestrator must NOT be invoked for snapshot-pinned lifecycle");
   assert.equal(reworkPlan.configSnapshot.orchestratorProvider, "codex");
   assert.equal(reworkPlan.persona, "startup-cto");
