@@ -430,6 +430,8 @@ test("durable reconciliation runs before a failing Jira poll", async () => {
 test("global active-worker capacity accounting accounts for running workers (maxConcurrency=3, 2 active -> 1 scheduled)", async () => {
   const settings = makeSettings({ maxConcurrency: 3 });
   const store = makeStore();
+  const beDef = store.getAgentDefinition("backend-engineer").definition;
+  store.updateAgentDefinition("backend-engineer", { ...beDef, maxConcurrency: 3 });
 
   // Create 2 already-running active worker runs with matching project key TEST
   const activePlan1 = { ...issuePlan(settings, makeIssue("TEST-ACTIVE-1")), allowedPaths: ["active1/**"] };

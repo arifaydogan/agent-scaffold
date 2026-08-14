@@ -31,13 +31,16 @@ import {
 import { issuePlan, getStore, createConfigSnapshot, handleImplementation, handleReview } from "../lib/runtime.js";
 import { createDashboardServer } from "../lib/dashboard.js";
 import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
+import { selectDispatchBatch } from "../lib/scheduler.js";
+import { dispatchOnce } from "../lib/dispatcher.js";
 
 function makeTestStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-reg-test-"));
   return new RunStore(path.join(dir, "runs.sqlite3"));
 }
 
-function makeSettings(store, policyOverrides = {}, controlPlaneOverrides = {}) {
+function makeSettings(store, policyOverrides = {}, dataOverrides = {}) {
+  const { controlPlane: cpOverrides, ...restData } = dataOverrides;
   return {
     source: "/tmp/test.json",
     projectKey: "PACE",
@@ -78,13 +81,26 @@ function makeSettings(store, policyOverrides = {}, controlPlaneOverrides = {}) {
             defaultEffort: "medium",
             mode: "accept-edits",
             timeoutSeconds: 60
+          },
+          antigravity: {
+            command: ["agy", "exec", "{prompt}"],
+            defaultModel: "claude-3-5-sonnet",
+            modelProfiles: {
+              medium: "claude-3-5-sonnet",
+              "claude-review": "claude-3-5-sonnet"
+            },
+            defaultEffort: "medium",
+            mode: "accept-edits",
+            timeoutSeconds: 60
           }
         }
       },
+      ...restData,
       controlPlane: {
         agentRegistryMutationEnabled: true,
         configMutationEnabled: true,
-        ...controlPlaneOverrides
+        ...(dataOverrides.agentRegistryMutationEnabled !== undefined ? { agentRegistryMutationEnabled: dataOverrides.agentRegistryMutationEnabled } : {}),
+        ...cpOverrides
       }
     }
   };
@@ -881,3 +897,284 @@ test("Agent Registry Migration: malformed legacy definition JSON rolls back and 
     /Agent definitions migration failed/
   );
 });
+
+// ── 12. Authoritative Registry Reviewer Selection ────────────────────────────
+
+test("Authoritative Reviewer Selection: builder agent reviewer determines reviewTaskAgent unless explicit policy override", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {
+    review: {
+      provider: "antigravity",
+      modelProfile: "claude-review"
+      // Notice: NO taskAgent in policy
+    }
+  });
+
+  const mockRuntime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: makeCodexEvent({
+        issue: "PACE-500",
+        summary: sampleIssue.summary,
+        persona: "startup-cto",
+        taskAgent: "backend-engineer",
+        skills: ["api-design"],
+        risk: "normal",
+        parallelSafe: true,
+        allowedPaths: ["lib/**"],
+        dependencies: [],
+        rationale: ["Reviewer selection test"]
+      }),
+      stderr: ""
+    })
+  };
+
+  // Builder agent backend-engineer defines reviewer: "correctness-reviewer"
+  const plan = issuePlan(settings, sampleIssue, { store, runtime: mockRuntime });
+  assert.equal(plan.configSnapshot.reviewTaskAgent, "correctness-reviewer", "Reviewer taskAgent must be correctness-reviewer, not qa-engineer");
+  assert.equal(plan.configSnapshot.reviewProvider, "antigravity");
+
+  const runId = store.createRun(sampleIssue.key, plan);
+  store.transition(runId, "review-queued", {
+    implementationSha: "1234567890abcdef1234567890abcdef12345678"
+  });
+
+  // Disable correctness-reviewer
+  store.setAgentStatus("correctness-reviewer", "disabled");
+
+  let reviewWorkerSpawned = 0;
+  let worktreeMutated = 0;
+  const result = handleReview(settings, sampleIssue, true, {
+    spawnSync: (cmd) => {
+      if (cmd === "git") {
+        worktreeMutated++;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      reviewWorkerSpawned++;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    spawn: () => {
+      reviewWorkerSpawned++;
+      return { pid: 1234 };
+    }
+  });
+
+  assert.equal(result.exitCode, 2, "Review must be blocked");
+  assert.equal(result.output.eligible, false);
+  assert.ok(
+    result.output.eligibilityReasons.some(r => r.includes("Agent 'correctness-reviewer' is disabled")),
+    "Must state correctness-reviewer is disabled"
+  );
+  assert.equal(worktreeMutated, 0, "No git worktree mutation allowed when reviewer is disabled");
+  assert.equal(reviewWorkerSpawned, 0, "No review worker may be spawned when reviewer is disabled");
+});
+
+// ── 13. Enforce Agent Definition Executor Constraints ────────────────────────
+
+test("Agent Executor Constraints: orchestrator recommendation incompatible with registered executor fails closed", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {}, {
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o" } },
+        antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet" } }
+      }
+    }
+  });
+
+  const mockRuntime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: makeCodexEvent({
+        issue: "PACE-500",
+        summary: sampleIssue.summary,
+        persona: "startup-cto",
+        taskAgent: "backend-engineer",
+        skills: ["api-design"],
+        risk: "normal",
+        parallelSafe: true,
+        allowedPaths: ["lib/**"],
+        dependencies: [],
+        rationale: ["Executor test"]
+      }),
+      stderr: ""
+    })
+  };
+
+  // backend-engineer is explicitly configured with executor constraint: { provider: "codex", modelProfile: "medium" }
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design", "backend-testing", "minimal-change"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "codex", modelProfile: "medium", model: null },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  // Orchestrator recommends antigravity which conflicts with backend-engineer's registered executor
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      store,
+      runtime: {
+        spawnSync: () => ({
+          status: 0,
+          stdout: makeCodexEvent({
+            issue: "PACE-500",
+            summary: sampleIssue.summary,
+            persona: "startup-cto",
+            taskAgent: "backend-engineer",
+            executor: "antigravity", // incompatible recommendation!
+            skills: ["api-design"],
+            risk: "normal",
+            parallelSafe: true,
+            allowedPaths: ["lib/**"],
+            dependencies: [],
+            rationale: ["Incompatible executor test"]
+          }),
+          stderr: ""
+        })
+      }
+    }),
+    /Orchestrator recommended executor 'antigravity', but agent 'backend-engineer' is constrained to 'codex'/
+  );
+
+  // Initial valid plan with codex
+  const initialPlan = issuePlan(settings, sampleIssue, { store, runtime: mockRuntime });
+  assert.equal(initialPlan.execution.provider, "codex");
+  assert.equal(initialPlan.configSnapshot.executorProvider, "codex");
+
+  const runId = store.createRun(sampleIssue.key, initialPlan);
+  store.transition(runId, "review-queued", { implementationSha: "aaa111" });
+
+  // Update backend-engineer definition in registry from codex to antigravity
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "antigravity", modelProfile: "medium", model: null },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  // New run uses updated executor (antigravity)
+  const newIssue = { ...sampleIssue, key: "PACE-501" };
+  const newPlan = issuePlan(settings, newIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent({
+          issue: "PACE-501",
+          summary: sampleIssue.summary,
+          persona: "startup-cto",
+          taskAgent: "backend-engineer",
+          skills: ["api-design"],
+          risk: "normal",
+          parallelSafe: true,
+          allowedPaths: ["lib/**"],
+          dependencies: [],
+          rationale: ["New run"]
+        }),
+        stderr: ""
+      })
+    }
+  });
+  assert.equal(newPlan.execution.provider, "antigravity", "New plan uses updated executor antigravity");
+
+  // Historical pinned run retains pinned executor (codex)
+  const reworkPlan = issuePlan(settings, sampleIssue, {
+    store,
+    originatingRun: store.getRun(runId),
+    action: "rework",
+    attempt: 1,
+    runtime: mockRuntime
+  });
+  assert.equal(reworkPlan.execution.provider, "codex", "Historical pinned run retains codex executor");
+  assert.equal(reworkPlan.configSnapshot.executorProvider, "codex");
+});
+
+// ── 14. Scheduler Concurrency Constraints & Fallback Bypass Removal ──────────
+
+test("Scheduler Concurrency: selectDispatchBatch never returns fallback eligible[0] when concurrency is exhausted", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {
+    maxConcurrency: 5
+  }, {
+    orchestrator: {
+      defaultProvider: "builtin",
+      providers: {
+        builtin: { type: "builtin" }
+      }
+    }
+  });
+
+  // cv-engineer has maxConcurrency = 1
+  const cvIssueActive = {
+    ...sampleIssue,
+    key: "PACE-CV-1",
+    summary: "Add cv camera pipeline",
+    description: "Acceptance criteria: cv camera",
+    labels: ["agent-ready"]
+  };
+  const cvIssueNew = {
+    ...sampleIssue,
+    key: "PACE-CV-2",
+    summary: "Add cv yolo tracking",
+    description: "Acceptance criteria: cv yolo",
+    labels: ["agent-ready"]
+  };
+
+  // Create an active running worker for cv-engineer
+  const activePlan = {
+    ...issuePlan(settings, cvIssueActive, { store }),
+    taskAgent: "cv-engineer",
+    maxConcurrency: 1,
+    allowedPaths: ["cv/**"]
+  };
+  const activeRunId = store.createRun(cvIssueActive.key, activePlan);
+  store.transition(activeRunId, "executing", { provider: "codex" });
+
+  const newPlan = {
+    ...issuePlan(settings, cvIssueNew, { store }),
+    taskAgent: "cv-engineer",
+    maxConcurrency: 1,
+    allowedPaths: ["cv/**"],
+    parallelSafe: true
+  };
+
+  // selectDispatchBatch with agentConcurrency: { "cv-engineer": 0 }
+  const batch = selectDispatchBatch([newPlan], {
+    maxConcurrency: 5,
+    agentConcurrency: { "cv-engineer": 0 }
+  });
+  assert.deepEqual(batch, [], "selectDispatchBatch must return [] and NEVER fall back to eligible[0]");
+
+  // Exclusive task with agentConcurrency 0 must also return []
+  const exclusivePlan = {
+    ...newPlan,
+    parallelSafe: false
+  };
+  const exclusiveBatch = selectDispatchBatch([exclusivePlan], {
+    maxConcurrency: 5,
+    agentConcurrency: { "cv-engineer": 0 }
+  });
+  assert.deepEqual(exclusiveBatch, [], "Exclusive task must return [] when agent concurrency is 0");
+
+  // dispatchOnce must produce 0 waves when agent capacity is 0
+  const dispatchRes = await dispatchOnce(settings, {
+    execute: false,
+    jira: {
+      poll: async () => [cvIssueNew],
+      searchIssues: () => [cvIssueNew],
+      listWorkItems: async () => [cvIssueNew]
+    },
+    store
+  });
+  assert.equal(dispatchRes.waves.length, 0, "No dispatch wave should be created when agent concurrency is exhausted");
+});
+
