@@ -407,6 +407,32 @@ test("Real Antigravity Adapter: handles FAILED stream event and throws Orchestra
   );
 });
 
+test("Real Antigravity Adapter: QUEUED -> PROGRESS(response=valid plan) -> EOF fails closed and does not accept intermediate plan", () => {
+  const incompleteStream = [
+    JSON.stringify({ status: "QUEUED", timestamp: 100 }),
+    JSON.stringify({
+      status: "PROGRESS",
+      message: "Drafting plan",
+      response: JSON.stringify(sampleValidPlanJson),
+      timestamp: 200
+    })
+  ].join("\n");
+
+  const runtime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: incompleteStream,
+      stderr: ""
+    })
+  };
+
+  const provider = new AntigravityOrchestratorProvider("antigravity", {}, runtime);
+  assert.throws(
+    () => provider.plan(sampleIssue),
+    (err) => err instanceof OrchestratorParseError && err.message.includes("did not reach terminal SUCCESS event")
+  );
+});
+
 // ── 5. Hard Scope Containment & Intersection Semantics ────────────────────────
 
 test("Hard Path-Scope Containment: isSubScope respects * vs ** correctly", () => {
@@ -417,24 +443,51 @@ test("Hard Path-Scope Containment: isSubScope respects * vs ** correctly", () =>
   assert.equal(isSubScope("infra/**", "lib/**"), false, "infra/** must NOT be contained in lib/**");
 });
 
-test("Hard Path-Scope Intersection: exact glob intersection semantics", () => {
-  // 1. Hard policy: lib/* + orchestrator: lib/deep/** -> no intersection ([])
+test("Hard Path-Scope Intersection: exact glob intersection and suffix constraints", () => {
+  // 1. Hard policy: **/*.md + orchestrator: src/** -> effective: src/**/*.md (NOT src/**, src/app.js denied!)
+  const resMd = intersectPathScopes(["src/**"], ["**/*.md"]);
+  assert.deepEqual(resMd, ["src/**/*.md"], "src/** intersected with **/*.md must be ['src/**/*.md']");
+
+  // Validate that src/app.js is rejected while src/readme.md is allowed
+  const allowedMd = validateChangedFiles({
+    changedFiles: ["src/readme.md", "src/docs/guide.md"],
+    allowedPatterns: resMd,
+    maxChangedFiles: 10
+  });
+  assert.equal(allowedMd.allowed, true, "src/readme.md must be allowed");
+
+  const deniedJs = validateChangedFiles({
+    changedFiles: ["src/app.js"],
+    allowedPatterns: resMd,
+    maxChangedFiles: 10
+  });
+  assert.equal(deniedJs.allowed, false, "src/app.js must be denied");
+
+  // 2. Hard policy: src/**/test/*.js + orchestrator: src/foo/** -> effective: src/foo/**/test/*.js
+  const resTest = intersectPathScopes(["src/foo/**"], ["src/**/test/*.js"]);
+  assert.deepEqual(resTest, ["src/foo/**/test/*.js"]);
+
+  // 3. Mutually exclusive extensions: **/*.md intersect src/**/*.js -> []
+  const resDisjoint = intersectPathScopes(["src/**/*.js"], ["**/*.md"]);
+  assert.deepEqual(resDisjoint, [], "Disjoint extension patterns must fail closed to []");
+
+  // 4. Hard policy: lib/* + orchestrator: lib/deep/** -> no intersection ([])
   const res1 = intersectPathScopes(["lib/deep/**"], ["lib/*"]);
   assert.deepEqual(res1, [], "lib/deep/** intersected with lib/* must be []");
 
-  // 2. Hard policy: lib/payments/** + orchestrator: lib/** -> effective intersection is lib/payments/**
+  // 5. Hard policy: lib/payments/** + orchestrator: lib/** -> effective intersection is lib/payments/**
   const res2 = intersectPathScopes(["lib/**"], ["lib/payments/**"]);
   assert.deepEqual(res2, ["lib/payments/**"], "lib/** intersected with lib/payments/** must be ['lib/payments/**']");
 
-  // 3. Hard policy: lib/** + orchestrator: lib/payments/** -> effective intersection is lib/payments/**
+  // 6. Hard policy: lib/** + orchestrator: lib/payments/** -> effective intersection is lib/payments/**
   const res3 = intersectPathScopes(["lib/payments/**"], ["lib/**"]);
   assert.deepEqual(res3, ["lib/payments/**"], "lib/payments/** intersected with lib/** must be ['lib/payments/**']");
 
-  // 4. Hard policy: lib/* + orchestrator: lib/index.js -> effective intersection is lib/index.js
+  // 7. Hard policy: lib/* + orchestrator: lib/index.js -> effective intersection is lib/index.js
   const res4 = intersectPathScopes(["lib/index.js"], ["lib/*"]);
   assert.deepEqual(res4, ["lib/index.js"], "lib/index.js intersected with lib/* must be ['lib/index.js']");
 
-  // 5. Effective scope can never authorize a path that hard policy would reject
+  // 8. Effective scope can never authorize a path that hard policy would reject
   const effectiveScope = intersectPathScopes(["lib/payments/**", "infra/**"], ["lib/**"]);
   assert.deepEqual(effectiveScope, ["lib/payments/**"]);
 
@@ -594,6 +647,105 @@ test("Executor Recommendation Semantics: orchestrator recommends Antigravity whe
   assert.equal(plan.execution.provider, "antigravity", "Resolved executor should match recommendation");
   assert.equal(plan.configSnapshot.recommendedExecutor, "antigravity");
   assert.equal(plan.configSnapshot.executorProvider, "antigravity");
+});
+
+test("Executor Recommendation Semantics: explicit invalid executor/model/effort fails closed without fallback", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex"
+    },
+    policy: {
+      review: { provider: "codex", modelProfile: "high" }
+    },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex"], defaultModel: "gpt-5", modelProfiles: { high: "gpt-5-pro" }, mode: "accept-edits" }
+      }
+    }
+  });
+
+  // 1. Explicit unknown executor provider fails closed (no fallback to default codex)
+  const unknownExecPlan = {
+    ...sampleValidPlanJson,
+    executor: "unknown-nonexistent-provider"
+  };
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      runtime: { spawnSync: () => ({ status: 0, stdout: JSON.stringify(unknownExecPlan), stderr: "" }) }
+    }),
+    /Recommended executor provider 'unknown-nonexistent-provider' is not configured/
+  );
+
+  // 2. Explicit unsupported model fails closed
+  const unsupportedModelPlan = {
+    ...sampleValidPlanJson,
+    executor: "codex",
+    model: "claude-unsupported-model"
+  };
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      runtime: { spawnSync: () => ({ status: 0, stdout: JSON.stringify(unsupportedModelPlan), stderr: "" }) }
+    }),
+    /Recommended model 'claude-unsupported-model' is not supported/
+  );
+
+  // 3. Explicit unsupported effort fails closed
+  const unsupportedEffortPlan = {
+    ...sampleValidPlanJson,
+    executor: "codex",
+    effort: "extreme-effort"
+  };
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      runtime: { spawnSync: () => ({ status: 0, stdout: JSON.stringify(unsupportedEffortPlan), stderr: "" }) }
+    }),
+    /Unsupported effort value 'extreme-effort'/
+  );
+});
+
+test("Snapshot Metadata Persistence: initial plan metadata survives global orchestrator change and rework snapshot restoration", () => {
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { type: "codex", command: ["codex", "exec", "{prompt}"] },
+        antigravity: { type: "antigravity", command: ["agy", "exec", "{prompt}"] }
+      }
+    }
+  });
+
+  const customMetadata = {
+    architectureTier: "payment-gateway-v2",
+    complianceRegime: "PCI-DSS-Level-1",
+    stableRef: "arch-doc-ref-987"
+  };
+
+  const initialPlanOutput = {
+    ...sampleValidPlanJson,
+    metadata: customMetadata
+  };
+
+  const initialPlan = issuePlan(settings, sampleIssue, {
+    runtime: {
+      spawnSync: () => ({ status: 0, stdout: JSON.stringify(initialPlanOutput), stderr: "" })
+    }
+  });
+
+  // Verify initial snapshot persisted metadata
+  assert.deepEqual(initialPlan.configSnapshot.metadata, customMetadata);
+  assert.deepEqual(initialPlan.metadata, customMetadata);
+
+  // Global orchestrator changes to antigravity
+  settings.data.orchestrator.defaultProvider = "antigravity";
+
+  // Rework plan created from originatingRun's snapshot restores the stable metadata
+  const reworkPlan = issuePlan(settings, sampleIssue, {
+    originatingRun: { payload: { configSnapshot: initialPlan.configSnapshot } }
+  });
+
+  assert.deepEqual(reworkPlan.configSnapshot.metadata, customMetadata, "Metadata must survive in configSnapshot");
+  assert.deepEqual(reworkPlan.metadata, customMetadata, "Metadata must be restored on the rework plan");
 });
 
 // ── 8. Typed Failure Semantics & Fail-Closed Provider Contracts ────────────────
