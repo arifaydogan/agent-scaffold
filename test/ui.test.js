@@ -11,6 +11,11 @@ function setupMockDOM() {
       if (!elements[sel]) elements[sel] = createElement("div");
       return elements[sel];
     },
+    getElementById: (id) => {
+      const sel = "#" + id;
+      if (!elements[sel]) elements[sel] = createElement("div");
+      return elements[sel];
+    },
     querySelectorAll: () => [],
     createElement: createElement,
     createTextNode: (text) => ({ textNode: true, text }),

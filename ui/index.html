@@ -196,27 +196,119 @@
 
       <div id="pm-view" class="tab-content" hidden>
         <section class="panel pm-panel">
-          <div class="panel-heading">
+          <div class="panel-heading fleet-toolbar">
             <div>
-              <p class="eyebrow">Product Management</p>
-              <h2>Conversation & Journal</h2>
+              <p class="eyebrow">PaceBuild PM Operations</p>
+              <h2>PM Operational Workspace</h2>
+            </div>
+            <div class="pm-sub-nav">
+              <button class="pm-filter-btn is-active" data-pm-filter="inbox">Tüm Kuyruk (Inbox)</button>
+              <button class="pm-filter-btn" data-pm-filter="attention">İlgi Gerekenler <span id="pm-badge-attention" class="badge-count">0</span></button>
+              <button class="pm-filter-btn" data-pm-filter="approvals">Onay Bekleyenler <span id="pm-badge-approvals" class="badge-count">0</span></button>
+              <button class="pm-filter-btn" data-pm-filter="journal">Decision Journal & Chat</button>
             </div>
           </div>
-          <div class="pm-layout">
-            <div class="pm-conversation">
-              <h3>Conversation</h3>
-              <div id="pm-messages" class="pm-messages-list"></div>
-              <form id="pm-form" class="pm-form">
-                <input type="text" id="pm-input" placeholder="Enter message to PM..." required />
-                <button type="submit">Gönder</button>
-              </form>
+
+          <!-- PM Metrics Summary Bar -->
+          <div class="pm-summary-bar">
+            <div class="pm-stat" data-group="awaitingApproval">
+              <span class="pm-stat-label">Onay Bekleyen</span>
+              <strong id="pm-stat-approvals">0</strong>
             </div>
-            <div class="pm-journal">
-              <h3>Decision Journal</h3>
-              <div id="pm-decisions" class="pm-decisions-list"></div>
+            <div class="pm-stat" data-group="blocked">
+              <span class="pm-stat-label">Bloke / İlgi</span>
+              <strong id="pm-stat-blocked">0</strong>
+            </div>
+            <div class="pm-stat" data-group="executing">
+              <span class="pm-stat-label">Yürütülüyor</span>
+              <strong id="pm-stat-executing">0</strong>
+            </div>
+            <div class="pm-stat" data-group="inReview">
+              <span class="pm-stat-label">Review Aşamasında</span>
+              <strong id="pm-stat-review">0</strong>
+            </div>
+            <div class="pm-stat" data-group="needsRework">
+              <span class="pm-stat-label">Rework Gerekli</span>
+              <strong id="pm-stat-rework">0</strong>
+            </div>
+            <div class="pm-stat" data-group="ready">
+              <span class="pm-stat-label">Agent Ready</span>
+              <strong id="pm-stat-ready">0</strong>
+            </div>
+            <div class="pm-stat" data-group="humanApproval">
+              <span class="pm-stat-label">İnsan Onayı (Done)</span>
+              <strong id="pm-stat-human-approval">0</strong>
+            </div>
+          </div>
+
+          <!-- Section 1: PM Work Queue / Inbox -->
+          <div id="pm-inbox-section" class="pm-section">
+            <div class="pm-section-header">
+              <h3>Operasyonel İş Kuyruğu</h3>
+              <p class="section-desc">Kanonik çalışma durumuna ve yerel çalışma geçmişine göre gruplandırılmış iş paketleri.</p>
+            </div>
+            <div id="pm-queue-container" class="pm-queue-container">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Section 2: Dedicated Approvals View -->
+          <div id="pm-approvals-section" class="pm-section" hidden>
+            <div class="pm-section-header">
+              <h3>Bekleyen Onay Talepleri</h3>
+              <p class="section-desc">Plan parmak izi korumalı, denetlenebilir ve aksiyon kapsamlı insan onayları.</p>
+            </div>
+            <div id="pm-approvals-list" class="pm-approvals-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Section 3: Needs Attention View -->
+          <div id="pm-attention-section" class="pm-section" hidden>
+            <div class="pm-section-header">
+              <h3>Müdahale Gerektiren Durumlar</h3>
+              <p class="section-desc">Blokeler, scope ihlalleri, tükenen rework denemeleri ve yetki kısıtları.</p>
+            </div>
+            <div id="pm-attention-list" class="pm-attention-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Section 4: Decision Journal & Chat -->
+          <div id="pm-journal-section" class="pm-section" hidden>
+            <div class="pm-layout">
+              <div class="pm-conversation">
+                <h3>Conversation</h3>
+                <div id="pm-messages" class="pm-messages-list"></div>
+                <form id="pm-form" class="pm-form">
+                  <input type="text" id="pm-input" placeholder="Enter message to PM..." required />
+                  <button type="submit">Gönder</button>
+                </form>
+              </div>
+              <div class="pm-journal">
+                <h3>Decision Journal</h3>
+                <div id="pm-decisions" class="pm-decisions-list"></div>
+              </div>
             </div>
           </div>
         </section>
+
+        <!-- Work Item Decision Trace Drawer / Modal -->
+        <div id="decision-trace-modal" class="trace-modal-backdrop" hidden>
+          <div class="trace-drawer" role="dialog" aria-modal="true" aria-labelledby="trace-drawer-title">
+            <div class="trace-header">
+              <div>
+                <span id="trace-issue-pill" class="badge badge-key">—</span>
+                <h2 id="trace-drawer-title">Work Item Decision Trace</h2>
+                <p id="trace-issue-summary" class="trace-summary-text">—</p>
+              </div>
+              <button id="trace-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
+            </div>
+            <div id="trace-drawer-body" class="trace-body">
+              <!-- Populated dynamically via GET /api/pm/work-items/:key -->
+            </div>
+          </div>
+        </div>
       </div>
 
       <div id="agents-view" class="tab-content" hidden>

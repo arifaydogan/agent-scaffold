@@ -927,12 +927,508 @@ function renderUsageEvents() {
   });
 }
 
+function getElem(id) {
+  if (typeof document === "undefined") return null;
+  if (typeof document.getElementById === "function") return document.getElementById(id);
+  if (typeof document.querySelector === "function") return document.querySelector("#" + id);
+  return null;
+}
+
+// ── PM Workspace Rendering ──────────────────────────────────────────────────
+
+let currentPmFilter = "inbox";
+
+function setupPmSubNav() {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+  const filterButtons = document.querySelectorAll(".pm-filter-btn");
+  if (Array.isArray(filterButtons) || (filterButtons && typeof filterButtons.forEach === "function")) {
+    filterButtons.forEach(btn => {
+      btn.onclick = () => {
+        filterButtons.forEach(b => b.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        currentPmFilter = btn.dataset.pmFilter;
+
+        const inbox = getElem("pm-inbox-section");
+        const attention = getElem("pm-attention-section");
+        const approvals = getElem("pm-approvals-section");
+        const journal = getElem("pm-journal-section");
+
+        if (inbox) inbox.hidden = currentPmFilter !== "inbox";
+        if (attention) attention.hidden = currentPmFilter !== "attention";
+        if (approvals) approvals.hidden = currentPmFilter !== "approvals";
+        if (journal) journal.hidden = currentPmFilter !== "journal";
+      };
+    });
+  }
+
+  const closeBtn = getElem("trace-close-btn");
+  const modal = getElem("decision-trace-modal");
+  if (closeBtn && modal) {
+    closeBtn.onclick = () => { modal.hidden = true; };
+    modal.onclick = (e) => {
+      if (e.target === modal) modal.hidden = true;
+    };
+  }
+}
+
+function renderPmWorkspace() {
+  const ws = state.snapshot.pmWorkspace;
+  if (!ws) return;
+
+  const counts = ws.counts || {};
+  const groups = ws.groups || {};
+
+  // Summary counts
+  const elApprovals = getElem("pm-stat-approvals");
+  const elBlocked = getElem("pm-stat-blocked");
+  const elExecuting = getElem("pm-stat-executing");
+  const elReview = getElem("pm-stat-review");
+  const elRework = getElem("pm-stat-rework");
+  const elReady = getElem("pm-stat-ready");
+  const elHumanApproval = getElem("pm-stat-human-approval");
+  const badgeAttention = getElem("pm-badge-attention");
+  const badgeApprovals = getElem("pm-badge-approvals");
+
+  if (elApprovals) elApprovals.textContent = counts.awaitingApproval || 0;
+  if (elBlocked) elBlocked.textContent = counts.blocked || 0;
+  if (elExecuting) elExecuting.textContent = counts.executing || 0;
+  if (elReview) elReview.textContent = counts.inReview || 0;
+  if (elRework) elRework.textContent = counts.needsRework || 0;
+  if (elReady) elReady.textContent = counts.ready || 0;
+  if (elHumanApproval) elHumanApproval.textContent = counts.humanApproval || 0;
+  if (badgeAttention) badgeAttention.textContent = counts.needsAttention || 0;
+  if (badgeApprovals) badgeApprovals.textContent = counts.awaitingApproval || 0;
+
+  renderPmInbox(groups);
+  renderPmApprovals(groups.awaitingApproval || []);
+  renderPmAttention([...(groups.blocked || []), ...(groups.needsRework || []), ...(groups.awaitingApproval || [])]);
+}
+
+function renderPmCard(item) {
+  const card = element("div", "pm-card");
+
+  const top = element("div", "pm-card-top");
+  const keySpan = element("span", "pm-card-key", item.issueKey);
+  const statePillNode = element("span", `state-pill ${item.currentRunState ? (item.currentRunState.includes("review") ? "review" : (item.currentRunState.includes("failed") || item.currentRunState.includes("blocked") ? "blocked" : "active")) : "idle"}`, item.currentRunState || "ready");
+  top.append(keySpan, statePillNode);
+
+  const title = element("h4", "pm-card-summary", item.summary);
+
+  const metaTags = element("div", "pm-meta-tags");
+  metaTags.append(
+    element("span", "meta-tag persona-tag", `🎭 ${item.persona}`),
+    element("span", "meta-tag", `🤖 ${item.taskAgent} v${item.agentVersion || 1}`),
+    element("span", "meta-tag", `⚡ ${item.executorProvider}${item.executorModel ? ` (${item.executorModel})` : ''}`),
+    element("span", `meta-tag ${item.risk === 'high' ? 'risk-tag-high' : ''}`, `Risk: ${item.risk}`)
+  );
+
+  if (!item.agentUpToDate && item.agentLiveVersion) {
+    metaTags.append(element("span", "meta-tag version-diff-tag", `⚠️ Live: v${item.agentLiveVersion} (${item.agentLiveStatus})`));
+  }
+
+  card.append(top, title, metaTags);
+
+  if (item.operationalGroup === "awaitingApproval" || item.approvalReason) {
+    const notice = element("div", "pm-card-notice notice-approval");
+    notice.innerHTML = `<span>⏳ <strong>Onay Gerekli:</strong> ${item.approvalReason || 'İşlem PM onayı bekliyor.'}</span>`;
+    card.append(notice);
+  } else if (item.operationalGroup === "blocked" || item.blockedReason) {
+    const notice = element("div", "pm-card-notice notice-blocked");
+    notice.innerHTML = `<span>🛑 <strong>Bloke:</strong> ${item.blockedReason || item.currentRunState}</span>`;
+    card.append(notice);
+  } else if (item.operationalGroup === "humanApproval") {
+    const notice = element("div", "pm-card-notice notice-human-approval");
+    notice.innerHTML = `<span>✅ <strong>İnsan Onayı:</strong> Review tamamlandı. Final merge / Done bekleniyor.</span>`;
+    card.append(notice);
+  }
+
+  const actions = element("div", "pm-card-actions");
+  const traceBtn = element("button", "btn-trace", "🔍 Decision Trace / Detay");
+  traceBtn.onclick = () => openDecisionTrace(item.issueKey);
+  actions.append(traceBtn);
+
+  card.append(actions);
+  return card;
+}
+
+function renderPmInbox(groups) {
+  const container = getElem("pm-queue-container");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const sectionDefs = [
+    { key: "awaitingApproval", title: "⏳ Onay Bekleyenler (Awaiting Approval)", color: "#fbbf24" },
+    { key: "blocked", title: "🛑 Bloke & İlgi Gerekenler (Blocked / Attention)", color: "#f87171" },
+    { key: "executing", title: "⚡ Yürütülen İşler (Executing)", color: "#38bdf8" },
+    { key: "inReview", title: "👁 Review Aşamasındakiler (In Review)", color: "#a78bfa" },
+    { key: "needsRework", title: "🔄 Rework Bekleyenler (Needs Rework)", color: "#fb923c" },
+    { key: "ready", title: "🚀 Başlamaya Hazır (Agent Ready)", color: "#4ade80" },
+    { key: "humanApproval", title: "🏁 İnsan Onay Kapısı (Human Approval / Done)", color: "#22c55e" },
+    { key: "needsPlanning", title: "📋 Planlama Bekleyenler (Needs Planning)", color: "#94a3b8" }
+  ];
+
+  let totalRendered = 0;
+  sectionDefs.forEach(def => {
+    const items = groups[def.key] || [];
+    if (items.length === 0 && def.key !== "executing" && def.key !== "awaitingApproval" && def.key !== "blocked") return;
+
+    const groupDiv = element("div", "pm-group-section");
+    const groupHeader = element("div", "pm-group-header");
+    const titleNode = element("div", "pm-group-title");
+    titleNode.innerHTML = `<span style="color: ${def.color}">●</span> <strong>${def.title}</strong> <span class="badge-count" style="background: rgba(255,255,255,0.1); color:#fff;">${items.length}</span>`;
+    groupHeader.append(titleNode);
+    groupDiv.append(groupHeader);
+
+    if (items.length === 0) {
+      groupDiv.append(element("div", "empty-state", "Bu grupta bekleyen iş paketi yok"));
+    } else {
+      const grid = element("div", "pm-cards-grid");
+      items.forEach(item => grid.append(renderPmCard(item)));
+      groupDiv.append(grid);
+    }
+
+    container.append(groupDiv);
+    totalRendered += items.length;
+  });
+
+  if (totalRendered === 0) {
+    container.innerHTML = '<div class="empty-state"><h3>Kuyrukta iş paketi bulunmuyor</h3><p>Yeni bir issue planlayın veya dispatch edin.</p></div>';
+  }
+}
+
+function renderPmApprovals(items) {
+  const container = getElem("pm-approvals-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (items.length === 0) {
+    container.innerHTML = '<div class="empty-state"><h3>Bekleyen onay talebi bulunmuyor</h3><p>Tüm otonom veya onaylı süreçler yürütülüyor.</p></div>';
+    return;
+  }
+
+  items.forEach(item => {
+    const card = element("div", "approval-card");
+
+    const header = element("div", "approval-header");
+    const title = element("h4", "approval-title", `[${item.issueKey}] ${item.summary}`);
+    const badge = element("span", "state-pill blocked", `Aksiyon: ${item.action || 'implementation'}`);
+    header.append(title, badge);
+
+    const details = element("div", "approval-details-grid");
+    details.innerHTML = `
+      <div><strong>Task Agent:</strong> ${item.taskAgent} (v${item.agentVersion || 1})</div>
+      <div><strong>Orkestratör Persona:</strong> ${item.persona}</div>
+      <div><strong>Executor:</strong> ${item.executorProvider} (${item.executorModel || 'default'})</div>
+      <div><strong>Risk Seviyesi:</strong> ${item.risk}</div>
+      <div><strong>İzinli Yollar:</strong> ${(item.allowedPaths || []).join(", ") || "[]"}</div>
+      <div><strong>Deneme:</strong> ${item.reworkAttempt + 1}</div>
+    `;
+
+    const fpBox = element("div", "approval-fingerprint-box");
+    fpBox.innerHTML = `<span><strong>Plan Parmak İzi:</strong> ${item.planFingerprint || '—'}</span>`;
+
+    const actionBar = element("div", "approval-action-bar");
+    const approveBtn = element("button", "btn-approve", "✓ Onayla (Approve)");
+    approveBtn.onclick = async () => {
+      try {
+        const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: item.action || "implementation",
+            planFingerprint: item.planFingerprint,
+            attempt: item.reworkAttempt || 0,
+            approver: "PM Operator",
+            reason: "Approved from PM Approvals workspace"
+          })
+        });
+        if (res.status === 409) {
+          const data = await res.json();
+          alert(`⚠️ Plan Parmak İzi Uyuşmazlığı (409 Conflict):\nPlan güncellendiği için eski durum onaylanamaz. Sayfa yenileniyor.\nBeklenen: ${data.expected}`);
+          refresh();
+          return;
+        }
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Onay başarısız");
+        }
+        refresh();
+      } catch (err) {
+        alert("Hata: " + err.message);
+      }
+    };
+
+    const rejectBtn = element("button", "btn-reject", "✕ Reddet (Reject)");
+    rejectBtn.onclick = async () => {
+      const reason = prompt("Reddetme gerekçesi girin (opsiyonel):", "Scope/Risk uygun görülmedi");
+      if (reason === null) return;
+      try {
+        const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/reject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: item.action || "implementation",
+            planFingerprint: item.planFingerprint,
+            attempt: item.reworkAttempt || 0,
+            approver: "PM Operator",
+            reason: reason || "Rejected from PM Approvals workspace"
+          })
+        });
+        if (res.status === 409) {
+          alert("⚠️ Plan Parmak İzi Uyuşmazlığı (409 Conflict): Plan değişti; lütfen sayfayı yenileyin.");
+          refresh();
+          return;
+        }
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Reddetme başarısız");
+        }
+        refresh();
+      } catch (err) {
+        alert("Hata: " + err.message);
+      }
+    };
+
+    const traceBtn = element("button", "btn-trace", "Detay / Trace");
+    traceBtn.onclick = () => openDecisionTrace(item.issueKey);
+
+    actionBar.append(traceBtn, rejectBtn, approveBtn);
+    card.append(header, details, fpBox, actionBar);
+    container.append(card);
+  });
+}
+
+function renderPmAttention(items) {
+  const container = getElem("pm-attention-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (items.length === 0) {
+    container.innerHTML = '<div class="empty-state"><h3>Müdahale gereken durum bulunmuyor</h3><p>Tüm akışlar normal parametrelerde çalışıyor.</p></div>';
+    return;
+  }
+
+  const grid = element("div", "pm-cards-grid");
+  items.forEach(item => grid.append(renderPmCard(item)));
+  container.append(grid);
+}
+
+async function openDecisionTrace(issueKey) {
+  const modal = getElem("decision-trace-modal");
+  const body = getElem("trace-drawer-body");
+  const titlePill = getElem("trace-issue-pill");
+  const summaryText = getElem("trace-issue-summary");
+
+  if (!modal || !body) return;
+  modal.hidden = false;
+  body.innerHTML = '<div class="skeleton-card"></div><div class="skeleton-card"></div>';
+
+  try {
+    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(issueKey)}`);
+    if (!res.ok) throw new Error(`Work item '${issueKey}' yüklenemedi`);
+    const detail = await res.json();
+
+    const wi = detail.workItem || {};
+    const orch = detail.orchestratorDecision || {};
+    const ag = detail.agentIdentity || {};
+    const exec = detail.execution || {};
+    const rev = detail.review || {};
+    const human = detail.humanControl || {};
+    const blocked = detail.blockedInfo || {};
+    const history = detail.history || [];
+
+    if (titlePill) titlePill.textContent = wi.key;
+    if (summaryText) summaryText.textContent = wi.summary;
+
+    body.innerHTML = "";
+
+    // 1. Orchestrator Decision Section
+    const orchSection = element("div", "trace-section");
+    orchSection.innerHTML = `
+      <h4>🎯 Orkestratör Karar İzi (Decision Trace)</h4>
+      <div class="trace-grid-two">
+        <div class="trace-info-cell"><span>Orkestratör Provider</span><strong>${orch.orchestratorProvider || 'builtin'}</strong></div>
+        <div class="trace-info-cell"><span>Atanan Persona</span><strong>${orch.persona}</strong></div>
+        <div class="trace-info-cell"><span>Atanan Task Agent</span><strong>${orch.taskAgent}</strong></div>
+        <div class="trace-info-cell"><span>Risk Seviyesi & Paralel</span><strong>Risk: ${orch.risk} | Paralel: ${orch.parallelSafe ? 'Evet' : 'Hayır'}</strong></div>
+      </div>
+      <div class="trace-info-cell" style="margin-top: 8px;">
+        <span>İzinli Dosya Yolları (Allowed Paths)</span>
+        <strong>${(orch.allowedPaths || []).join(", ") || "[]"}</strong>
+      </div>
+      <div class="trace-info-cell" style="margin-top: 8px;">
+        <span>Seçim Gerekçesi (Rationale)</span>
+        <p style="margin: 4px 0 0; color: #cbd5e1; font-size: 0.78rem;">${(orch.rationale || []).join(" ; ") || "Kanonik orkestrasyon kuralları uygulandı."}</p>
+      </div>
+      <div class="trace-info-cell" style="margin-top: 8px; font-family: var(--font-code); font-size: 0.72rem; word-break: break-all;">
+        <span>Plan Parmak İzi (Fingerprint)</span>
+        <strong style="color: #94a3b8;">${orch.planFingerprint || '—'}</strong>
+      </div>
+    `;
+    body.append(orchSection);
+
+    // 2. Agent Identity Context Section (Pinned vs Live Registry)
+    const agentSection = element("div", "trace-section");
+    const isVersionDiff = ag.liveRegistryVersion && ag.agentVersion !== ag.liveRegistryVersion;
+    agentSection.innerHTML = `
+      <h4>🤖 Agent Registry Kimliği</h4>
+      <div class="trace-grid-two">
+        <div class="trace-info-cell"><span>Tarihsel Run Snaphot</span><strong>${ag.agentId} v${ag.agentVersion || 1}</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.agentHash || '—').substring(0, 16)}...</small></div>
+        <div class="trace-info-cell"><span>Canlı Registry Durumu</span><strong style="color: ${ag.liveRegistryStatus === 'enabled' ? '#4ade80' : '#f87171'};">${ag.liveRegistryStatus?.toUpperCase()} (v${ag.liveRegistryVersion || 1})</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.liveRegistryHash || '—').substring(0, 16)}...</small></div>
+      </div>
+      ${isVersionDiff ? `<div class="pm-card-notice notice-approval" style="margin-top: 8px;"><span>⚠️ Bu run <strong>v${ag.agentVersion}</strong> tanımıyla kilitlenmiştir. Canlı registry'deki <strong>v${ag.liveRegistryVersion}</strong> güncellemesi tarihsel snapshot'ı değiştirmez.</span></div>` : ''}
+    `;
+    body.append(agentSection);
+
+    // 3. Execution & Runtime Section
+    const execSection = element("div", "trace-section");
+    execSection.innerHTML = `
+      <h4>⚡ Yürütme & Model Bilgisi</h4>
+      <div class="trace-grid-two">
+        <div class="trace-info-cell"><span>Executor / Model</span><strong>${exec.provider} · ${exec.model || 'default'} (${exec.modelProfile || 'normal'})</strong></div>
+        <div class="trace-info-cell"><span>Mevcut Durum</span><strong>${exec.currentRunState} (Deneme ${exec.attempt}/${exec.maxAttempts})</strong></div>
+        <div class="trace-info-cell"><span>Kullanılan Token / Süre</span><strong>${exec.tokens} token | ${exec.durationSeconds} sn</strong></div>
+        <div class="trace-info-cell"><span>Git Branch & Commit</span><strong>${exec.branch || 'main'} ${exec.commit ? `(${exec.commit.substring(0, 7)})` : ''}</strong></div>
+      </div>
+    `;
+    body.append(execSection);
+
+    // 4. Structured Review Findings Section (Lossless display per attempt)
+    const reviewSection = element("div", "trace-section");
+    const cycles = rev.reviewCycles || [];
+    let findingsHtml = "";
+
+    if (cycles.length === 0) {
+      findingsHtml = `<p style="color: var(--muted); font-size: 0.8rem; margin: 4px 0;">Henüz review aşamasına geçilmedi veya kayıtlı bulgu yok.</p>`;
+    } else {
+      cycles.forEach((c) => {
+        const verdictBadge = c.verdict === "clean"
+          ? `<span class="sev-badge" style="background: rgba(34,197,94,0.2); color:#4ade80; border:1px solid rgba(34,197,94,0.4);">✓ CLEAN</span>`
+          : `<span class="sev-badge" style="background: rgba(239,68,68,0.2); color:#f87171; border:1px solid rgba(239,68,68,0.4);">✕ CHANGES REQUESTED</span>`;
+
+        let tableRows = "";
+        if (c.findings.length === 0) {
+          tableRows = `<tr><td colspan="5" style="color: var(--muted); text-align: center;">Bulgu tespit edilmedi (Temiz review)</td></tr>`;
+        } else {
+          c.findings.forEach(f => {
+            tableRows += `
+              <tr>
+                <td><span class="sev-badge sev-${f.severity}">${f.severity}</span></td>
+                <td><code style="font-size:0.72rem; color:#a5f3fc;">${f.category}</code></td>
+                <td><code style="font-size:0.72rem;">${f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '—'}</code></td>
+                <td><strong style="color:#f1f5f9;">${f.problem}</strong>${f.expected ? `<br><small style="color:var(--muted);">Beklenen: ${f.expected}</small>` : ''}</td>
+                <td><small style="color:#94a3b8;">${f.verification || '—'}</small></td>
+              </tr>
+            `;
+          });
+        }
+
+        findingsHtml += `
+          <div style="background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px; margin-top:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <div><strong>Review Döngüsü #${c.attempt}</strong> · <small style="color:var(--muted);">${formatTime(c.reviewedAt, true)}</small> · <small style="color:#38bdf8;">Reviewer: ${c.reviewerId}</small></div>
+              ${verdictBadge}
+            </div>
+            <table class="findings-table">
+              <thead>
+                <tr><th>Önem</th><th>Kategori</th><th>Dosya / Satır</th><th>Problem & Beklenti</th><th>Doğrulama</th></tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </div>
+        `;
+      });
+    }
+
+    reviewSection.innerHTML = `
+      <h4>🔍 Review Bulguları & Yaşam Döngüsü (Lossless Trace)</h4>
+      ${findingsHtml}
+    `;
+    body.append(reviewSection);
+
+    // 5. Human Control & Approvals Section
+    const humanSection = element("div", "trace-section");
+    const approvalState = human.approvalState;
+    humanSection.innerHTML = `
+      <h4>🛡 İnsan Kontrolü & Onay Durumu</h4>
+      <div class="trace-grid-two">
+        <div class="trace-info-cell"><span>İşletim Modu</span><strong>${human.operatingMode?.toUpperCase()}</strong></div>
+        <div class="trace-info-cell"><span>Onay Durumu</span><strong>${approvalState?.toUpperCase()}</strong></div>
+      </div>
+      ${human.humanActionRequired ? `
+        <div class="pm-card-notice notice-approval" style="margin-top: 8px;">
+          <span>⏳ <strong>Aksiyon Bekleniyor:</strong> ${human.currentRequiredHumanAction || 'PM onayı veya insan incelemesi gerekiyor.'}</span>
+        </div>
+      ` : ''}
+    `;
+    body.append(humanSection);
+
+    // 6. Chronological Audit Timeline Section
+    const timelineSection = element("div", "trace-section");
+    let timelineHtml = "";
+    if (history.length === 0) {
+      timelineHtml = '<p style="color: var(--muted); font-size: 0.8rem;">Henüz olay kaydı bulunmuyor.</p>';
+    } else {
+      history.forEach(item => {
+        const actor = item.actor || { type: "runtime", id: "system" };
+        timelineHtml += `
+          <div class="timeline-item">
+            <div class="timeline-top">
+              <span class="actor-badge actor-${actor.type}">${actor.type}: ${actor.id}</span>
+              <span class="timeline-time">${formatTime(item.timestamp, true)}</span>
+            </div>
+            <div style="color: #f1f5f9; font-weight: 500;">${item.label}</div>
+          </div>
+        `;
+      });
+    }
+
+    timelineSection.innerHTML = `
+      <h4>📜 Denetim & Karar Zaman Çizelgesi (Audit Timeline)</h4>
+      <div class="timeline-list">${timelineHtml}</div>
+    `;
+    body.append(timelineSection);
+
+  } catch (err) {
+    body.innerHTML = `<div class="error-banner">Hata: ${err.message}</div>`;
+  }
+}
+
 function renderTabs() {
   renderPmMessages();
   renderPmDecisions();
+  renderPmWorkspace();
   renderAgentDefinitions();
   renderUsageEvents();
 }
+
+setupPmSubNav();
+
+if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+  const tabButtons = document.querySelectorAll('.tab-button');
+  if (Array.isArray(tabButtons) || (tabButtons && typeof tabButtons.forEach === "function")) {
+    tabButtons.forEach(button => {
+      button.addEventListener('click', () => {
+        tabButtons.forEach(b => b.classList.remove('is-active'));
+        const contents = document.querySelectorAll('.tab-content');
+        if (contents && typeof contents.forEach === "function") {
+          contents.forEach(c => {
+            c.classList.remove('is-active');
+            c.hidden = true;
+          });
+        }
+        button.classList.add('is-active');
+        const target = getElem(button.dataset.target);
+        if (target) {
+          target.classList.add('is-active');
+          target.hidden = false;
+        }
+      });
+    });
+  }
+}
+
+setupPmSubNav();
 
 document.querySelectorAll('.tab-button').forEach(button => {
   button.addEventListener('click', () => {
