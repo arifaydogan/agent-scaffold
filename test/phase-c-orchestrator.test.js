@@ -541,6 +541,78 @@ test("Explicit Scope Semantics: empty allowedPaths [] remains empty and NEVER br
   assert.notDeepEqual(plan.allowedPaths, ["lib/**", "src/**"], "Must NEVER broaden to policy persona scope");
 });
 
+test("TaskAgent-Based Path Scope Resolution: hard scope resolved from taskAgent with fail-closed semantics", () => {
+  // 1. persona=startup-cto (pathScopes="**"), taskAgent=backend-engineer (pathScopes="backend/**")
+  // Orchestrator scope ["backend/**", "infra/**"] -> effective ["backend/**"]
+  const settings = createTestSettings({
+    orchestrator: {
+      defaultProvider: "codex"
+    },
+    policy: {
+      pathScopes: {
+        "backend-engineer": ["backend/**"],
+        "startup-cto": ["**"],
+        "security-engineer": []
+      }
+    }
+  });
+
+  const planStartupCto = {
+    ...sampleValidPlanJson,
+    persona: "startup-cto",
+    taskAgent: "backend-engineer",
+    allowedPaths: ["backend/**", "infra/**"]
+  };
+
+  const plan1 = issuePlan(settings, sampleIssue, {
+    runtime: {
+      spawnSync: () => ({ status: 0, stdout: JSON.stringify(planStartupCto), stderr: "" })
+    }
+  });
+
+  assert.deepEqual(plan1.allowedPaths, ["backend/**"], "Scope must resolve from taskAgent 'backend-engineer' ['backend/**'], not persona 'startup-cto' ['**']");
+
+  // Assert actual changed file under infra/** is rejected
+  const changeValidation = validateChangedFiles({
+    changedFiles: ["infra/terraform/main.tf"],
+    allowedPatterns: plan1.allowedPaths,
+    maxChangedFiles: 10
+  });
+  assert.equal(changeValidation.allowed, false, "infra/** change must be rejected under effective backend/** scope");
+
+  // 2. Configured pathScopes, but unknown taskAgent -> effective []
+  const planUnknownAgent = {
+    ...sampleValidPlanJson,
+    persona: "startup-cto",
+    taskAgent: "unknown-role",
+    allowedPaths: ["backend/**"]
+  };
+
+  const plan2 = issuePlan(settings, sampleIssue, {
+    runtime: {
+      spawnSync: () => ({ status: 0, stdout: JSON.stringify(planUnknownAgent), stderr: "" })
+    }
+  });
+
+  assert.deepEqual(plan2.allowedPaths, [], "Unknown taskAgent must fail closed to []");
+
+  // 3. security-engineer explicitly mapped to [] -> effective []
+  const planSecurityAgent = {
+    ...sampleValidPlanJson,
+    persona: "startup-cto",
+    taskAgent: "security-engineer",
+    allowedPaths: ["backend/**"]
+  };
+
+  const plan3 = issuePlan(settings, sampleIssue, {
+    runtime: {
+      spawnSync: () => ({ status: 0, stdout: JSON.stringify(planSecurityAgent), stderr: "" })
+    }
+  });
+
+  assert.deepEqual(plan3.allowedPaths, [], "taskAgent explicitly mapped to [] must have effective allowedPaths = []");
+});
+
 // ── 6. Full Stable Orchestrator Decision in Fingerprint ────────────────────────
 
 test("Plan Fingerprint: changing dependencies, parallelSafe, or executor recommendations changes fingerprint", () => {
