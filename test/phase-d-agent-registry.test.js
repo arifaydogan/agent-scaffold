@@ -5,11 +5,14 @@
  * - Dual-table immutable versioning (agent_definitions + agent_versions)
  * - Automatic, idempotent, and non-destructive builtin agent seeding
  * - Deterministic lifecycle (enabled, disabled, archived) vs immutable definition versions
- * - Fail-closed deletion safety (hard delete prevented if referenced by runs)
+ * - Fail-closed deletion safety (hard delete prevented if referenced anywhere by runs or reviewers)
  * - Strict schema validation & SHA-256 definition hash computation
  * - Runtime authoritative check: unknown, disabled, or archived agents fail closed
- * - Plan approval identity: plan fingerprint binds agentId, agentVersion, and agentHash
+ * - Authoritative agent definition constraints: 3-way path intersection, skills containment, risk floor, concurrency
+ * - Reviewer registry lifecycle & snapshot pinning
+ * - Plan approval identity: plan fingerprint binds agentId, agentVersion, agentHash, reviewAgentId, reviewAgentVersion, reviewAgentHash
  * - HTTP Management API endpoints with mutation gating (controlPlane flag), loopback enforcement, and audit journal
+ * - Legacy migration safety on malformed JSON
  */
 
 import fs from "node:fs";
@@ -25,7 +28,7 @@ import {
   AgentValidationError,
   BUILTIN_AGENT_SEEDS
 } from "../lib/agent-registry.js";
-import { issuePlan, getStore, createConfigSnapshot, handleImplementation } from "../lib/runtime.js";
+import { issuePlan, getStore, createConfigSnapshot, handleImplementation, handleReview } from "../lib/runtime.js";
 import { createDashboardServer } from "../lib/dashboard.js";
 import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
 
@@ -115,38 +118,22 @@ function makeCodexEvent(plan) {
 // ── 1. Schema Validation & Hash Computation ────────────────────────────────────
 
 test("Agent Model: strict schema validation rejects malformed definitions, invalid roles, and empty strings", () => {
-  // Missing or invalid ID
   assert.throws(() => validateAgentDefinition({}), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "invalid space", displayName: "Test" }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "invalid@char", displayName: "Test" }), AgentValidationError);
-
-  // Missing displayName
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "" }), AgentValidationError);
-
-  // Invalid role (must be one of AGENT_ROLES)
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", role: "wizard" }), /Invalid agent role/);
-
-  // Invalid status
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", status: "destroyed" }), AgentValidationError);
-
-  // Invalid defaultPersona
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", defaultPersona: "invalid persona spaces" }), AgentValidationError);
-
-  // Invalid maxConcurrency
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", maxConcurrency: 0 }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", maxConcurrency: -2 }), AgentValidationError);
-
-  // Invalid skills / capabilities / allowedPaths containing empty strings or non-arrays
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", skills: "not-array" }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", skills: ["valid", "  "] }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", capabilities: [""] }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", allowedPaths: ["   "] }), AgentValidationError);
-
-  // Malformed executor
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", executor: "not-object" }), AgentValidationError);
   assert.throws(() => validateAgentDefinition({ id: "valid-id", displayName: "Test", executor: { provider: "" } }), AgentValidationError);
 
-  // Valid agent definition normalizes correctly
   const valid = validateAgentDefinition({
     id: "custom-worker",
     displayName: "Custom Worker",
@@ -171,7 +158,7 @@ test("Agent Model: computeAgentDefinitionHash is deterministic and detects field
   const defB = {
     id: "backend-engineer",
     displayName: "Backend Engineer",
-    skills: ["backend-testing", "api-design"], // same skills, different order
+    skills: ["backend-testing", "api-design"],
     allowedPaths: ["backend/**"]
   };
   const defC = {
@@ -194,7 +181,6 @@ test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-de
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-reg-seed-test-"));
   const dbPath = path.join(dir, "runs.sqlite3");
 
-  // 1. Fresh store initializes with all builtin seeds
   const store1 = new RunStore(dbPath);
   const initialAgents = store1.listAgentDefinitions();
   const seedIds = BUILTIN_AGENT_SEEDS.map(s => s.id);
@@ -203,7 +189,6 @@ test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-de
     assert.ok(initialAgents.some(a => a.id === id), `Builtin agent '${id}' must be seeded`);
   }
 
-  // 2. Modify one builtin agent (e.g. backend-engineer) to v2
   store1.updateAgentDefinition("backend-engineer", {
     displayName: "Customized Backend Engineer",
     skills: ["api-design", "custom-skill"]
@@ -212,14 +197,12 @@ test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-de
   assert.equal(modified.version, 2);
   assert.equal(modified.definition.displayName, "Customized Backend Engineer");
 
-  // 3. Add a custom agent
   store1.createAgentDefinition({
     id: "my-custom-agent",
     displayName: "My Custom Agent",
     allowedPaths: ["custom/**"]
   });
 
-  // 4. Re-open / bootstrap store: must not overwrite modified builtin, bump version, or remove custom agent
   const store2 = new RunStore(dbPath);
   const backendAfterBootstrap = store2.getAgentDefinition("backend-engineer");
   assert.equal(backendAfterBootstrap.version, 2, "Bootstrap must not bump version of modified builtin");
@@ -234,7 +217,6 @@ test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-de
 test("Agent Registry Store: create and update produces immutable version history with transactions", () => {
   const store = makeTestStore();
 
-  // 1. Create v1
   const created = store.createAgentDefinition({
     id: "custom-worker",
     displayName: "Custom Worker",
@@ -248,10 +230,8 @@ test("Agent Registry Store: create and update produces immutable version history
   assert.equal(created.version, 1);
   assert.ok(created.definitionHash);
 
-  // Duplicate create throws
   assert.throws(() => store.createAgentDefinition({ id: "custom-worker", displayName: "Duplicate" }), /already exists/);
 
-  // 2. Update to v2
   const updated = store.updateAgentDefinition("custom-worker", {
     displayName: "Custom Worker v2",
     skills: ["api-design", "graphql-patterns"]
@@ -260,7 +240,6 @@ test("Agent Registry Store: create and update produces immutable version history
   assert.equal(updated.version, 2);
   assert.notEqual(updated.definitionHash, created.definitionHash);
 
-  // 3. Retrieve specific versions
   const v1 = store.getAgentDefinition("custom-worker", 1);
   assert.equal(v1.version, 1);
   assert.equal(v1.definition.displayName, "Custom Worker");
@@ -273,12 +252,10 @@ test("Agent Registry Store: create and update produces immutable version history
   assert.deepEqual(v2.definition.skills, ["api-design", "graphql-patterns"]);
   assert.equal(v2.definitionHash, updated.definitionHash);
 
-  // 4. Default getAgentDefinition returns current version (v2)
   const current = store.getAgentDefinition("custom-worker");
   assert.equal(current.version, 2);
   assert.equal(current.currentVersion, 2);
 
-  // 5. listAgentVersions returns complete history
   const versions = store.listAgentVersions("custom-worker");
   assert.equal(versions.length, 2);
   assert.equal(versions[0].version, 1);
@@ -294,7 +271,6 @@ test("Agent Registry Store: lifecycle transitions vs definition version semantic
 
   const initialHash = store.getAgentDefinition("agent-2").definitionHash;
 
-  // Disable agent-2: updates live status without bumping version or corrupting historical definition
   store.setAgentStatus("agent-2", "disabled");
   const disabledAgent = store.getAgentDefinition("agent-2");
   assert.equal(disabledAgent.status, "disabled");
@@ -303,55 +279,237 @@ test("Agent Registry Store: lifecycle transitions vs definition version semantic
   assert.equal(disabledAgent.definitionHash, initialHash, "Definition hash must remain identical");
   assert.equal(store.listAgentVersions("agent-2").length, 1, "Disabling must not create extra versions");
 
-  // Archive agent-2
   store.setAgentStatus("agent-2", "archived");
   assert.equal(store.getAgentDefinition("agent-2").status, "archived");
 
-  // Default list excludes archived
   const activeList = store.listAgentDefinitions();
   const ids = activeList.map(a => a.id);
   assert.ok(ids.includes("agent-1"), "Enabled agent must be in default list");
   assert.ok(!ids.includes("agent-2"), "Archived agent must be excluded from default list");
 
-  // List with includeArchived includes agent-2
   const allList = store.listAgentDefinitions({ includeArchived: true });
   assert.ok(allList.some(a => a.id === "agent-2"));
 
-  // List by status
   const archivedList = store.listAgentDefinitions({ status: "archived" });
   assert.ok(archivedList.some(a => a.id === "agent-2"));
 });
 
-// ── 5. Deletion Safety (Fail-Closed on Used Agents) ────────────────────────────
+test("Agent Lifecycle Isolation: PATCH must never implicitly change disabled or archived status", () => {
+  const store = makeTestStore();
+  store.createAgentDefinition({ id: "isolated-agent", displayName: "Isolated Agent", skills: ["s1"] });
 
-test("Agent Registry Store: hard deletion is permitted ONLY for never-used agents", () => {
+  // Disable agent
+  store.setAgentStatus("isolated-agent", "disabled");
+  assert.equal(store.getAgentDefinition("isolated-agent").status, "disabled");
+
+  // Update/PATCH definition
+  const updated1 = store.updateAgentDefinition("isolated-agent", {
+    displayName: "Isolated Agent v2",
+    skills: ["s1", "s2"]
+  });
+  assert.equal(updated1.version, 2);
+  assert.equal(updated1.status, "disabled", "PATCH must preserve disabled status");
+  assert.equal(store.getAgentDefinition("isolated-agent").status, "disabled");
+
+  // Archive agent
+  store.setAgentStatus("isolated-agent", "archived");
+  assert.equal(store.getAgentDefinition("isolated-agent").status, "archived");
+
+  // Update/PATCH definition again
+  const updated2 = store.updateAgentDefinition("isolated-agent", {
+    displayName: "Isolated Agent v3"
+  });
+  assert.equal(updated2.version, 3);
+  assert.equal(updated2.status, "archived", "PATCH must preserve archived status");
+  assert.equal(store.getAgentDefinition("isolated-agent").status, "archived");
+});
+
+// ── 5. Deletion Safety (Fail-Closed on All Agent Roles) ─────────────────────────
+
+test("Agent Registry Store: hard deletion is blocked if agent is referenced in any run role", () => {
   const store = makeTestStore();
   store.createAgentDefinition({ id: "unused-agent", displayName: "Unused Agent" });
-  store.createAgentDefinition({ id: "used-agent", displayName: "Used Agent" });
+  store.createAgentDefinition({ id: "worker-agent", displayName: "Worker Agent" });
+  store.createAgentDefinition({ id: "reviewer-agent", displayName: "Reviewer Agent" });
 
-  // Create a run referencing 'used-agent'
+  // 1. Worker agent reference
   store.createRun("PACE-101", {
     issue: "PACE-101",
-    taskAgent: "used-agent",
+    taskAgent: "worker-agent",
     allowedPaths: ["src/**"]
   });
 
   assert.equal(store.isAgentUsed("unused-agent"), false);
-  assert.equal(store.isAgentUsed("used-agent"), true);
+  assert.equal(store.isAgentUsed("worker-agent"), true);
 
-  // Deleting unused agent succeeds
+  // 2. Reviewer agent reference (referenced only via reviewTaskAgent in payload)
+  store.createRun("PACE-102", {
+    issue: "PACE-102",
+    taskAgent: "backend-engineer",
+    reviewTaskAgent: "reviewer-agent",
+    allowedPaths: ["src/**"]
+  });
+  assert.equal(store.isAgentUsed("reviewer-agent"), true);
+
+  // Deleting unused succeeds
   assert.equal(store.deleteAgentDefinition("unused-agent"), true);
   assert.equal(store.getAgentDefinition("unused-agent"), null);
 
-  // Deleting used agent fails closed with explicit error
+  // Deleting worker fails
   assert.throws(
-    () => store.deleteAgentDefinition("used-agent"),
-    /Cannot hard-delete agent 'used-agent' because it has been used by existing runs/
+    () => store.deleteAgentDefinition("worker-agent"),
+    /Cannot hard-delete agent 'worker-agent' because it has been used by existing runs/
   );
-  assert.ok(store.getAgentDefinition("used-agent"), "Used agent must remain in store");
+
+  // Deleting reviewer fails
+  assert.throws(
+    () => store.deleteAgentDefinition("reviewer-agent"),
+    /Cannot hard-delete agent 'reviewer-agent' because it has been used by existing runs/
+  );
 });
 
-// ── 6. Runtime Authoritative Registry Check ────────────────────────────────────
+// ── 6. Authoritative Agent Definition Behavioral Constraints ─────────────────
+
+test("Authoritative Agent Definition: constraints effectively shape new plans while historical runs remain pinned", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {
+    pathScopes: {
+      "custom-worker": ["src/**"]
+    }
+  });
+
+  // 1. Register custom-worker v1 with broad allowedPaths, specific skills, and normal risk
+  store.createAgentDefinition({
+    id: "custom-worker",
+    displayName: "Custom Worker v1",
+    skills: ["api-design", "database-migration"],
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["src/**"]
+  });
+
+  const orchestratorPlanPayload = {
+    issue: "PACE-500",
+    summary: sampleIssue.summary,
+    persona: "startup-cto",
+    taskAgent: "custom-worker",
+    skills: ["api-design", "unauthorized-skill"], // Orchestrator asks for unauthorized skill
+    risk: "low", // Orchestrator asks for low risk
+    parallelSafe: true,
+    allowedPaths: ["src/deep/**", "outside/**"], // Orchestrator asks for broader paths
+    dependencies: [],
+    rationale: ["Test plan"]
+  };
+
+  const planV1 = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(orchestratorPlanPayload),
+        stderr: ""
+      })
+    }
+  });
+
+  // Effective skills must filter out unauthorized skill
+  assert.deepEqual(planV1.skills, ["api-design"], "Skills must be contained to registered agent skills");
+  // Effective allowedPaths must intersect orchestrator, agent, and policy hard scope
+  assert.deepEqual(planV1.allowedPaths, ["src/deep/**"], "Allowed paths must be 3-way intersected fail-closed");
+  // Risk baseline must be normal (floor)
+  assert.equal(planV1.risk, "normal", "Risk must be elevated to agent definition floor");
+
+  const runId1 = store.createRun("PACE-500", planV1);
+
+  // 2. Update agent definition to v2: narrow allowedPaths, elevate risk floor to high, set maxConcurrency to 1
+  store.updateAgentDefinition("custom-worker", {
+    displayName: "Custom Worker v2",
+    skills: ["database-migration"],
+    risk: "high",
+    maxConcurrency: 1,
+    allowedPaths: ["src/db/**"]
+  });
+
+  // 3. Issue new plan: runtime behavior changes automatically based on updated definition
+  const planV2 = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent(orchestratorPlanPayload),
+        stderr: ""
+      })
+    }
+  });
+
+  assert.equal(planV2.agentVersion, 2);
+  assert.deepEqual(planV2.skills, ["database-migration"], "Skills must reflect updated definition");
+  assert.deepEqual(planV2.allowedPaths, [], "src/deep/** intersect src/db/** is empty fail-closed");
+  assert.equal(planV2.risk, "high", "Risk must be high due to updated agent risk floor");
+  assert.equal(planV2.maxConcurrency, 1, "Concurrency must reflect updated definition");
+
+  // 4. Verify historical run 1 remains immutable and pinned to v1 contract
+  const historicalRun = store.getRun(runId1);
+  assert.equal(historicalRun.payload.configSnapshot.agentVersion, 1);
+  assert.deepEqual(historicalRun.payload.configSnapshot.skills, ["api-design"]);
+  assert.deepEqual(historicalRun.payload.configSnapshot.allowedPaths, ["src/deep/**"]);
+  assert.equal(historicalRun.payload.configSnapshot.risk, "normal");
+});
+
+// ── 7. Reviewer Registry Rules & Fail-Closed Lifecycle ────────────────────────
+
+test("Reviewer Registry: disabled or archived reviewer blocks review before worker spawn", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  // Create initial implementation run in store with pinned snapshot
+  const initialPlan = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent({
+          issue: "PACE-500",
+          summary: sampleIssue.summary,
+          persona: "startup-cto",
+          taskAgent: "backend-engineer",
+          skills: ["api-design"],
+          risk: "normal",
+          parallelSafe: true,
+          allowedPaths: ["lib/**"],
+          dependencies: [],
+          rationale: ["Initial run"]
+        }),
+        stderr: ""
+      })
+    }
+  });
+  const baseRunId = store.createRun(sampleIssue.key, initialPlan);
+  store.transition(baseRunId, "review-queued", {
+    implementationSha: "1234567890abcdef1234567890abcdef12345678"
+  });
+
+  // Now disable correctness-reviewer in registry
+  store.setAgentStatus("correctness-reviewer", "disabled");
+
+  let reviewWorkerSpawned = false;
+  const result = handleReview(settings, sampleIssue, true, {
+    spawnSync: () => {
+      reviewWorkerSpawned = true;
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(result.exitCode, 2, "Disabled reviewer must return exitCode 2 (blocked)");
+  assert.equal(result.output.eligible, false);
+  assert.ok(
+    result.output.eligibilityReasons.some(r => r.includes("Agent 'correctness-reviewer' is disabled and cannot receive work")),
+    "Must state reviewer is disabled"
+  );
+  assert.equal(reviewWorkerSpawned, false, "Review worker must NOT be spawned when reviewer is disabled");
+});
+
+// ── 8. Runtime Unregistered / Disabled Worker Fail-Closed ──────────────────────
 
 test("Runtime Integration: unknown taskAgent fails closed with not-registered reason and null version/hash", () => {
   const store = makeTestStore();
@@ -390,7 +548,6 @@ test("Runtime Integration: unknown taskAgent fails closed with not-registered re
   assert.equal(plan.agentVersion, null, "Unregistered agent must not have an invented agentVersion");
   assert.equal(plan.agentHash, null, "Unregistered agent must have null agentHash");
 
-  // Pre-execution execution gate blocks implementation
   let workerSpawned = false;
   const result = handleImplementation(
     settings,
@@ -456,7 +613,6 @@ test("Runtime Integration: disabled or archived agents fail closed and block dis
     "Eligibility reasons must contain disabled agent notice"
   );
 
-  // Archive the agent and verify same blocking behavior
   store.setAgentStatus("custom-worker", "archived");
   const planArchived = issuePlan(settings, sampleIssue, {
     store,
@@ -476,64 +632,7 @@ test("Runtime Integration: disabled or archived agents fail closed and block dis
   );
 });
 
-test("Snapshot Pinning: run retains immutable agent version across global agent updates", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  // Create Agent v1
-  const v1 = store.createAgentDefinition({
-    id: "custom-worker",
-    displayName: "Custom Worker v1",
-    status: "enabled",
-    skills: ["api-design"],
-    allowedPaths: ["src/**"]
-  });
-
-  const validPlanPayload = {
-    issue: "PACE-500",
-    summary: sampleIssue.summary,
-    persona: "startup-cto",
-    taskAgent: "custom-worker",
-    skills: ["api-design"],
-    risk: "normal",
-    parallelSafe: true,
-    allowedPaths: ["src/**"],
-    dependencies: [],
-    rationale: ["Valid test plan"],
-    reasons: ["Valid test plan"]
-  };
-
-  const plan1 = issuePlan(settings, sampleIssue, {
-    store,
-    runtime: {
-      spawnSync: () => ({
-        status: 0,
-        stdout: makeCodexEvent(validPlanPayload),
-        stderr: ""
-      })
-    }
-  });
-
-  assert.equal(plan1.agentVersion, 1);
-  assert.equal(plan1.configSnapshot.agentVersion, 1);
-  assert.equal(plan1.configSnapshot.agentHash, v1.definitionHash);
-
-  const runId = store.createRun(sampleIssue.key, plan1);
-
-  // Update Agent in registry to v2
-  const v2 = store.updateAgentDefinition("custom-worker", {
-    displayName: "Custom Worker v2",
-    skills: ["api-design", "kafka-streams"]
-  });
-  assert.equal(v2.version, 2);
-
-  // Verify historical run still has snapshot with v1
-  const storedRun = store.getRun(runId);
-  assert.equal(storedRun.payload.configSnapshot.agentVersion, 1, "Run snapshot must retain v1");
-  assert.equal(storedRun.payload.configSnapshot.agentHash, v1.definitionHash, "Run snapshot must retain v1 hash");
-});
-
-// ── 7. Plan Approval Identity Binding ─────────────────────────────────────────
+// ── 9. Plan Approval Identity Binding ─────────────────────────────────────────
 
 test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and agentHash", () => {
   const store = makeTestStore();
@@ -574,7 +673,6 @@ test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and 
   const fpV1 = computePlanFingerprint(planV1);
   assert.ok(fpV1);
 
-  // Record human approval for planV1
   store.recordApprovalDecision("PACE-500", {
     action: "implementation",
     approved: true,
@@ -582,7 +680,6 @@ test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and 
     planFingerprint: fpV1
   });
 
-  // Verify planV1 is authorized
   const authV1 = authorizeRuntimeAction(settings, store, {
     issueKey: "PACE-500",
     action: "implementation",
@@ -590,13 +687,11 @@ test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and 
   });
   assert.equal(authV1.allowed, true, "Plan with agent v1 must be authorized by v1 approval");
 
-  // Update agent in registry to v2
   store.updateAgentDefinition("custom-worker", {
     displayName: "Custom Worker v2",
     skills: ["api-design", "kafka-streams"]
   });
 
-  // Generate new plan (now resolves to agent v2)
   const planV2 = issuePlan(settings, sampleIssue, {
     store,
     runtime: {
@@ -611,7 +706,6 @@ test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and 
   const fpV2 = computePlanFingerprint(planV2);
   assert.notEqual(fpV1, fpV2, "Fingerprint must change when agent version/hash changes");
 
-  // Verify planV2 is NOT authorized by old v1 approval
   const authV2 = authorizeRuntimeAction(settings, store, {
     issueKey: "PACE-500",
     action: "implementation",
@@ -621,7 +715,7 @@ test("Plan Approval Identity: plan fingerprint binds agentId, agentVersion, and 
   assert.ok(authV2.reason.includes("requires human approval") || authV2.reason.includes("fingerprint mismatch"));
 });
 
-// ── 8. Control Plane Agent Management API ─────────────────────────────────────
+// ── 10. Control Plane Agent Management API ────────────────────────────────────
 
 test("Agent Management API: full HTTP lifecycle, loopback protection, and audit logging", async () => {
   const store = makeTestStore();
@@ -633,13 +727,11 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    // 1. GET /api/agents (initially has builtin seeds)
     const listRes1 = await fetch(`${baseUrl}/api/agents`);
     assert.equal(listRes1.status, 200);
     const listData1 = await listRes1.json();
     assert.ok(listData1.agents.length >= BUILTIN_AGENT_SEEDS.length);
 
-    // 2. POST /api/agents (create new agent)
     const createPayload = {
       id: "api-agent",
       displayName: "API Worker",
@@ -648,7 +740,6 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
       allowedPaths: ["api/**"]
     };
 
-    // Non-loopback header check / invalid content-type
     const nonJsonRes = await fetch(`${baseUrl}/api/agents`, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
@@ -666,7 +757,6 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
     assert.equal(createdAgent.id, "api-agent");
     assert.equal(createdAgent.version, 1);
 
-    // 3. GET /api/agents/:id
     const getRes = await fetch(`${baseUrl}/api/agents/api-agent`);
     assert.equal(getRes.status, 200);
     const getData = await getRes.json();
@@ -674,7 +764,6 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
     assert.equal(getData.agent.version, 1);
     assert.equal(getData.versions.length, 1);
 
-    // 4. PATCH /api/agents/:id (update -> v2)
     const patchRes = await fetch(`${baseUrl}/api/agents/api-agent`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -684,14 +773,12 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
     const patchedAgent = (await patchRes.json()).agent;
     assert.equal(patchedAgent.version, 2);
 
-    // 5. GET /api/agents/:id/versions/:version
     const v1Res = await fetch(`${baseUrl}/api/agents/api-agent/versions/1`);
     assert.equal(v1Res.status, 200);
     const v1Data = await v1Res.json();
     assert.equal(v1Data.version.version, 1);
     assert.equal(v1Data.version.definition.displayName, "API Worker");
 
-    // 6. POST /api/agents/:id/disable, /enable, /archive
     const disableRes = await fetch(`${baseUrl}/api/agents/api-agent/disable`, { method: "POST" });
     assert.equal(disableRes.status, 200);
     assert.equal((await disableRes.json()).agent.status, "disabled");
@@ -704,14 +791,12 @@ test("Agent Management API: full HTTP lifecycle, loopback protection, and audit 
     assert.equal(archiveRes.status, 200);
     assert.equal((await archiveRes.json()).agent.status, "archived");
 
-    // 7. DELETE /api/agents/:id
     const deleteRes = await fetch(`${baseUrl}/api/agents/api-agent`, { method: "DELETE" });
     assert.equal(deleteRes.status, 200);
 
     const getAfterDelete = await fetch(`${baseUrl}/api/agents/api-agent`);
     assert.equal(getAfterDelete.status, 404);
 
-    // 8. Audit trail verification in PM Decisions
     const auditDecisions = store.getPmDecisions("GLOBAL");
     const decisionTypes = auditDecisions.map(d => d.type);
     assert.ok(decisionTypes.includes("agent-created"));
@@ -735,7 +820,6 @@ test("Agent Management API: controlPlane mutation flag rejects mutations with 40
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    // POST create blocked
     const postRes = await fetch(`${baseUrl}/api/agents`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -745,7 +829,6 @@ test("Agent Management API: controlPlane mutation flag rejects mutations with 40
     const postData = await postRes.json();
     assert.ok(postData.error.includes("Agent registry mutation is disabled"));
 
-    // PATCH blocked
     const patchRes = await fetch(`${baseUrl}/api/agents/backend-engineer`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -753,19 +836,48 @@ test("Agent Management API: controlPlane mutation flag rejects mutations with 40
     });
     assert.equal(patchRes.status, 403);
 
-    // disable blocked
     const disableRes = await fetch(`${baseUrl}/api/agents/backend-engineer/disable`, { method: "POST" });
     assert.equal(disableRes.status, 403);
 
-    // DELETE blocked
     const deleteRes = await fetch(`${baseUrl}/api/agents/backend-engineer`, { method: "DELETE" });
     assert.equal(deleteRes.status, 403);
 
-    // DB remains unchanged
     const backend = store.getAgentDefinition("backend-engineer");
     assert.equal(backend.version, 1);
     assert.equal(backend.status, "enabled");
   } finally {
     server.close();
   }
+});
+
+// ── 11. Legacy Migration Safety ───────────────────────────────────────────────
+
+test("Agent Registry Migration: malformed legacy definition JSON rolls back and fails migration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-reg-mig-test-"));
+  const dbPath = path.join(dir, "legacy.sqlite3");
+
+  // Get Database constructor from RunStore instance
+  const tempStore = new RunStore(path.join(dir, "temp.sqlite3"));
+  const Database = tempStore.database.constructor;
+  tempStore.database.close();
+
+  const rawDb = new Database(dbPath);
+  rawDb.exec(`
+    CREATE TABLE agent_definitions (
+      id TEXT PRIMARY KEY,
+      definition TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO agent_definitions(id, definition, version, created_at, updated_at)
+    VALUES ('corrupted-agent', '{malformed json definition', 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z');
+  `);
+  rawDb.close();
+
+  // Attempting to open with RunStore must throw migration error and not silently swallow
+  assert.throws(
+    () => new RunStore(dbPath),
+    /Agent definitions migration failed/
+  );
 });
