@@ -22,7 +22,8 @@ import {
   describeOrchestratorProviders
 } from "../lib/orchestrator.js";
 import { issuePlan, createConfigSnapshot, handleImplementation, handleRework, getStore } from "../lib/runtime.js";
-import { selectExecutionProfile } from "../lib/executor.js";
+import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
+import { intersectTwoPatterns, intersectPathScopes, isSubScope, validateChangedFiles } from "../lib/scope.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -172,7 +173,7 @@ test("Structured Orchestrator Plan Schema: valid plan passes validation", () => 
   assert.equal(validated.effort, "high");
 });
 
-test("Strict Schema Validation: missing risk, parallelSafe, allowedPaths, dependencies or rationale throws OrchestratorValidationError", () => {
+test("Strict Schema Validation: missing required fields throws OrchestratorValidationError", () => {
   // 1. Missing risk (no silent defaulting)
   const missingRisk = { ...sampleValidPlanJson };
   delete missingRisk.risk;
@@ -214,23 +215,43 @@ test("Strict Schema Validation: missing risk, parallelSafe, allowedPaths, depend
   );
 });
 
+test("Fail-Closed Issue Identity: missing issue/summary in output or mismatched issue key fails closed", () => {
+  // Missing issue key in provider output (must NOT fill from context)
+  const missingIssue = { ...sampleValidPlanJson };
+  delete missingIssue.issue;
+  assert.throws(
+    () => validateOrchestratorPlan(missingIssue, { issue: sampleIssue }),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("issue"))
+  );
+
+  // Missing summary in provider output (must NOT fill from context)
+  const missingSummary = { ...sampleValidPlanJson };
+  delete missingSummary.summary;
+  assert.throws(
+    () => validateOrchestratorPlan(missingSummary, { issue: sampleIssue }),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("summary"))
+  );
+
+  // Returned issue PACE-999 does not match requested work item PACE-100
+  const mismatchedIssue = { ...sampleValidPlanJson, issue: "PACE-999" };
+  assert.throws(
+    () => validateOrchestratorPlan(mismatchedIssue, { issue: sampleIssue }),
+    (err) => err instanceof OrchestratorValidationError && err.validationErrors.some(e => e.includes("does not match requested work item"))
+  );
+});
+
 // ── 2. Real Codex CLI JSONL Protocol Adapter ──────────────────────────────────
 
-test("Real Codex CLI Adapter: parses realistic multi-event JSONL stream and extracts plan", () => {
+test("Real Codex CLI Adapter: parses actual Codex JSONL event schema with item.type === 'agent_message' and item.text", () => {
   const codexJsonlOutput = [
     JSON.stringify({ type: "thread.started", thread_id: "thr_abc123" }),
     JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({ type: "reasoning", content: "Thinking about the payment architecture..." }),
     JSON.stringify({
       type: "item.completed",
       item: {
-        type: "message",
-        role: "assistant",
-        content: [
-          {
-            type: "text",
-            text: "```json\n" + JSON.stringify(sampleValidPlanJson, null, 2) + "\n```"
-          }
-        ]
+        type: "agent_message",
+        text: "```json\n" + JSON.stringify(sampleValidPlanJson, null, 2) + "\n```"
       }
     }),
     JSON.stringify({ type: "turn.completed", usage: { input_tokens: 150, output_tokens: 80 } })
@@ -256,6 +277,28 @@ test("Real Codex CLI Adapter: parses realistic multi-event JSONL stream and extr
   assert.deepEqual(plan.skills, ["api-design", "security-review", "minimal-change"]);
   assert.equal(plan.risk, "high");
   assert.deepEqual(plan.allowedPaths, ["lib/payments/**", "test/payments/**"]);
+});
+
+test("Real Codex CLI Adapter: handles turn.failed / error events and throws OrchestratorProcessError", () => {
+  const codexFailedStream = [
+    JSON.stringify({ type: "thread.started", thread_id: "thr_abc123" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({ type: "turn.failed", error: { message: "Context window exceeded during orchestration planning" } })
+  ].join("\n");
+
+  const runtime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: codexFailedStream,
+      stderr: ""
+    })
+  };
+
+  const provider = new CodexOrchestratorProvider("codex", {}, runtime);
+  assert.throws(
+    () => provider.plan(sampleIssue),
+    (err) => err instanceof OrchestratorProcessError && err.stderr.includes("Context window exceeded")
+  );
 });
 
 // ── 3. Real Claude Code Result Envelope Adapter ───────────────────────────────
@@ -364,7 +407,52 @@ test("Real Antigravity Adapter: handles FAILED stream event and throws Orchestra
   );
 });
 
-// ── 5. Scope Fail-Closed & Intersection Semantics ─────────────────────────────
+// ── 5. Hard Scope Containment & Intersection Semantics ────────────────────────
+
+test("Hard Path-Scope Containment: isSubScope respects * vs ** correctly", () => {
+  // Hard policy: lib/* only matches direct children of lib, NOT subdirectories
+  assert.equal(isSubScope("lib/deep/**", "lib/*"), false, "lib/deep/** must NOT be contained in lib/*");
+  assert.equal(isSubScope("lib/foo.js", "lib/*"), true, "lib/foo.js MUST be contained in lib/*");
+  assert.equal(isSubScope("lib/payments/**", "lib/**"), true, "lib/payments/** MUST be contained in lib/**");
+  assert.equal(isSubScope("infra/**", "lib/**"), false, "infra/** must NOT be contained in lib/**");
+});
+
+test("Hard Path-Scope Intersection: exact glob intersection semantics", () => {
+  // 1. Hard policy: lib/* + orchestrator: lib/deep/** -> no intersection ([])
+  const res1 = intersectPathScopes(["lib/deep/**"], ["lib/*"]);
+  assert.deepEqual(res1, [], "lib/deep/** intersected with lib/* must be []");
+
+  // 2. Hard policy: lib/payments/** + orchestrator: lib/** -> effective intersection is lib/payments/**
+  const res2 = intersectPathScopes(["lib/**"], ["lib/payments/**"]);
+  assert.deepEqual(res2, ["lib/payments/**"], "lib/** intersected with lib/payments/** must be ['lib/payments/**']");
+
+  // 3. Hard policy: lib/** + orchestrator: lib/payments/** -> effective intersection is lib/payments/**
+  const res3 = intersectPathScopes(["lib/payments/**"], ["lib/**"]);
+  assert.deepEqual(res3, ["lib/payments/**"], "lib/payments/** intersected with lib/** must be ['lib/payments/**']");
+
+  // 4. Hard policy: lib/* + orchestrator: lib/index.js -> effective intersection is lib/index.js
+  const res4 = intersectPathScopes(["lib/index.js"], ["lib/*"]);
+  assert.deepEqual(res4, ["lib/index.js"], "lib/index.js intersected with lib/* must be ['lib/index.js']");
+
+  // 5. Effective scope can never authorize a path that hard policy would reject
+  const effectiveScope = intersectPathScopes(["lib/payments/**", "infra/**"], ["lib/**"]);
+  assert.deepEqual(effectiveScope, ["lib/payments/**"]);
+
+  // Test with validateChangedFiles
+  const allowed = validateChangedFiles({
+    changedFiles: ["lib/payments/service.js"],
+    allowedPatterns: effectiveScope,
+    maxChangedFiles: 10
+  });
+  assert.equal(allowed.allowed, true);
+
+  const rejected = validateChangedFiles({
+    changedFiles: ["infra/terraform/main.tf"],
+    allowedPatterns: effectiveScope,
+    maxChangedFiles: 10
+  });
+  assert.equal(rejected.allowed, false);
+});
 
 test("Explicit Scope Semantics: empty allowedPaths [] remains empty and NEVER broadens to policy persona scope", () => {
   const settings = createTestSettings({
@@ -376,7 +464,8 @@ test("Explicit Scope Semantics: empty allowedPaths [] remains empty and NEVER br
     },
     policy: {
       pathScopes: {
-        "backend-engineer": ["lib/**", "src/**"]
+        "backend-engineer": ["lib/**", "src/**"],
+        "startup-cto": ["lib/**", "src/**"]
       }
     }
   });
@@ -399,40 +488,74 @@ test("Explicit Scope Semantics: empty allowedPaths [] remains empty and NEVER br
   assert.notDeepEqual(plan.allowedPaths, ["lib/**", "src/**"], "Must NEVER broaden to policy persona scope");
 });
 
-test("Scope Intersection: orchestrator paths are strictly intersected with policy pathScopes", () => {
-  const settings = createTestSettings({
-    orchestrator: {
-      defaultProvider: "codex",
-      providers: {
-        codex: { type: "codex", command: ["codex", "exec", "{prompt}"] }
-      }
-    },
-    policy: {
-      pathScopes: {
-        "startup-cto": ["lib/**"],
-        "backend-engineer": ["lib/**"]
-      }
+// ── 6. Full Stable Orchestrator Decision in Fingerprint ────────────────────────
+
+test("Plan Fingerprint: changing dependencies, parallelSafe, or executor recommendations changes fingerprint", () => {
+  const basePlan = {
+    issue: "PACE-100",
+    summary: "Task",
+    persona: "startup-cto",
+    taskAgent: "backend-engineer",
+    skills: ["api-design"],
+    risk: "normal",
+    parallelSafe: true,
+    allowedPaths: ["lib/**"],
+    dependencies: ["PACE-10"],
+    rationale: ["Strategic decision"],
+    executor: "codex",
+    model: "gpt-5",
+    modelProfile: "high",
+    effort: "high",
+    configSnapshot: {
+      operatingMode: "supervised",
+      autonomy: { implementation: "approval" }
     }
+  };
+
+  const baseFingerprint = computePlanFingerprint(basePlan);
+  assert.ok(baseFingerprint, "Base fingerprint must be a non-empty string");
+
+  // 1. Changing dependencies changes fingerprint
+  const changedDeps = { ...basePlan, dependencies: ["PACE-20"] };
+  assert.notEqual(computePlanFingerprint(changedDeps), baseFingerprint, "Changing dependencies must change fingerprint");
+
+  // 2. Changing parallelSafe changes fingerprint
+  const changedParallel = { ...basePlan, parallelSafe: false };
+  assert.notEqual(computePlanFingerprint(changedParallel), baseFingerprint, "Changing parallelSafe must change fingerprint");
+
+  // 3. Changing executor recommendation changes fingerprint
+  const changedExecutor = { ...basePlan, executor: "antigravity" };
+  assert.notEqual(computePlanFingerprint(changedExecutor), baseFingerprint, "Changing executor recommendation must change fingerprint");
+
+  // 4. Changing rationale changes fingerprint
+  const changedRationale = { ...basePlan, rationale: ["Different rationale"] };
+  assert.notEqual(computePlanFingerprint(changedRationale), baseFingerprint, "Changing rationale must change fingerprint");
+
+  // Verify approval for Plan A does NOT authorize changed Plan B
+  const settings = createTestSettings({ project: { operatingMode: "supervised" } });
+  const store = getStore(settings);
+  store.recordApprovalDecision("PACE-100", {
+    action: "implementation",
+    approved: true,
+    plan: basePlan
   });
 
-  const planWithBroadScope = {
-    ...sampleValidPlanJson,
-    allowedPaths: ["lib/payments/**", "infra/terraform/**"] // infra is outside policy lib/**
-  };
+  const authPlanA = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-100",
+    action: "implementation",
+    plan: basePlan
+  });
+  assert.equal(authPlanA.allowed, true, "Plan A with matching fingerprint should be authorized");
 
-  const runtime = {
-    spawnSync: () => ({
-      status: 0,
-      stdout: JSON.stringify(planWithBroadScope),
-      stderr: ""
-    })
-  };
-
-  const plan = issuePlan(settings, sampleIssue, { runtime });
-  assert.deepEqual(plan.allowedPaths, ["lib/payments/**"], "infra/terraform/** must be stripped by policy intersection");
+  const authPlanB = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-100",
+    action: "implementation",
+    plan: changedDeps
+  });
+  assert.equal(authPlanB.allowed, false, "Plan B with changed dependencies must NOT be authorized by Plan A approval");
 });
 
-// ── 6. Executor Recommendation Semantics ──────────────────────────────────────
+// ── 7. Executor Recommendation Semantics ──────────────────────────────────────
 
 test("Executor Recommendation Semantics: orchestrator recommends Antigravity when default is Codex", () => {
   const settings = createTestSettings({
@@ -468,27 +591,29 @@ test("Executor Recommendation Semantics: orchestrator recommends Antigravity whe
 
   const plan = issuePlan(settings, sampleIssue, { runtime });
 
-  // Assert execution profile resolved to the orchestrator-recommended Antigravity
   assert.equal(plan.execution.provider, "antigravity", "Resolved executor should match recommendation");
   assert.equal(plan.configSnapshot.recommendedExecutor, "antigravity");
   assert.equal(plan.configSnapshot.executorProvider, "antigravity");
 });
 
-// ── 7. Typed Failure Semantics & Fail-Closed Contract ─────────────────────────
+// ── 8. Typed Failure Semantics & Fail-Closed Provider Contracts ────────────────
 
-test("Typed Failure Semantics: unknown provider throws OrchestratorUnavailableError", () => {
-  const settings = createTestSettings({
+test("Typed Failure Semantics: unknown provider or typo in type (e.g. 'codxe') throws OrchestratorUnavailableError", () => {
+  const settingsWithTypo = createTestSettings({
     orchestrator: {
-      defaultProvider: "unknown-orchestrator",
+      defaultProvider: "typo-provider",
       providers: {
-        builtin: { type: "builtin" }
+        "typo-provider": {
+          type: "codxe", // typo in type
+          command: ["codex", "exec", "{prompt}"]
+        }
       }
     }
   });
 
   assert.throws(
-    () => createOrchestratorProvider(settings),
-    (err) => err instanceof OrchestratorUnavailableError && err.message.includes("Unknown orchestrator provider")
+    () => createOrchestratorProvider(settingsWithTypo),
+    (err) => err instanceof OrchestratorUnavailableError && err.message.includes("Unsupported orchestrator provider type: 'codxe'")
   );
 });
 
@@ -596,12 +721,14 @@ test("Orchestrator Selection is Snapshot-Pinned across global config changes", (
   // 3. Rework/subsequent planning for the existing run uses snapshot, NOT calling the new antigravity orchestrator
   let agyCalled = false;
   const agyRuntime = {
-    spawnSync: (cmd) => {
+    spawnSync: (cmd, args) => {
       if (cmd === "agy") agyCalled = true;
+      const promptArg = args ? args.find(a => typeof a === "string" && a.includes("PACE-")) : "";
+      const issueKey = promptArg && promptArg.includes("PACE-200") ? "PACE-200" : "PACE-100";
       return {
         status: 0,
         stdout: JSON.stringify({
-          issue: "PACE-100",
+          issue: issueKey,
           summary: "Task",
           persona: "devops-engineer",
           taskAgent: "infra-specialist",
