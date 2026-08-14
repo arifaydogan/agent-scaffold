@@ -977,8 +977,16 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     executor: {
       defaultProvider: "codex",
       providers: {
-        codex: { command: ["codex"], modelProfiles: { medium: "gpt-4o" } },
-        antigravity: { command: ["agy"], modelProfiles: { medium: "claude-3-5-sonnet" } }
+        codex: {
+          command: ["codex"],
+          defaultModel: "gpt-4o",
+          modelProfiles: { medium: "gpt-4o", high: "gpt-4o-high" }
+        },
+        antigravity: {
+          command: ["agy"],
+          defaultModel: "claude-3-5-sonnet",
+          modelProfiles: { medium: "claude-3-5-sonnet", high: "claude-3-5-opus" }
+        }
       }
     }
   });
@@ -1002,7 +1010,7 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     })
   };
 
-  // backend-engineer is explicitly configured with executor constraint: { provider: "codex", modelProfile: "medium" }
+  // 1. Incompatible executor provider fails closed
   store.updateAgentDefinition("backend-engineer", {
     displayName: "Backend Engineer",
     skills: ["api-design", "backend-testing", "minimal-change"],
@@ -1014,7 +1022,6 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     allowedPaths: ["**"]
   });
 
-  // Orchestrator recommends antigravity which conflicts with backend-engineer's registered executor
   assert.throws(
     () => issuePlan(settings, sampleIssue, {
       store,
@@ -1041,27 +1048,176 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     /Orchestrator recommended executor 'antigravity', but agent 'backend-engineer' is constrained to 'codex'/
   );
 
-  // Initial valid plan with codex
-  const initialPlan = issuePlan(settings, sampleIssue, { store, runtime: mockRuntime });
-  assert.equal(initialPlan.execution.provider, "codex");
-  assert.equal(initialPlan.configSnapshot.executorProvider, "codex");
-
-  const runId = store.createRun(sampleIssue.key, initialPlan);
-  store.transition(runId, "review-queued", { implementationSha: "aaa111" });
-
-  // Update backend-engineer definition in registry from codex to antigravity
+  // 2. Incompatible modelProfile fails closed: registered modelProfile = high, orchestrator recommends medium
   store.updateAgentDefinition("backend-engineer", {
     displayName: "Backend Engineer",
-    skills: ["api-design"],
+    skills: ["api-design", "backend-testing", "minimal-change"],
     capabilities: ["code-intelligence", "git"],
-    executor: { provider: "antigravity", modelProfile: "medium", model: null },
+    executor: { provider: "codex", modelProfile: "high", model: null },
     reviewer: "correctness-reviewer",
     risk: "normal",
     maxConcurrency: 2,
     allowedPaths: ["**"]
   });
 
-  // New run uses updated executor (antigravity)
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      store,
+      runtime: {
+        spawnSync: () => ({
+          status: 0,
+          stdout: makeCodexEvent({
+            issue: "PACE-500",
+            summary: sampleIssue.summary,
+            persona: "startup-cto",
+            taskAgent: "backend-engineer",
+            executor: "codex",
+            modelProfile: "medium", // incompatible with agent modelProfile: "high"!
+            skills: ["api-design"],
+            risk: "normal",
+            parallelSafe: true,
+            allowedPaths: ["lib/**"],
+            dependencies: [],
+            rationale: ["Incompatible modelProfile test"]
+          }),
+          stderr: ""
+        })
+      }
+    }),
+    /Orchestrator recommended model profile 'medium', but agent 'backend-engineer' is constrained to 'high'/
+  );
+
+  // 3. Incompatible model fails closed: registered model = gpt-4o-high, orchestrator recommends gpt-4o
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design", "backend-testing", "minimal-change"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "codex", modelProfile: null, model: "gpt-4o-high" },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  assert.throws(
+    () => issuePlan(settings, sampleIssue, {
+      store,
+      runtime: {
+        spawnSync: () => ({
+          status: 0,
+          stdout: makeCodexEvent({
+            issue: "PACE-500",
+            summary: sampleIssue.summary,
+            persona: "startup-cto",
+            taskAgent: "backend-engineer",
+            executor: "codex",
+            model: "gpt-4o", // incompatible with agent model: "gpt-4o-high"!
+            skills: ["api-design"],
+            risk: "normal",
+            parallelSafe: true,
+            allowedPaths: ["lib/**"],
+            dependencies: [],
+            rationale: ["Incompatible model test"]
+          }),
+          stderr: ""
+        })
+      }
+    }),
+    /Orchestrator recommended model 'gpt-4o', but agent 'backend-engineer' is constrained to 'gpt-4o-high'/
+  );
+
+  // 4. Registered provider only, model/modelProfile unspecified -> compatible orchestrator model recommendation allowed
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design", "backend-testing", "minimal-change"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "codex", modelProfile: null, model: null },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  const compatiblePlan = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent({
+          issue: "PACE-500",
+          summary: sampleIssue.summary,
+          persona: "startup-cto",
+          taskAgent: "backend-engineer",
+          executor: "codex",
+          model: "gpt-4o-high", // compatible recommendation
+          skills: ["api-design"],
+          risk: "normal",
+          parallelSafe: true,
+          allowedPaths: ["lib/**"],
+          dependencies: [],
+          rationale: ["Compatible recommendation"]
+        }),
+        stderr: ""
+      })
+    }
+  });
+  assert.equal(compatiblePlan.execution.model, "gpt-4o-high", "Compatible model recommendation should be accepted");
+  assert.equal(compatiblePlan.configSnapshot.executorModel, "gpt-4o-high");
+
+  // 5. Update agent executor model/profile: new lifecycle uses new values; existing pinned run retains old values
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design", "backend-testing", "minimal-change"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "codex", modelProfile: null, model: "gpt-4o" },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  const initialPlan = issuePlan(settings, sampleIssue, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: makeCodexEvent({
+          issue: "PACE-500",
+          summary: sampleIssue.summary,
+          persona: "startup-cto",
+          taskAgent: "backend-engineer",
+          skills: ["api-design"],
+          risk: "normal",
+          parallelSafe: true,
+          allowedPaths: ["lib/**"],
+          dependencies: [],
+          rationale: ["Initial run"]
+        }),
+        stderr: ""
+      })
+    }
+  });
+  assert.equal(initialPlan.execution.provider, "codex");
+  assert.equal(initialPlan.execution.model, "gpt-4o");
+  assert.equal(initialPlan.configSnapshot.executorProvider, "codex");
+  assert.equal(initialPlan.configSnapshot.executorModel, "gpt-4o");
+
+  const runId = store.createRun(sampleIssue.key, initialPlan);
+  store.transition(runId, "review-queued", { implementationSha: "aaa111" });
+
+  // Update backend-engineer definition in registry to model: "gpt-4o-high" and provider: "antigravity"
+  store.updateAgentDefinition("backend-engineer", {
+    displayName: "Backend Engineer",
+    skills: ["api-design"],
+    capabilities: ["code-intelligence", "git"],
+    executor: { provider: "antigravity", modelProfile: "high", model: "claude-3-5-opus" },
+    reviewer: "correctness-reviewer",
+    risk: "normal",
+    maxConcurrency: 2,
+    allowedPaths: ["**"]
+  });
+
+  // New run uses updated executor (antigravity / claude-3-5-opus)
   const newIssue = { ...sampleIssue, key: "PACE-501" };
   const newPlan = issuePlan(settings, newIssue, {
     store,
@@ -1085,8 +1241,9 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     }
   });
   assert.equal(newPlan.execution.provider, "antigravity", "New plan uses updated executor antigravity");
+  assert.equal(newPlan.execution.model, "claude-3-5-opus", "New plan uses updated model claude-3-5-opus");
 
-  // Historical pinned run retains pinned executor (codex)
+  // Historical pinned run retains pinned executor (codex / gpt-4o)
   const reworkPlan = issuePlan(settings, sampleIssue, {
     store,
     originatingRun: store.getRun(runId),
@@ -1095,7 +1252,9 @@ test("Agent Executor Constraints: orchestrator recommendation incompatible with 
     runtime: mockRuntime
   });
   assert.equal(reworkPlan.execution.provider, "codex", "Historical pinned run retains codex executor");
+  assert.equal(reworkPlan.execution.model, "gpt-4o", "Historical pinned run retains codex model");
   assert.equal(reworkPlan.configSnapshot.executorProvider, "codex");
+  assert.equal(reworkPlan.configSnapshot.executorModel, "gpt-4o");
 });
 
 // ── 14. Scheduler Concurrency Constraints & Fallback Bypass Removal ──────────
