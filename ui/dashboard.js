@@ -825,12 +825,85 @@ function renderAgentDefinitions() {
     return;
   }
   state.snapshot.agentDefinitions.forEach(agent => {
+    const def = agent.definition || {};
     const div = element("div", "agent-definition");
-    div.append(
-      element("strong", "", agent.id),
-      element("span", "version", `v${agent.version}`),
-      element("pre", "", JSON.stringify(agent.definition, null, 2))
+    div.style.marginBottom = "1rem";
+    div.style.padding = "1rem";
+    div.style.background = "var(--panel-subtle, rgba(255,255,255,0.03))";
+    div.style.borderRadius = "8px";
+    div.style.border = "1px solid var(--border-subtle, rgba(255,255,255,0.1))";
+
+    const header = element("div", "agent-header");
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.marginBottom = "0.5rem";
+
+    const titleBox = element("div");
+    titleBox.append(
+      element("strong", "", agent.displayName || agent.id),
+      element("small", "", ` (${agent.id})`),
+      element("span", `badge badge-${agent.status || 'enabled'}`, ` ${agent.status || 'enabled'} `),
+      element("span", "badge badge-version", ` v${agent.version} `)
     );
+
+    const actionsBox = element("div", "agent-actions");
+    actionsBox.style.display = "flex";
+    actionsBox.style.gap = "0.5rem";
+
+    if (agent.status === "enabled") {
+      const disableBtn = element("button", "btn-sm", "Devre Dışı Bırak");
+      disableBtn.onclick = async () => {
+        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/disable`, { method: "POST" });
+        refresh();
+      };
+      const archiveBtn = element("button", "btn-sm", "Arşivle");
+      archiveBtn.onclick = async () => {
+        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/archive`, { method: "POST" });
+        refresh();
+      };
+      actionsBox.append(disableBtn, archiveBtn);
+    } else if (agent.status === "disabled") {
+      const enableBtn = element("button", "btn-sm", "Etkinleştir");
+      enableBtn.onclick = async () => {
+        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/enable`, { method: "POST" });
+        refresh();
+      };
+      const archiveBtn = element("button", "btn-sm", "Arşivle");
+      archiveBtn.onclick = async () => {
+        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/archive`, { method: "POST" });
+        refresh();
+      };
+      actionsBox.append(enableBtn, archiveBtn);
+    } else if (agent.status === "archived") {
+      const enableBtn = element("button", "btn-sm", "Tekrar Etkinleştir");
+      enableBtn.onclick = async () => {
+        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/enable`, { method: "POST" });
+        refresh();
+      };
+      actionsBox.append(enableBtn);
+    }
+
+    const versionsBtn = element("button", "btn-sm", "Versiyonlar");
+    versionsBtn.onclick = async () => {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/versions`);
+      const data = await res.json();
+      alert(`Agent ${agent.id} Versiyon Geçmişi:\n` + JSON.stringify(data.versions, null, 2));
+    };
+    actionsBox.append(versionsBtn);
+
+    header.append(titleBox, actionsBox);
+
+    const details = element("div", "agent-details");
+    details.style.fontSize = "0.85rem";
+    details.style.color = "var(--text-muted, #888)";
+    details.innerHTML = `
+      <div><strong>Rol:</strong> ${def.role || 'implementation'} | <strong>Default Persona:</strong> ${def.defaultPersona || 'startup-cto'} | <strong>Risk:</strong> ${def.risk || 'normal'}</div>
+      <div><strong>Skills:</strong> ${(def.skills || []).join(", ") || "—"}</div>
+      <div><strong>Allowed Paths:</strong> ${(def.allowedPaths || []).join(", ") || "[]"}</div>
+    `;
+
+    div.append(header, details);
     container.append(div);
   });
 }
