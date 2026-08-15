@@ -2,17 +2,17 @@
  * test/phase-g-code-intelligence.test.js
  *
  * Dedicated Phase G Test Suite — Real Pipeline Integration & Provider-Neutral Code Intelligence:
- * 1. Provider Lifecycle, Safe Env & Buffer Bounds: disabled, unavailable, MCP handshake, env sanitization (CBM_ALLOWED_ROOT), maxBufferSize.
+ * 1. Provider Lifecycle, Safe Env & Buffer Bounds: disabled, unavailable, MCP handshake, env sanitization (authoritative CBM_ALLOWED_ROOT), maxBufferSize.
  * 2. Real Index Lifecycle & Symlink Path Boundary: unindexed -> index_repository -> indexed, realpath symlink escape rejection.
  * 3. Real MCP Upstream Tool Schemas: get_code_snippet (qualified_name), search_graph (name_pattern), trace_path (function_name), detect_changes (git_diff).
  * 4. Production Planning-to-Execution Flow: dispatch execute:true passes exact immutable plan to execution run & prompt without re-planning.
  * 5. Historical Evidence Immutability: run pinned to G1 remains G1 when graph reindexes to G2.
- * 6. Production Review Lifecycle: implementation SHA diff -> review impact intelligence -> reviewer prompt (graph cannot decide verdict).
- * 7. Production Rework Lifecycle: originating G1 intelligence preserved, new rework intelligence collected separately.
+ * 6. Production Review Lifecycle: execution path verifies changed files from review intelligence appear in actual executor prompt.
+ * 7. Production Rework Lifecycle: review failure -> rework dispatch -> originating G1 remains pinned -> fresh rework intelligence collected -> worker prompt contains both.
  * 8. Coverage-Aware Claims: partial coverage attaches warnings and prevents false exhaustive claims.
- * 9. Security & Factory Enforcement: prompt injection in code treated as data, rejection of unready graft-mcp factory type.
+ * 9. Security & Factory Enforcement: prompt injection in code treated as data, rejection of unready graft-mcp factory type, CBM_ALLOWED_ROOT precedence.
  * 10. Observability API & Truthful Representation: /api/observability/runs/:runId exposes normalized summary without raw graph dumps.
- * 11. Optional Live Binary Integration Test: smoke test against real codebase-memory-mcp binary if installed.
+ * 11. Optional Live Binary Integration Test: exercise health, index, searchCode, tracePath, getSnippet if codebase-memory-mcp is on PATH.
  */
 
 import fs from "node:fs";
@@ -65,6 +65,13 @@ function makeSettings(store, overrides = {}) {
       execSync("git init", { cwd: repoDir, stdio: "ignore" });
       execSync("git config user.name 'AgentTest'", { cwd: repoDir, stdio: "ignore" });
       execSync("git config user.email 'agent@test.local'", { cwd: repoDir, stdio: "ignore" });
+      fs.writeFileSync(path.join(repoDir, "AGENTS.md"), "# Agents\n");
+      fs.writeFileSync(path.join(repoDir, "ORCHESTRATION.md"), "# Orchestration\n");
+      fs.writeFileSync(path.join(repoDir, "PACEBUILD_ORCHESTRATOR.md"), "# PaceBuild\n");
+      fs.mkdirSync(path.join(repoDir, ".agents", "rules"), { recursive: true });
+      fs.writeFileSync(path.join(repoDir, ".agents", "rules", "orchestration-gates.md"), "# Gates\n");
+      execSync("git add .", { cwd: repoDir, stdio: "ignore" });
+      execSync("git commit -m 'initial'", { cwd: repoDir, stdio: "ignore" });
     }
   } catch {}
 
@@ -101,8 +108,8 @@ function makeSettings(store, overrides = {}) {
         maxAttempts: 3,
         maxConcurrency: 2,
         review: {
-          provider: "antigravity",
-          modelProfile: "claude-review",
+          provider: "codex",
+          model: "gpt-5",
           maxReworkAttempts: 3
         },
         pathScopes: {
@@ -120,9 +127,9 @@ function makeSettings(store, overrides = {}) {
       executor: {
         defaultProvider: "codex",
         providers: {
-          codex: { command: ["codex", "exec"], defaultModel: "gpt-5", defaultEffort: "medium" },
+          codex: { command: ["codex", "exec", "--prompt", "{prompt}"], defaultModel: "gpt-5", defaultEffort: "medium" },
           antigravity: {
-            command: ["antigravity", "exec"],
+            command: ["antigravity", "exec", "--prompt", "{prompt}"],
             defaultModel: "claude-3-5-sonnet",
             defaultEffort: "medium",
             modelProfiles: {
@@ -135,9 +142,22 @@ function makeSettings(store, overrides = {}) {
   };
 }
 
+const UPSTREAM_TOOL_SCHEMAS = {
+  index_repository: { type: "object", required: ["repo_path"], properties: { repo_path: { type: "string" }, project: { type: "string" } } },
+  list_projects: { type: "object", properties: {} },
+  index_status: { type: "object", properties: { project: { type: "string" }, repo_path: { type: "string" } } },
+  get_architecture: { type: "object", properties: { project: { type: "string" }, aspects: { type: "array" } } },
+  search_graph: { type: "object", properties: { project: { type: "string" }, name_pattern: { type: "string" }, limit: { type: "number" } } },
+  semantic_query: { type: "object", required: ["query"], properties: { project: { type: "string" }, query: { type: "string" }, limit: { type: "number" } } },
+  trace_path: { type: "object", required: ["function_name"], properties: { project: { type: "string" }, function_name: { type: "string" }, direction: { type: "string" }, depth: { type: "number" } } },
+  detect_changes: { type: "object", properties: { project: { type: "string" }, git_diff: { type: "string" }, scope: { type: "string" } } },
+  check_index_coverage: { type: "object", properties: { project: { type: "string" }, paths: { type: "array" } } },
+  get_code_snippet: { type: "object", required: ["qualified_name"], properties: { project: { type: "string" }, qualified_name: { type: "string" } } }
+};
+
 /**
  * Creates a mock MCP stdio process implementing NDJSON JSON-RPC
- * with exact upstream codebase-memory-mcp tool schemas.
+ * with strict schema enforcement (rejects ANY call containing undeclared properties).
  */
 function createMockMcpSpawn(toolHandler) {
   return function mockSpawn(cmd, args, opts) {
@@ -181,26 +201,17 @@ function createMockMcpSpawn(toolHandler) {
             // notification accepted
           } else if (msg.method === "tools/list") {
             setImmediate(() => {
+              const tools = Object.entries(UPSTREAM_TOOL_SCHEMAS).map(([name, inputSchema]) => ({
+                name,
+                inputSchema
+              }));
               stdout.emit(
                 "data",
                 Buffer.from(
                   JSON.stringify({
                     jsonrpc: "2.0",
                     id: msg.id,
-                    result: {
-                      tools: [
-                        { name: "index_repository", inputSchema: { type: "object", required: ["repo_path"], properties: { repo_path: { type: "string" }, project: { type: "string" } } } },
-                        { name: "list_projects", inputSchema: { type: "object", properties: {} } },
-                        { name: "index_status", inputSchema: { type: "object", properties: { project: { type: "string" }, repo_path: { type: "string" } } } },
-                        { name: "get_architecture", inputSchema: { type: "object", properties: { project: { type: "string" }, aspects: { type: "array" } } } },
-                        { name: "search_graph", inputSchema: { type: "object", properties: { project: { type: "string" }, name_pattern: { type: "string" }, limit: { type: "number" } } } },
-                        { name: "semantic_query", inputSchema: { type: "object", required: ["query"], properties: { project: { type: "string" }, query: { type: "string" }, limit: { type: "number" } } } },
-                        { name: "trace_path", inputSchema: { type: "object", required: ["function_name"], properties: { project: { type: "string" }, function_name: { type: "string" }, direction: { type: "string" }, depth: { type: "number" } } } },
-                        { name: "detect_changes", inputSchema: { type: "object", properties: { project: { type: "string" }, git_diff: { type: "string" }, scope: { type: "string" } } } },
-                        { name: "check_index_coverage", inputSchema: { type: "object", properties: { project: { type: "string" }, paths: { type: "array" } } } },
-                        { name: "get_code_snippet", inputSchema: { type: "object", required: ["qualified_name"], properties: { project: { type: "string" }, qualified_name: { type: "string" } } } }
-                      ]
-                    }
+                    result: { tools }
                   }) + "\n"
                 )
               );
@@ -208,6 +219,30 @@ function createMockMcpSpawn(toolHandler) {
           } else if (msg.method === "tools/call") {
             const toolName = msg.params?.name;
             const toolArgs = msg.params?.arguments || {};
+
+            // Strict Schema Check: verify that caller sent NO undeclared properties
+            const schema = UPSTREAM_TOOL_SCHEMAS[toolName];
+            if (schema && schema.properties) {
+              const allowed = new Set(Object.keys(schema.properties));
+              for (const key of Object.keys(toolArgs)) {
+                if (!allowed.has(key)) {
+                  setImmediate(() => {
+                    stdout.emit(
+                      "data",
+                      Buffer.from(
+                        JSON.stringify({
+                          jsonrpc: "2.0",
+                          id: msg.id,
+                          error: { code: -32602, message: `Strict schema violation: undeclared property '${key}' passed to '${toolName}'` }
+                        }) + "\n"
+                      )
+                    );
+                  });
+                  return;
+                }
+              }
+            }
+
             const res = toolHandler ? toolHandler(toolName, toolArgs) : defaultToolHandler(toolName, toolArgs);
             setImmediate(() => {
               stdout.emit(
@@ -301,20 +336,28 @@ function defaultToolHandler(name, args) {
         paths: [["runIssue", args.function_name, "issuePlan"]],
         coverage: "covered"
       };
-    case "detect_changes":
+    case "detect_changes": {
+      let changed = ["lib/runtime.js"];
+      if (args.git_diff) {
+        const matches = [...args.git_diff.matchAll(/diff --git a\/(\S+) b\/\S+/g)].map((m) => m[1]);
+        if (matches.length > 0) changed = matches;
+      } else if (Array.isArray(args.changed_files) && args.changed_files.length > 0) {
+        changed = args.changed_files;
+      }
       return {
-        changed_files: args.changed_files || ["lib/runtime.js"],
+        changed_files: changed,
         affected_symbols: ["handleImplementation"],
         callers: ["runIssue"],
         dependents: ["test/phase-f-observability.test.js"],
         risk: "low",
-        reasons: ["1 modified function in core runtime"],
+        reasons: ["modified files in changeset"],
         coverage: "covered"
       };
+    }
     case "check_index_coverage":
       return {
         status: "covered",
-        checked_paths: args.paths || args.files || [],
+        checked_paths: args.paths || [],
         gaps: [],
         coverage_ratio: 1.0,
         warnings: []
@@ -363,9 +406,9 @@ function request(server, pathStr, options = {}) {
   });
 }
 
-// ── Test 1: Provider Lifecycle, Safe Environment & Buffer Bounds ────────────
+// ── Test 1: Provider Lifecycle, Safe Env & Buffer Bounds ────────────────────
 
-test("1. Provider Lifecycle: disabled, unavailable, MCP handshake, env sanitization with CBM_ALLOWED_ROOT, maxBufferSize", async () => {
+test("1. Provider Lifecycle: disabled, unavailable, MCP handshake, env sanitization with authoritative CBM_ALLOWED_ROOT, maxBufferSize", async () => {
   const store = makeTestStore();
 
   // A. Disabled provider returns explicit disabled state
@@ -398,19 +441,20 @@ test("1. Provider Lifecycle: disabled, unavailable, MCP handshake, env sanitizat
   assert.equal(unavailHealth.available, false);
   assert.ok(unavailHealth.warning.includes("ENOENT") || unavailHealth.warning.includes("unavailable"));
 
-  // C. Environment sanitization: secrets/tokens stripped, CBM_ALLOWED_ROOT set
+  // C. Environment sanitization: secrets/tokens stripped, CBM_ALLOWED_ROOT set and immune to customEnv override
   process.env.JIRA_API_TOKEN = "secret-jira-token-999";
   process.env.GITHUB_TOKEN = "ghp_secretGithubToken123";
   process.env.OPENAI_API_KEY = "sk-proj-superSecret";
 
-  const safeEnv = buildSafeMcpEnv({ SAFE_CUSTOM_VAR: "customVal" }, "/tmp/repo");
+  const safeEnv = buildSafeMcpEnv({ SAFE_CUSTOM_VAR: "customVal", CBM_ALLOWED_ROOT: "/" }, "/tmp/repo");
   assert.equal(safeEnv.JIRA_API_TOKEN, undefined, "Jira token must not leak to MCP process");
   assert.equal(safeEnv.GITHUB_TOKEN, undefined, "GitHub token must not leak to MCP process");
   assert.equal(safeEnv.OPENAI_API_KEY, undefined, "OpenAI API key must not leak to MCP process");
   assert.equal(safeEnv.SAFE_CUSTOM_VAR, "customVal");
-  assert.ok(safeEnv.CBM_ALLOWED_ROOT, "CBM_ALLOWED_ROOT must be set");
+  assert.notEqual(safeEnv.CBM_ALLOWED_ROOT, "/", "customEnv.CBM_ALLOWED_ROOT = '/' must NOT replace configured canonical repo root");
+  assert.ok(safeEnv.CBM_ALLOWED_ROOT.includes("repo") || safeEnv.CBM_ALLOWED_ROOT.includes("tmp"));
 
-  // D. Successful MCP handshake & tool discovery
+  // D. Successful MCP handshake & tool discovery with strict schema adherence
   const mockSpawn = createMockMcpSpawn();
   const okProvider = new McpCodeIntelligenceProvider(
     "codebase-memory",
@@ -510,7 +554,7 @@ test("2. Real Index Lifecycle & Symlink Path Boundary: unindexed -> index_reposi
 
 // ── Test 3: Real MCP Upstream Tool Schemas ──────────────────────────────────
 
-test("3. Real Upstream Tool Schemas: get_code_snippet (qualified_name), search_graph (name_pattern), trace_path (function_name)", async () => {
+test("3. Real Upstream Tool Schemas: get_code_snippet (qualified_name), search_graph (name_pattern), trace_path (function_name), strict schema check", async () => {
   const mockSpawn = createMockMcpSpawn();
   const provider = new McpCodeIntelligenceProvider(
     "codebase-memory",
@@ -518,25 +562,29 @@ test("3. Real Upstream Tool Schemas: get_code_snippet (qualified_name), search_g
     { spawn: mockSpawn }
   );
 
-  // 1. getArchitecture
+  // 1. getArchitecture (passes only project and aspects)
   const arch = await provider.getArchitecture({ project: "agent-scaffold" });
   assert.equal(arch.provider, "codebase-memory");
   assert.equal(arch.project, "agent-scaffold");
 
-  // 2. searchCode (uses search_graph / semantic_query with project)
+  // 2. searchCode (passes only project, name_pattern, limit)
   const search = await provider.searchCode("handleImplementation", { project: "agent-scaffold" });
   assert.equal(search.query, "handleImplementation");
   assert.equal(search.matches.length, 1);
   assert.equal(search.matches[0].symbol, "handleImplementation");
   assert.equal(search.matches[0].file, "lib/runtime.js");
 
-  // 3. tracePath (uses function_name per real upstream schema)
+  // 3. tracePath (passes only project, function_name, direction, depth)
   const trace = await provider.tracePath({ project: "agent-scaffold", symbol: "handleImplementation" });
   assert.equal(trace.symbol, "handleImplementation");
   assert.equal(trace.callers.length, 1);
   assert.deepEqual(trace.paths, [["runIssue", "handleImplementation", "issuePlan"]]);
 
-  // 4. getSnippet (uses qualified_name per real upstream schema)
+  // 4. detectChanges (passes only project, git_diff, scope)
+  const diffImpact = await provider.detectChanges({ project: "agent-scaffold", diff: "diff --git a/lib/runtime.js b/lib/runtime.js" });
+  assert.ok(diffImpact.changedFiles.includes("lib/runtime.js"));
+
+  // 5. getSnippet (passes only project, qualified_name)
   const snip = await provider.getSnippet({ project: "agent-scaffold", file: "lib/runtime.js", symbol: "handleImplementation" });
   assert.ok(snip.content.includes("handleImplementation"));
 
@@ -566,7 +614,6 @@ test("4. Production Planning-to-Execution Flow: dispatch execute:true passes exa
     async transition() { return { ok: true }; }
   };
 
-  let executedPrompt = null;
   let executedPlan = null;
 
   const customRuntime = {
@@ -672,14 +719,14 @@ test("5. Historical Evidence Immutability: run pinned to G1 remains G1 when grap
   assert.equal(obsHistorical.codeIntelligence.generation, "G1");
 });
 
-// ── Test 6: Production Review Lifecycle ─────────────────────────────────────
+// ── Test 6: Production Review Lifecycle (Real Execution Prompt Path) ─────────
 
-test("6. Production Review Lifecycle: implementation SHA diff -> review impact intelligence -> reviewer prompt", async () => {
+test("6. Production Review Lifecycle: execution path verifies changed files from review intelligence appear in actual reviewer prompt", async () => {
   const store = makeTestStore();
   const mockSpawn = createMockMcpSpawn();
   const settings = makeSettings(store);
 
-  // Create review-queued run
+  // Create review-queued run with implementationSha
   const implRunId = store.createRun("PACE-301", {
     summary: "Review implementation diff",
     allowedPaths: ["lib/**"],
@@ -714,24 +761,51 @@ test("6. Production Review Lifecycle: implementation SHA diff -> review impact i
   assert.ok(reviewPlan.reviewIntelligence, "Review plan must retain reviewIntelligence");
   assert.deepEqual(reviewPlan.reviewIntelligence.changedFiles, ["lib/runtime.js", "lib/secret-impact.js"]);
 
-  let capturedReviewerPrompt = null;
-  const reviewResult = handleReview(settings, issue, false, {
-    spawnSync: () => ({ status: 0, stdout: "" }),
+  let capturedPrompt = null;
+  const customRuntime = {
+    spawnSync: (cmd, args) => {
+      if (cmd === "git") {
+        return { status: 0, stdout: "1111222233334444555566667777888899990000\n" };
+      }
+      if (cmd === "codex" && args[0] === "exec") {
+        // Find prompt in args
+        const promptIdx = args.findIndex((a) => a === "--prompt" || a === "-p");
+        if (promptIdx !== -1) {
+          capturedPrompt = args[promptIdx + 1];
+        } else {
+          capturedPrompt = args[args.length - 1];
+        }
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            verdict: "clean",
+            evidence: [{
+              id: "clean-1",
+              severity: "minor",
+              category: "correctness",
+              problem: "Verified implementation against review intelligence",
+              file: "lib/runtime.js"
+            }]
+          })
+        };
+      }
+      return { status: 0, stdout: "{}\n" };
+    },
     spawn: mockSpawn
-  }, { plan: reviewPlan });
+  };
+
+  // Run handleReview in real execute:true mode
+  const reviewResult = handleReview(settings, issue, true, customRuntime, { plan: reviewPlan });
 
   assert.equal(reviewResult.exitCode, 0);
-  assert.equal(reviewResult.output.mode, "dry-run");
-
-  // Prompt formatting contains the impact evidence
-  const promptText = formatReviewIntelligencePromptSection(reviewPlan.reviewIntelligence);
-  assert.ok(promptText.includes("lib/secret-impact.js"), "Changed files from review intelligence must appear in prompt text");
-  assert.ok(promptText.includes("### REVIEW INTELLIGENCE"));
+  assert.ok(capturedPrompt, "Executor must be called with review prompt");
+  assert.ok(capturedPrompt.includes("lib/secret-impact.js"), "Changed file existing only in reviewIntelligence must appear in actual reviewer prompt");
+  assert.ok(capturedPrompt.includes("### REVIEW INTELLIGENCE"));
 });
 
-// ── Test 7: Production Rework Lifecycle ─────────────────────────────────────
+// ── Test 7: Production Rework Lifecycle (Real Automatic Planning & Prompt) ───
 
-test("7. Production Rework Lifecycle: originating G1 intelligence preserved, new rework intelligence collected separately", async () => {
+test("7. Production Rework Lifecycle: review failure -> rework dispatch -> originating G1 remains pinned -> fresh rework intelligence collected -> worker prompt contains both", async () => {
   const store = makeTestStore();
   const mockSpawn = createMockMcpSpawn();
   const settings = makeSettings(store);
@@ -775,24 +849,64 @@ test("7. Production Rework Lifecycle: originating G1 intelligence preserved, new
     labels: ["agent-ready"]
   };
 
-  // Collect fresh rework intelligence for the rework cycle
-  const reworkIntel = await collectReviewIntelligence(settings, issue, ["lib/store.js"], {
-    runtime: { spawn: mockSpawn }
+  const failedRun = store.getRun(originatingRunId);
+
+  // Execute issuePlanWithIntelligence without manual reworkCodeIntelligence injection
+  const reworkPlan = await issuePlanWithIntelligence(settings, issue, {
+    store,
+    action: "rework",
+    originatingRun: failedRun,
+    runtime: {
+      spawnSync: () => ({ status: 0, stdout: "" }),
+      spawn: mockSpawn
+    }
   });
 
-  let executedPlan = null;
-  const reworkResult = handleRework(settings, issue, false, {
-    spawnSync: () => ({ status: 0, stdout: "" }),
+  assert.equal(reworkPlan.configSnapshot.originatingCodeIntelligence.generation, "G1", "Originating generation G1 must be preserved");
+  assert.ok(reworkPlan.reworkCodeIntelligence, "Rework intelligence must be automatically collected");
+  assert.ok(reworkPlan.configSnapshot.reworkCodeIntelligence, "Rework intelligence must be pinned into configSnapshot");
+  assert.deepEqual(reworkPlan.reworkCodeIntelligence.changedFiles, ["lib/store.js"], "Rework intelligence must automatically target review failure files");
+
+  let capturedWorkerPrompt = null;
+  const customRuntime = {
+    spawnSync: (cmd, args) => {
+      if (cmd === "git") {
+        if (args.includes("status")) {
+          return { status: 0, stdout: "" };
+        }
+        return { status: 0, stdout: "abc1234\n" };
+      }
+      if (cmd === "codex" && args[0] === "exec") {
+        const promptIdx = args.findIndex((a) => a === "--prompt" || a === "-p");
+        if (promptIdx !== -1) {
+          capturedWorkerPrompt = args[promptIdx + 1];
+        } else {
+          capturedWorkerPrompt = args[args.length - 1];
+        }
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Fixed transaction lock",
+            changed_files: [],
+            validation_commands: [],
+            blockers: [],
+            risks: []
+          })
+        };
+      }
+      return { status: 0, stdout: "{}\n" };
+    },
     spawn: mockSpawn
-  }, {
-    reworkCodeIntelligence: reworkIntel
-  });
+  };
 
+  const reworkResult = handleImplementation(settings, issue, true, customRuntime, { plan: reworkPlan });
   assert.equal(reworkResult.exitCode, 0);
-  assert.equal(reworkResult.output.mode, "dry-run");
-  assert.equal(reworkResult.output.configSnapshot.originatingCodeIntelligence.generation, "G1");
-  assert.equal(reworkResult.output.configSnapshot.reworkCodeIntelligence.provider, "codebase-memory");
-  assert.deepEqual(reworkResult.output.configSnapshot.reworkCodeIntelligence.changedFiles, ["lib/store.js"]);
+  assert.ok(capturedWorkerPrompt, "Worker prompt must be built");
+  assert.ok(capturedWorkerPrompt.includes("### ORIGINAL CODE INTELLIGENCE"), "Worker prompt must include original code intelligence section");
+  assert.ok(capturedWorkerPrompt.includes("gen: G1"), "Worker prompt must display originating generation G1");
+  assert.ok(capturedWorkerPrompt.includes("### REWORK IMPACT INTELLIGENCE"), "Worker prompt must include rework impact intelligence section");
+  assert.ok(capturedWorkerPrompt.includes("lib/store.js"), "Worker prompt must include the rework file target");
 });
 
 // ── Test 8: Coverage-Aware Claims ───────────────────────────────────────────
@@ -822,7 +936,7 @@ test("8. Coverage-Aware Claims: partial coverage surfaces warnings and prevents 
 
 // ── Test 9: Security & Factory Enforcement ──────────────────────────────────
 
-test("9. Security & Factory Enforcement: prompt injection treated as data, graft-mcp factory rejection", async () => {
+test("9. Security & Factory Enforcement: prompt injection treated as data, graft-mcp factory rejection, CBM_ALLOWED_ROOT override rejection", async () => {
   const store = makeTestStore();
 
   // A. Malicious code comment with prompt injection
@@ -894,6 +1008,19 @@ test("9. Security & Factory Enforcement: prompt injection treated as data, graft
     () => createCodeIntelligenceProvider(graftSettings),
     /Graft provider is not yet supported/
   );
+
+  // C. Boundary path validation rejection for snippet outside repo
+  const provider = new McpCodeIntelligenceProvider(
+    "codebase-memory",
+    { enabled: true, command: ["codebase-memory-mcp"], cwd: settings.repoPath },
+    { spawn: injectionSpawn }
+  );
+
+  await assert.rejects(
+    provider.getSnippet({ repoPath: settings.repoPath, file: path.join(os.tmpdir(), "secret.txt") }),
+    /outside the authorized roots/
+  );
+  provider.close();
 });
 
 // ── Test 10: Observability API & Truthful Representation ────────────────────
@@ -960,7 +1087,7 @@ test("10. Observability API & Truthful Representation: /api/observability/runs/:
 
 // ── Test 11: Optional Live Binary Integration Test ──────────────────────────
 
-test("11. Optional Live Binary Integration Test: smoke test against real codebase-memory-mcp binary if on PATH", async (t) => {
+test("11. Optional Live Binary Integration Test: exercise health, index, searchCode, tracePath, getSnippet if on PATH", async (t) => {
   let hasBinary = false;
   try {
     const checkCmd = process.platform === "win32" ? "where codebase-memory-mcp" : "which codebase-memory-mcp";
@@ -976,17 +1103,33 @@ test("11. Optional Live Binary Integration Test: smoke test against real codebas
   }
 
   const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "live-cbm-"));
-  const sampleFile = path.join(tmpRepo, "sample.js");
-  fs.writeFileSync(sampleFile, "export function sampleFunction() { return 42; }\n");
+  const mathFile = path.join(tmpRepo, "math.js");
+  fs.writeFileSync(mathFile, "export function add(a, b) {\n  return a + b;\n}\n");
+  const appFile = path.join(tmpRepo, "app.js");
+  fs.writeFileSync(appFile, "import { add } from './math.js';\nexport function main() {\n  return add(2, 3);\n}\n");
 
   const provider = new McpCodeIntelligenceProvider("live-cbm", {
     enabled: true,
-    command: ["codebase-memory-mcp"]
+    command: ["codebase-memory-mcp"],
+    cwd: tmpRepo
   });
 
   try {
     const health = await provider.health(tmpRepo);
-    assert.ok(health.available);
+    assert.ok(health.available, "Live binary health check must report available");
+
+    const search = await provider.searchCode("add", { repoPath: tmpRepo });
+    assert.ok(Array.isArray(search.matches), "searchCode must return matches array");
+
+    if (health.capabilities.includes("trace_path")) {
+      const trace = await provider.tracePath({ repoPath: tmpRepo, symbol: "add" });
+      assert.ok(trace.symbol === "add");
+    }
+
+    if (health.capabilities.includes("get_code_snippet")) {
+      const snip = await provider.getSnippet({ repoPath: tmpRepo, file: mathFile, symbol: "add" });
+      assert.ok(snip.content);
+    }
   } finally {
     provider.close();
   }
