@@ -1394,38 +1394,193 @@ async function openDecisionTrace(issueKey) {
   }
 }
 
+let currentObsWindow = "24h";
+
+async function renderObservability() {
+  const liveGrid = document.querySelector("#obs-live-grid");
+  const providersGrid = document.querySelector("#obs-providers-grid");
+  const runsTableBody = document.querySelector("#obs-runs-table-body");
+  if (!liveGrid || !providersGrid || !runsTableBody) return;
+
+  try {
+    const res = await fetch(`/api/observability/summary?window=${currentObsWindow}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.ok) return;
+
+    // 1. Live & Queued
+    const liveRuns = (data.runs || []).filter(r => ["queued", "started", "model_selected", "progress", "executing", "verifying"].includes(r.state));
+    if (liveRuns.length === 0) {
+      liveGrid.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem; grid-column: 1/-1;">Şu anda aktif çalışan veya kuyrukta bekleyen işlem yok.</div>`;
+    } else {
+      liveGrid.innerHTML = liveRuns.map(r => `
+        <div class="provider-health-card">
+          <div class="ph-top">
+            <span class="badge badge-key">${r.issueKey}</span>
+            <span class="badge status-${r.state}">${STATUS_LABELS[r.state] || r.state}</span>
+          </div>
+          <div class="ph-stats-grid">
+            <div class="ph-stat-cell"><span>Rol / Agent</span><strong>${r.taskAgent}</strong></div>
+            <div class="ph-stat-cell"><span>Provider / Model</span><strong>${r.provider} / ${r.model || '—'}</strong></div>
+            <div class="ph-stat-cell"><span>Süre</span><strong>${r.durationSeconds}s</strong></div>
+            <div class="ph-stat-cell"><span>Token</span><strong>${r.usage?.available ? (r.usage.totalTokens || '—') : '—'}</strong></div>
+          </div>
+          <button class="pm-btn pm-btn-view" style="width: 100%; margin-top: 4px;" onclick="openTelemetryDetail('${r.runId}')">Detay ve Timeline</button>
+        </div>
+      `).join("");
+    }
+
+    // 2. Providers
+    const providers = data.providers || [];
+    if (providers.length === 0) {
+      providersGrid.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem; grid-column: 1/-1;">Kayıtlı provider bulunamadı.</div>`;
+    } else {
+      providersGrid.innerHTML = providers.map(p => `
+        <div class="provider-health-card">
+          <div class="ph-top">
+            <span class="ph-provider-name">${p.provider.toUpperCase()}</span>
+            <span class="ph-status-badge status-${p.status}">${p.status.toUpperCase()}</span>
+          </div>
+          <div class="ph-stats-grid">
+            <div class="ph-stat-cell"><span>Başarı Oranı</span><strong>${p.successRate !== null ? Math.round(p.successRate * 100) + '%' : '—'}</strong></div>
+            <div class="ph-stat-cell"><span>Ort. Süre</span><strong>${p.averageDurationMs ? Math.round(p.averageDurationMs / 1000) + 's' : '—'}</strong></div>
+            <div class="ph-stat-cell"><span>Son Başarılar</span><strong>${p.recentSuccesses}</strong></div>
+            <div class="ph-stat-cell"><span>Son Hatalar</span><strong>${p.recentFailures}</strong></div>
+          </div>
+          ${p.cooldownUntil ? `<div style="color: #fb923c; font-size: 0.72rem; margin-top: 4px;">⏳ Cooldown: ${formatTime(p.cooldownUntil, true)}</div>` : ''}
+        </div>
+      `).join("");
+    }
+
+    // 3. Recent Runs Table
+    const runs = data.runs || [];
+    if (runs.length === 0) {
+      runsTableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 24px;">Bu zaman aralığında kaydedilmiş run bulunmuyor.</td></tr>`;
+    } else {
+      runsTableBody.innerHTML = runs.map(r => `
+        <tr>
+          <td><span class="badge badge-key">${r.issueKey}</span></td>
+          <td><strong>${r.taskAgent}</strong> <small style="color: var(--muted); display: block;">${r.role}</small></td>
+          <td>${r.provider} <small style="color: var(--muted); display: block;">${r.model || '—'}</small></td>
+          <td><span class="badge status-${r.state}">${STATUS_LABELS[r.state] || r.state}</span></td>
+          <td>${r.durationSeconds}s</td>
+          <td>${r.usage?.available ? `<strong>${r.usage.totalTokens || 0}</strong> tok` : '<span style="color: var(--muted);">—</span>'}</td>
+          <td>${formatTime(r.createdAt, true)}</td>
+          <td><button class="pm-btn pm-btn-view" onclick="openTelemetryDetail('${r.runId}')">Timeline</button></td>
+        </tr>
+      `).join("");
+    }
+
+  } catch (err) {
+    console.error("renderObservability error:", err);
+  }
+}
+
+async function openTelemetryDetail(runId) {
+  const modal = document.querySelector("#telemetry-drawer-modal");
+  const body = document.querySelector("#telem-drawer-body");
+  const pill = document.querySelector("#telem-run-pill");
+  const title = document.querySelector("#telem-drawer-title");
+  const summary = document.querySelector("#telem-run-summary");
+  if (!modal || !body) return;
+
+  modal.hidden = false;
+  body.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">Telemetri verisi yükleniyor...</div>`;
+
+  try {
+    const res = await fetch(`/api/observability/runs/${runId}`);
+    if (!res.ok) throw new Error("Telemetri verisi alınamadı");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Telemetri hatası");
+
+    pill.textContent = data.identity.issueKey;
+    title.textContent = `Run Telemetry: ${data.identity.issueKey}`;
+    summary.textContent = `Rol: ${data.identity.role} · Agent: ${data.agent.taskAgent} · Provider: ${data.execution.provider} (${data.execution.model || 'default'})`;
+
+    const timings = data.timing || {};
+    const usage = data.usage || {};
+    const events = data.events || [];
+
+    let eventsHtml = "";
+    if (events.length === 0) {
+      eventsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Olay kaydı bulunmuyor.</p>`;
+    } else {
+      eventsHtml = events.map(ev => `
+        <div class="timeline-item">
+          <div class="timeline-top">
+            <span class="actor-badge actor-runtime">${ev.stage}</span>
+            <span class="timeline-time">${formatTime(ev.timestamp, true)}</span>
+          </div>
+          <div style="color: #f1f5f9; font-weight: 500;">
+            ${ev.status.toUpperCase()} ${ev.model ? `· model: ${ev.model}` : ''}
+            ${ev.usage ? `· ${ev.usage.totalTokens || 0} tokens` : ''}
+          </div>
+          ${ev.error ? `<div style="color: #f87171; font-size: 0.75rem; margin-top: 2px;">⚠️ ${ev.error.safeMessage || ev.error.category}</div>` : ''}
+        </div>
+      `).join("");
+    }
+
+    body.innerHTML = `
+      <div class="trace-section">
+        <h4>⚡ Yürütme ve Süre Bilgileri</h4>
+        <div class="trace-grid-two">
+          <div class="trace-info-cell"><span>Kuyruk Bekleme</span><strong>${timings.queueWaitMs !== null ? timings.queueWaitMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Yürütme Süresi</span><strong>${timings.executionDurationMs !== null ? timings.executionDurationMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Uçtan Uca Süre</span><strong>${timings.endToEndDurationMs !== null ? timings.endToEndDurationMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Deneme / Attempt</span><strong>${timings.attempt + 1} / ${timings.totalAttempts}</strong></div>
+        </div>
+      </div>
+
+      <div class="trace-section">
+        <h4>◇ Normalized Token Usage Ledger</h4>
+        <div class="trace-grid-two">
+          <div class="trace-info-cell"><span>Girdi Token</span><strong>${usage.inputTokens !== null ? usage.inputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Çıktı Token</span><strong>${usage.outputTokens !== null ? usage.outputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Cached Girdi</span><strong>${usage.cachedInputTokens !== null ? usage.cachedInputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Toplam Token</span><strong>${usage.totalTokens !== null ? usage.totalTokens : '—'}</strong></div>
+        </div>
+        ${data.cost ? `
+          <div style="margin-top: 8px; font-size: 0.8rem; color: #4ade80;">
+            💰 <strong>Hesaplanan Maliyet:</strong> ${data.cost.amount} ${data.cost.currency} (v${data.cost.pricingVersion})
+          </div>
+        ` : ''}
+      </div>
+
+      <div class="trace-section">
+        <h4>📜 Telemetri Olay Çizelgesi (Ordered Lifecycle Events)</h4>
+        <div class="timeline-list">${eventsHtml}</div>
+      </div>
+    `;
+
+  } catch (err) {
+    body.innerHTML = `<div class="error-banner">Hata: ${err.message}</div>`;
+  }
+}
+
+const telemCloseBtn = document.querySelector("#telem-close-btn");
+if (telemCloseBtn) {
+  telemCloseBtn.addEventListener("click", () => {
+    const modal = document.querySelector("#telemetry-drawer-modal");
+    if (modal) modal.hidden = true;
+  });
+}
+
+document.querySelectorAll(".window-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".window-btn").forEach(b => b.classList.remove("is-active"));
+    btn.classList.add("is-active");
+    currentObsWindow = btn.dataset.window || "24h";
+    renderObservability();
+  });
+});
+
 function renderTabs() {
   renderPmMessages();
   renderPmDecisions();
   renderPmWorkspace();
+  renderObservability();
   renderAgentDefinitions();
   renderUsageEvents();
-}
-
-setupPmSubNav();
-
-if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
-  const tabButtons = document.querySelectorAll('.tab-button');
-  if (Array.isArray(tabButtons) || (tabButtons && typeof tabButtons.forEach === "function")) {
-    tabButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        tabButtons.forEach(b => b.classList.remove('is-active'));
-        const contents = document.querySelectorAll('.tab-content');
-        if (contents && typeof contents.forEach === "function") {
-          contents.forEach(c => {
-            c.classList.remove('is-active');
-            c.hidden = true;
-          });
-        }
-        button.classList.add('is-active');
-        const target = getElem(button.dataset.target);
-        if (target) {
-          target.classList.add('is-active');
-          target.hidden = false;
-        }
-      });
-    });
-  }
 }
 
 setupPmSubNav();
@@ -1438,8 +1593,10 @@ document.querySelectorAll('.tab-button').forEach(button => {
     
     button.classList.add('is-active');
     const target = document.getElementById(button.dataset.target);
-    target.classList.add('is-active');
-    target.hidden = false;
+    if (target) {
+      target.classList.add('is-active');
+      target.hidden = false;
+    }
   });
 });
 

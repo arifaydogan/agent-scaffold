@@ -103,6 +103,7 @@
       <nav class="main-tabs" aria-label="Ana Navigasyon">
         <button class="tab-button is-active" data-target="workspace-view">İşletim Paneli</button>
         <button class="tab-button" data-target="pm-view">PM Workspace</button>
+        <button class="tab-button" data-target="observability-view">Observability</button>
         <button class="tab-button" data-target="agents-view">Agent & Telemetry</button>
       </nav>
 
@@ -306,6 +307,90 @@
             </div>
             <div id="trace-drawer-body" class="trace-body">
               <!-- Populated dynamically via GET /api/pm/work-items/:key -->
+            </div>
+          </div>
+        </div>
+      <!-- Phase F: Observability & Telemetry View -->
+      <div id="observability-view" class="tab-content" hidden>
+        <section class="panel observability-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Operational Metrics & Health</p>
+              <h2>Observability & Telemetry</h2>
+            </div>
+            <div class="obs-window-controls">
+              <span class="window-label">Zaman Penceresi:</span>
+              <div class="window-buttons">
+                <button class="window-btn" data-window="1h">1s</button>
+                <button class="window-btn is-active" data-window="24h">24s</button>
+                <button class="window-btn" data-window="7d">7g</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live & Queued Executions -->
+          <div class="obs-section">
+            <div class="obs-section-header">
+              <h3>Canlı ve Kuyruktaki İşlemler</h3>
+              <p class="section-desc">Şu anda çalışan veya yürütme sırası bekleyen provider süreçleri.</p>
+            </div>
+            <div id="obs-live-grid" class="obs-live-grid">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Provider Health & Capacity -->
+          <div class="obs-section">
+            <div class="obs-section-header">
+              <h3>Provider Sağlığı ve Kapasite</h3>
+              <p class="section-desc">Gerçek çalışma gözlemlerine dayalı provider sağlık durumu ve cooldown takibi.</p>
+            </div>
+            <div id="obs-providers-grid" class="obs-providers-grid">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Recent Runs & Token Ledger -->
+          <div class="obs-section">
+            <div class="obs-section-header">
+              <h3>Son Yürütmeler ve Token Kullanımı</h3>
+              <p class="section-desc">Durable telemetry zaman çizelgesi, süreler ve normalize edilmiş token ledgeri.</p>
+            </div>
+            <div class="obs-runs-table-container">
+              <table class="obs-runs-table">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Rol / Agent</th>
+                    <th>Provider / Model</th>
+                    <th>Durum</th>
+                    <th>Süre</th>
+                    <th>Token Kullanımı</th>
+                    <th>Tarih</th>
+                    <th>Detay</th>
+                  </tr>
+                </thead>
+                <tbody id="obs-runs-table-body">
+                  <!-- Rendered dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- Run Telemetry Timeline Drawer / Modal -->
+        <div id="telemetry-drawer-modal" class="trace-modal-backdrop" hidden>
+          <div class="trace-drawer" role="dialog" aria-modal="true" aria-labelledby="telem-drawer-title">
+            <div class="trace-header">
+              <div>
+                <span id="telem-run-pill" class="badge badge-key">—</span>
+                <h2 id="telem-drawer-title">Run Telemetry Timeline</h2>
+                <p id="telem-run-summary" class="trace-summary-text">—</p>
+              </div>
+              <button id="telem-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
+            </div>
+            <div id="telem-drawer-body" class="trace-body">
+              <!-- Populated dynamically via GET /api/observability/runs/:runId -->
             </div>
           </div>
         </div>

@@ -1073,3 +1073,143 @@ tbody tr:last-child td { border-bottom: 0; }
 .actor-task_agent { background: rgba(34, 197, 94, 0.2); color: #86efac; }
 .actor-reviewer { background: rgba(251, 191, 36, 0.2); color: #fde68a; }
 .actor-runtime { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+
+/* ── Phase F: Observability Styles ────────────────────────────────────────── */
+.obs-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.window-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.window-buttons {
+  display: flex;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.window-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.window-btn.is-active, .window-btn:hover {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+
+.obs-section {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.obs-section-header h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin: 0;
+}
+
+.obs-live-grid, .obs-providers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.provider-health-card {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ph-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ph-provider-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #f8fafc;
+}
+
+.ph-status-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.status-healthy { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
+.status-degraded { background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.35); }
+.status-cooling_down { background: rgba(249, 115, 22, 0.2); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.35); }
+.status-unavailable { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+.status-unknown { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.25); }
+
+.ph-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  font-size: 0.75rem;
+}
+
+.ph-stat-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ph-stat-cell span { color: var(--muted); font-size: 0.7rem; }
+.ph-stat-cell strong { color: #f1f5f9; }
+
+.obs-runs-table-container {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.obs-runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  text-align: left;
+}
+
+.obs-runs-table th {
+  background: rgba(30, 41, 59, 0.6);
+  color: var(--muted);
+  padding: 10px 14px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.obs-runs-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.obs-runs-table tr:hover {
+  background: rgba(56, 189, 248, 0.04);
+}
