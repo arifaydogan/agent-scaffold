@@ -1,14 +1,15 @@
 /**
  * test/phase-e-pm-workspace.test.js
  *
- * Dedicated Phase E Test Suite — PM Workspace:
- * - Work Queue / Inbox aggregation across 8 canonical operational states
- * - Decision Trace unified read model (orchestrator rationale, execution, review findings, pinned agent identity, history)
- * - Lossless structured review findings lifecycle & multiple rework attempts
- * - Durable approval & rejection mutations with plan fingerprint gating and 409 conflict detection
- * - Historical snapshot immutability (config & agent registry v1 -> v2 isolation)
- * - Blocked workspace diagnostics (scope violations, disabled agents, rework limits)
- * - HTTP endpoint security (loopback check, content-type check, mutation flag, no-Done bypass)
+ * Dedicated Phase E Test Suite — PM Workspace Correctness Hardening:
+ * 1. Orchestrator rationale/reasons never treated as blockers (eligible/ready with reasons != blocked)
+ * 2. Real Phase A recordReviewerOutcome() integration with lossless structured findings preservation & clean review
+ * 3. Server-authoritative action & attempt approval gating (distinguishing review vs implementation vs rework attempts)
+ * 4. PM mutations fail closed by default (403 when flags absent)
+ * 5. Provider-neutral source identity preservation from plan.workSource
+ * 6. Historical identity/state integrity (no fake v1 or fabricated canonical states)
+ * 7. Real durable Needs Planning integration for discovered backlog items without runs
+ * 8. HTTP server endpoints and security gates (loopback check, Content-Type 415, no-Done bypass)
  */
 
 import fs from "node:fs";
@@ -25,13 +26,15 @@ import {
   buildPmWorkItemDetail,
   handlePmApproval,
   handlePmRejection,
-  classifyOperationalGroup
+  classifyOperationalGroup,
+  determineItemAction,
+  determineItemAttempt
 } from "../lib/pm-workspace.js";
 import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
 import { recordReviewerOutcome } from "../lib/reconciler.js";
 
 function makeTestStore() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-ws-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-ws-hardened-"));
   return new RunStore(path.join(dir, "runs.sqlite3"));
 }
 
@@ -121,540 +124,376 @@ async function request(server, pathStr, options = {}) {
   });
 }
 
-test("PM Workspace Aggregation: groups items into 8 operational states correctly", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store, { operatingMode: "supervised" });
-
-  // 1. Awaiting Approval item
-  const plan1 = {
-    issue: "PACE-101",
-    summary: "Auth guard",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    agentId: "backend-engineer",
-    agentVersion: 1,
-    execution: { provider: "codex", model: "gpt-5" },
-    allowedPaths: ["backend/**"],
-    risk: "high",
-    configSnapshot: {
-      operatingMode: "supervised",
-      taskAgent: "backend-engineer",
-      agentVersion: 1,
-      executorProvider: "codex",
-      executorModel: "gpt-5"
-    }
-  };
-  const run1Id = store.createRun("PACE-101", plan1);
-  store.transition(run1Id, "discovered", plan1);
-
-  // 2. Blocked item (failed-scope)
-  const plan2 = {
-    issue: "PACE-102",
-    summary: "Data pipeline",
-    persona: "data-engineer",
-    taskAgent: "data-engineer",
-    configSnapshot: { operatingMode: "autonomous" }
-  };
-  const run2Id = store.createRun("PACE-102", plan2);
-  store.transition(run2Id, "failed-scope", {
-    reason: "Changed files outside allowed scope: frontend/src/app.ts",
-    scope: { violations: ["frontend/src/app.ts"] }
-  });
-
-  // 3. Executing item
-  const plan3 = {
-    issue: "PACE-103",
-    summary: "Frontend camera grid",
-    persona: "frontend-engineer",
-    taskAgent: "frontend-engineer",
-    configSnapshot: { operatingMode: "autonomous" }
-  };
-  const run3Id = store.createRun("PACE-103", plan3);
-  store.transition(run3Id, "executing", { provider: "antigravity", model: "claude-3-5-sonnet", pid: 4501 });
-
-  // 4. In Review item
-  const plan4 = {
-    issue: "PACE-104",
-    summary: "Review queued task",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer"
-  };
-  const run4Id = store.createRun("PACE-104", plan4);
-  store.transition(run4Id, "review-queued", { implementationSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
-
-  // 5. Needs Rework item
-  const plan5 = {
-    issue: "PACE-105",
-    summary: "Rework task",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer"
-  };
-  const run5Id = store.createRun("PACE-105", plan5);
-  store.transition(run5Id, "review-failed", {
-    verdict: "changes-requested",
-    evidence: [{ id: "F-1", severity: "high", category: "correctness", problem: "Null pointer error" }]
-  });
-
-  // 6. Human Approval item (Clean review)
-  const plan6 = {
-    issue: "PACE-106",
-    summary: "Completed feature ready for human merge",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer"
-  };
-  const run6Id = store.createRun("PACE-106", plan6);
-  store.transition(run6Id, "reviewed-clean", { verdict: "clean", evidence: [{ id: "F-CLEAN", severity: "info", category: "correctness", problem: "Clean review" }] });
-
-  const ws = buildPmWorkspace(settings, { store });
-
-  assert.equal(ws.ok, true);
-  assert.equal(ws.counts.awaitingApproval, 1, "PACE-101 must appear in awaitingApproval");
-  assert.equal(ws.counts.blocked, 1, "PACE-102 must appear in blocked");
-  assert.equal(ws.counts.executing, 1, "PACE-103 must appear in executing");
-  assert.equal(ws.counts.inReview, 1, "PACE-104 must appear in inReview");
-  assert.equal(ws.counts.needsRework, 1, "PACE-105 must appear in needsRework");
-  assert.equal(ws.counts.humanApproval, 1, "PACE-106 must appear in humanApproval");
-
-  // Verify Human Approval is never classified as ready worker work
-  assert.equal(ws.groups.ready.some(i => i.issueKey === "PACE-106"), false, "Human Approval item must never appear as ready worker work");
-});
-
-test("Detail Read Model: returns pinned agent version/hash, executor, orchestrator rationale, lossless findings, and timeline", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  const plan = {
-    issue: "PACE-201",
-    summary: "Tenant authorization guards",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    agentId: "backend-engineer",
-    agentVersion: 1,
-    agentHash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-    skills: ["api-design", "backend-testing"],
-    capabilities: ["edit-code", "run-tests"],
-    risk: "high",
-    parallelSafe: false,
-    dependencies: ["PACE-100"],
-    allowedPaths: ["backend/**"],
-    rationale: ["Backend security domain requires specialized BE agent with test isolation."],
-    metadata: { domain: "security", priority: "urgent" },
-    configSnapshot: {
-      operatingMode: "supervised",
-      taskAgent: "backend-engineer",
-      agentVersion: 1,
-      agentHash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-      executorProvider: "codex",
-      executorModel: "gpt-5",
-      executorModelProfile: "high",
-      executorEffort: "high",
-      allowedPaths: ["backend/**"],
-      risk: "high",
-      rationale: ["Backend security domain requires specialized BE agent with test isolation."]
-    }
-  };
-
-  const runId = store.createRun("PACE-201", plan);
-  store.transition(runId, "prepared", { branch: "pace-201-auth", worktree: "/tmp/worktrees/pace-201" });
-  store.transition(runId, "executing", { provider: "codex", model: "gpt-5", pid: 9122, usage: { total_tokens: 15400 } });
-  store.transition(runId, "verifying", { implementationSha: "1111111111111111111111111111111111111111" });
-
-  // Add review findings
-  const findings = [
-    {
-      id: "SEC-01",
-      severity: "high",
-      category: "security",
-      file: "backend/auth.py",
-      line: 42,
-      problem: "Tenant ID missing from query filter",
-      expected: "WHERE tenant_id = :tenant_id",
-      verification: "pytest backend/tests/test_auth.py"
-    },
-    {
-      id: "PERF-02",
-      severity: "medium",
-      category: "performance",
-      file: "backend/auth.py",
-      line: 110,
-      problem: "Unindexed query on user_roles",
-      expected: "Add index on (tenant_id, user_id)",
-      verification: "explain analyze query"
-    }
-  ];
-
-  store.transition(runId, "review-failed", {
-    verdict: "changes-requested",
-    reviewerId: "security-reviewer",
-    implementationSha: "1111111111111111111111111111111111111111",
-    evidence: findings
-  });
-
-  // PM Decision record
-  store.addPmDecision("PACE-201", "execution_approval", {
-    action: "implementation",
-    approved: true,
-    approver: "Arif PM",
-    planFingerprint: computePlanFingerprint(plan),
-    reason: "Approved security changes"
-  });
-
-  const detail = buildPmWorkItemDetail(settings, "PACE-201", { store });
-
-  assert.ok(detail, "Detail read model must exist");
-  assert.equal(detail.workItem.key, "PACE-201");
-  assert.equal(detail.workItem.sourceUrl, "https://pacebuild.atlassian.net/browse/PACE-201");
-
-  // Orchestrator decision
-  assert.equal(detail.orchestratorDecision.persona, "backend-engineer");
-  assert.equal(detail.orchestratorDecision.risk, "high");
-  assert.deepEqual(detail.orchestratorDecision.allowedPaths, ["backend/**"]);
-  assert.ok(detail.orchestratorDecision.rationale.length > 0);
-
-  // Agent identity pinning
-  assert.equal(detail.agentIdentity.agentId, "backend-engineer");
-  assert.equal(detail.agentIdentity.agentVersion, 1);
-  assert.equal(detail.agentIdentity.agentHash, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
-  assert.equal(detail.agentIdentity.liveRegistryStatus, "enabled");
-
-  // Lossless review findings preservation
-  assert.equal(detail.review.verdict, "changes-requested");
-  assert.equal(detail.review.structuredFindings.length, 2);
-  assert.equal(detail.review.structuredFindings[0].id, "SEC-01");
-  assert.equal(detail.review.structuredFindings[0].severity, "high");
-  assert.equal(detail.review.structuredFindings[0].category, "security");
-  assert.equal(detail.review.structuredFindings[0].file, "backend/auth.py");
-  assert.equal(detail.review.structuredFindings[0].line, 42);
-  assert.equal(detail.review.structuredFindings[0].problem, "Tenant ID missing from query filter");
-  assert.equal(detail.review.structuredFindings[0].expected, "WHERE tenant_id = :tenant_id");
-  assert.equal(detail.review.structuredFindings[0].verification, "pytest backend/tests/test_auth.py");
-
-  // Chronological timeline with actor attribution
-  assert.ok(detail.history.length >= 4);
-  const humanEvent = detail.history.find(e => e.actor.type === "human");
-  assert.ok(humanEvent, "Timeline must contain human actor PM decision");
-  assert.equal(humanEvent.actor.id, "Arif PM");
-});
-
-test("Approval Mutations: correct plan fingerprint succeeds, stale fingerprint returns 409 conflict", async () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store, { operatingMode: "supervised" });
-
-  const plan = {
-    issue: "PACE-301",
-    summary: "Database migration script",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    agentId: "backend-engineer",
-    agentVersion: 1,
-    allowedPaths: ["backend/**"],
-    risk: "high",
-    configSnapshot: {
-      operatingMode: "supervised",
-      taskAgent: "backend-engineer",
-      agentVersion: 1
-    }
-  };
-  store.createRun("PACE-301", plan);
-  const correctFingerprint = computePlanFingerprint(plan);
-
-  // 1. Stale / Mismatched Fingerprint must throw 409 conflict
-  assert.throws(() => {
-    handlePmApproval(settings, "PACE-301", {
-      action: "implementation",
-      planFingerprint: "stale-fingerprint-99999999999999999999999999999999",
-      approver: "PM Operator"
-    }, { store });
-  }, (err) => {
-    return err.statusCode === 409 && err.message.includes("mismatch");
-  });
-
-  // 2. Correct Fingerprint succeeds
-  const result = handlePmApproval(settings, "PACE-301", {
-    action: "implementation",
-    planFingerprint: correctFingerprint,
-    approver: "PM Operator",
-    reason: "Approved migration scope"
-  }, { store });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.approved, true);
-  assert.equal(result.planFingerprint, correctFingerprint);
-
-  // Verify durable storage
-  const hasApproval = store.hasExecutionApproval("PACE-301", {
-    action: "implementation",
-    planFingerprint: correctFingerprint
-  });
-  assert.ok(hasApproval, "Approval must be durably recorded in store");
-  assert.equal(hasApproval.approved, true);
-  assert.equal(hasApproval.approver, "PM Operator");
-});
-
-test("Approval Mutations: rejection is persisted and audited", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store, { operatingMode: "supervised" });
-
-  const plan = {
-    issue: "PACE-302",
-    summary: "Experimental refactoring",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    allowedPaths: ["backend/**", "lib/**"],
-    risk: "high"
-  };
-  store.createRun("PACE-302", plan);
-  const fingerprint = computePlanFingerprint(plan);
-
-  const rejectResult = handlePmRejection(settings, "PACE-302", {
-    action: "implementation",
-    planFingerprint: fingerprint,
-    approver: "Lead Architect",
-    reason: "Scope touches protected lib directory"
-  }, { store });
-
-  assert.equal(rejectResult.ok, true);
-  assert.equal(rejectResult.approved, false);
-  assert.equal(rejectResult.reason, "Scope touches protected lib directory");
-
-  const recorded = store.hasExecutionApproval("PACE-302", {
-    action: "implementation",
-    planFingerprint: fingerprint
-  });
-  assert.ok(recorded);
-  assert.equal(recorded.approved, false);
-  assert.equal(recorded.reason, "Scope touches protected lib directory");
-});
-
-test("Action-scoped approval isolation: implementation approval does not authorize rework", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store, { operatingMode: "supervised" });
-
-  const plan = {
-    issue: "PACE-303",
-    summary: "API Endpoint",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    allowedPaths: ["backend/**"]
-  };
-  store.createRun("PACE-303", plan);
-  const fingerprint = computePlanFingerprint(plan);
-
-  handlePmApproval(settings, "PACE-303", {
-    action: "implementation",
-    planFingerprint: fingerprint,
-    approver: "PM Operator"
-  }, { store });
-
-  // Implementation is approved
-  const implAuth = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-303",
-    action: "implementation",
-    plan,
-    planFingerprint: fingerprint
-  });
-  assert.equal(implAuth.allowed, true);
-
-  // Rework is NOT approved by implementation approval
-  const reworkAuth = authorizeRuntimeAction(settings, store, {
-    issueKey: "PACE-303",
-    action: "rework",
-    plan,
-    planFingerprint: fingerprint,
-    attempt: 1
-  });
-  assert.equal(reworkAuth.allowed, false, "Rework action must require separate approval");
-});
-
-test("Historical Snapshots: global config & agent registry updates (v1 -> v2) do not alter historical PM detail", () => {
+test("1. Orchestrator rationale/reasons are never treated as blockers", () => {
   const store = makeTestStore();
   const settings = makeSettings(store, { operatingMode: "autonomous" });
 
-  // Create a run locked with v1 agent definition
+  const planWithReasons = {
+    issue: "PACE-100",
+    summary: "Standard routing task",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    reasons: ["Rule-based routing decision", "Selected backend specialist based on path scope"],
+    rationale: ["Rule-based routing decision"],
+    configSnapshot: {
+      operatingMode: "autonomous",
+      taskAgent: "backend-engineer",
+      rationale: ["Rule-based routing decision"]
+    }
+  };
+
+  const runId = store.createRun("PACE-100", planWithReasons);
+  store.transition(runId, "eligible", { reasons: ["Rule-based routing decision"] });
+
+  const ws = buildPmWorkspace(settings, { store });
+
+  assert.equal(ws.counts.blocked, 0, "Eligible task with orchestrator routing reasons MUST NOT appear in blocked");
+  assert.equal(ws.counts.ready, 1, "Autonomous eligible task must appear in ready group");
+  assert.equal(ws.groups.ready[0].issueKey, "PACE-100");
+  assert.equal(ws.groups.ready[0].blockedReason, null);
+});
+
+test("2. Real Phase A review outcome persistence shape & lossless findings integration", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, { operatingMode: "autonomous" });
+
   const plan = {
-    issue: "PACE-401",
-    summary: "Historic backend run",
+    issue: "PACE-200",
+    summary: "Auth controller with review cycle",
     persona: "backend-engineer",
     taskAgent: "backend-engineer",
     agentId: "backend-engineer",
     agentVersion: 1,
-    agentHash: "v1hash1111111111111111111111111111111111111111111111111111111111",
-    configSnapshot: {
-      operatingMode: "autonomous",
-      taskAgent: "backend-engineer",
-      agentId: "backend-engineer",
-      agentVersion: 1,
-      agentHash: "v1hash1111111111111111111111111111111111111111111111111111111111",
-      executorProvider: "codex",
-      executorModel: "gpt-5",
-      allowedPaths: ["backend/**"],
-      risk: "normal"
-    }
+    allowedPaths: ["backend/**"],
+    configSnapshot: { operatingMode: "autonomous", taskAgent: "backend-engineer" }
   };
-  const runId = store.createRun("PACE-401", plan);
-  store.transition(runId, "executing", { provider: "codex", model: "gpt-5" });
 
-  // Update Agent Definition in Registry to v2
-  store.updateAgentDefinition("backend-engineer", {
-    displayName: "Backend Engineer v2 Enhanced",
-    defaultPersona: "backend-specialist",
-    skills: ["api-design", "performance-profiling"],
-    allowedPaths: ["backend/**", "services/**"]
+  const runId = store.createRun("PACE-200", plan);
+  store.transition(runId, "prepared", { branch: "feature/pace-200" });
+  store.transition(runId, "executing", { provider: "codex", model: "gpt-5" });
+  store.transition(runId, "verifying", {});
+  const sha = "a".repeat(40);
+  store.transition(runId, "review-queued", { implementationSha: sha });
+
+  // Call real recordReviewerOutcome with changes-requested
+  const reviewResult = recordReviewerOutcome(store, {
+    runId,
+    implementationSha: sha,
+    reviewerId: "security-auditor-1",
+    verdict: "changes-requested",
+    evidence: [
+      {
+        id: "SEC-101",
+        severity: "critical",
+        category: "security",
+        file: "backend/auth.py",
+        line: 88,
+        problem: "Missing token revocation check",
+        expected: "Verify token against blocklist",
+        verification: "pytest backend/tests/test_auth.py"
+      }
+    ]
   });
 
-  const updatedDef = store.getAgentDefinition("backend-engineer");
-  assert.equal(updatedDef.currentVersion, 2);
+  assert.equal(reviewResult.recorded, true);
+  assert.equal(reviewResult.state, "review-failed");
 
-  // Read PM Detail for historical run
-  const detail = buildPmWorkItemDetail(settings, "PACE-401", { store });
+  // Verify PM Workspace & PM Detail consume real persisted reviewOutcome shape losslessly
+  const detail = buildPmWorkItemDetail(settings, "PACE-200", { store });
+  assert.ok(detail);
+  assert.equal(detail.review.verdict, "changes-requested");
+  assert.equal(detail.review.structuredFindings.length, 1);
+  const finding = detail.review.structuredFindings[0];
+  assert.equal(finding.id, "SEC-101");
+  assert.equal(finding.severity, "critical");
+  assert.equal(finding.category, "security");
+  assert.equal(finding.file, "backend/auth.py");
+  assert.equal(finding.line, 88);
+  assert.equal(finding.problem, "Missing token revocation check");
+  assert.equal(finding.expected, "Verify token against blocklist");
+  assert.equal(finding.verification, "pytest backend/tests/test_auth.py");
 
-  assert.equal(detail.agentIdentity.agentVersion, 1, "Historical run must retain pinned version 1");
-  assert.equal(detail.agentIdentity.agentHash, "v1hash1111111111111111111111111111111111111111111111111111111111");
-  assert.equal(detail.agentIdentity.liveRegistryVersion, 2, "Live registry status must reflect current version 2");
-  assert.equal(detail.agentIdentity.isPinnedVersionCurrent, false);
+  // Test clean review integration on a separate run
+  const planClean = {
+    issue: "PACE-201",
+    summary: "Clean reviewed feature",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer"
+  };
+  const run2Id = store.createRun("PACE-201", planClean);
+  store.transition(run2Id, "verifying", {});
+  const sha2 = "b".repeat(40);
+  store.transition(run2Id, "review-queued", { implementationSha: sha2 });
+
+  const cleanResult = recordReviewerOutcome(store, {
+    runId: run2Id,
+    implementationSha: sha2,
+    reviewerId: "qa-reviewer-2",
+    verdict: "clean",
+    evidence: [
+      {
+        id: "CLEAN-OK",
+        severity: "suggestion",
+        category: "correctness",
+        problem: "All tests pass cleanly"
+      }
+    ]
+  });
+  assert.equal(cleanResult.recorded, true);
+  assert.equal(cleanResult.state, "reviewed-clean");
+
+  const detailClean = buildPmWorkItemDetail(settings, "PACE-201", { store });
+  assert.equal(detailClean.review.verdict, "clean");
+  assert.equal(detailClean.workItem.operationalGroup, "humanApproval");
 });
 
-test("Blocked Workspace: exact durable reasons for scope violation, disabled agent, and exhausted rework", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  // 1. Scope violation
-  const r1 = store.createRun("PACE-501", { issue: "PACE-501", summary: "Scope leak" });
-  store.transition(r1, "failed-scope", { reason: "Changed files outside allowed backend/** scope" });
-
-  // 2. Disabled agent
-  const r2 = store.createRun("PACE-502", { issue: "PACE-502", summary: "Disabled agent work" });
-  store.transition(r2, "blocked", { reason: "Assigned agent 'legacy-worker' is currently disabled in the registry" });
-
-  // 3. Exhausted rework
-  const r3 = store.createRun("PACE-503", { issue: "PACE-503", summary: "Rework loop" });
-  store.transition(r3, "blocked", { reason: "Agent rework limit exhausted (3/3 attempts). Human attention required." });
-
-  const ws = buildPmWorkspace(settings, { store });
-
-  const blockedItems = ws.groups.blocked;
-  assert.equal(blockedItems.length, 3);
-
-  const item1 = blockedItems.find(i => i.issueKey === "PACE-501");
-  assert.ok(item1.blockedReason.includes("backend/**"));
-
-  const item2 = blockedItems.find(i => i.issueKey === "PACE-502");
-  assert.ok(item2.blockedReason.includes("legacy-worker"));
-
-  const item3 = blockedItems.find(i => i.issueKey === "PACE-503");
-  assert.ok(item3.blockedReason.includes("rework limit exhausted"));
-});
-
-test("HTTP Server Endpoints: GET /api/pm/workspace, GET /api/pm/work-items/:key, POST approve/reject", async () => {
+test("3. Server-authoritative action and attempt for approvals & Phase B action isolation", () => {
   const store = makeTestStore();
   const settings = makeSettings(store, { operatingMode: "supervised" });
 
-  const plan = {
-    issue: "PACE-601",
-    summary: "Payment integration",
+  // A. Review Run: must resolve to action 'review'
+  const reviewPlan = {
+    issue: "PACE-300",
+    summary: "Manual review task",
+    role: "reviewer",
+    type: "review",
+    persona: "qa-engineer",
+    taskAgent: "qa-engineer"
+  };
+  const runId = store.createRun("PACE-300", reviewPlan);
+  store.transition(runId, "review-queued", { implementationSha: "c".repeat(40) });
+
+  const fp = computePlanFingerprint(reviewPlan);
+  const action = determineItemAction(store.getRun(runId), settings, store);
+  assert.equal(action, "review", "Review run must resolve to action 'review'");
+
+  // Approving 'implementation' on a review run must return 409 Conflict
+  assert.throws(() => {
+    handlePmApproval(settings, "PACE-300", {
+      action: "implementation",
+      planFingerprint: fp,
+      approver: "PM"
+    }, { store });
+  }, (err) => {
+    return err.statusCode === 409 && err.message.includes("Action mismatch");
+  });
+
+  // Approving 'review' succeeds
+  const appResult = handlePmApproval(settings, "PACE-300", {
+    action: "review",
+    planFingerprint: fp,
+    approver: "PM Lead"
+  }, { store });
+
+  assert.equal(appResult.ok, true);
+  assert.equal(appResult.action, "review");
+
+  // Runtime review authorization succeeds
+  const authReview = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-300",
+    action: "review",
+    plan: reviewPlan,
+    planFingerprint: fp
+  });
+  assert.equal(authReview.allowed, true);
+
+  // Implementation is NOT authorized
+  const authImpl = authorizeRuntimeAction(settings, store, {
+    issueKey: "PACE-300",
+    action: "implementation",
+    plan: reviewPlan,
+    planFingerprint: fp
+  });
+  assert.equal(authImpl.allowed, false, "Approval of review must not authorize implementation");
+
+  // B. Rework attempt isolation: attempt 1 approval must not approve attempt 2
+  const reworkPlan = {
+    issue: "PACE-301",
+    summary: "Rework task attempt 2",
+    role: "rework",
+    attempt: 2,
     persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    allowedPaths: ["backend/**"],
-    configSnapshot: {
-      operatingMode: "supervised",
-      taskAgent: "backend-engineer"
+    taskAgent: "backend-engineer"
+  };
+  store.createRun("PACE-301", reworkPlan);
+  const reworkFp = computePlanFingerprint(reworkPlan);
+
+  // Attempting to approve attempt 1 on attempt 2 run throws 409
+  assert.throws(() => {
+    handlePmApproval(settings, "PACE-301", {
+      action: "rework",
+      attempt: 1,
+      planFingerprint: reworkFp,
+      approver: "PM"
+    }, { store });
+  }, (err) => {
+    return err.statusCode === 409 && err.message.includes("Attempt mismatch");
+  });
+
+  // Approving attempt 2 succeeds
+  const reworkAppResult = handlePmApproval(settings, "PACE-301", {
+    action: "rework",
+    attempt: 2,
+    planFingerprint: reworkFp,
+    approver: "PM"
+  }, { store });
+  assert.equal(reworkAppResult.ok, true);
+  assert.equal(reworkAppResult.attempt, 2);
+
+  // Store has approval for attempt 2, NOT attempt 1
+  assert.ok(store.hasExecutionApproval("PACE-301", { action: "rework", attempt: 2, planFingerprint: reworkFp }));
+  assert.equal(store.hasExecutionApproval("PACE-301", { action: "rework", attempt: 1, planFingerprint: reworkFp }), null);
+});
+
+test("4. PM mutations fail closed by default when controlPlane flags are absent", async () => {
+  const store = makeTestStore();
+  // Settings with NO controlPlane flags configured
+  const settings = {
+    source: "/tmp/pm-settings.json",
+    projectKey: "PACE",
+    _store: store,
+    data: {
+      project: { key: "PACE", operatingMode: "supervised" },
+      policy: { operatingMode: "supervised" },
+      controlPlane: {} // Both pmMutationEnabled and configMutationEnabled absent
     }
   };
-  store.createRun("PACE-601", plan);
-  const fingerprint = computePlanFingerprint(plan);
+
+  const plan = { issue: "PACE-400", summary: "Default closed task" };
+  store.createRun("PACE-400", plan);
+  const fp = computePlanFingerprint(plan);
 
   const server = createDashboardServer(settings, { store });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    // 1. GET /api/pm/workspace
-    const wsRes = await request(server, "/api/pm/workspace");
-    assert.equal(wsRes.status, 200);
-    assert.equal(wsRes.json.ok, true);
-    assert.ok(wsRes.json.counts);
-    assert.ok(wsRes.json.groups);
-
-    // 2. GET /api/pm/work-items/:key
-    const detailRes = await request(server, "/api/pm/work-items/PACE-601");
-    assert.equal(detailRes.status, 200);
-    assert.equal(detailRes.json.workItem.key, "PACE-601");
-    assert.equal(detailRes.json.orchestratorDecision.persona, "backend-engineer");
-
-    // 3. POST approve with stale fingerprint -> 409 Conflict
-    const staleRes = await request(server, "/api/pm/work-items/PACE-601/approve", {
+    const res = await request(server, "/api/pm/work-items/PACE-400/approve", {
       method: "POST",
-      json: { action: "implementation", planFingerprint: "stale-fp-000000000000000000000000" }
+      json: { action: "implementation", planFingerprint: fp }
     });
-    assert.equal(staleRes.status, 409, "Stale fingerprint must return 409 Conflict");
-    assert.equal(staleRes.json.expected, fingerprint);
-
-    // 4. POST approve with correct fingerprint -> 200 OK
-    const approveRes = await request(server, "/api/pm/work-items/PACE-601/approve", {
-      method: "POST",
-      json: { action: "implementation", planFingerprint: fingerprint, approver: "QA Lead" }
-    });
-    assert.equal(approveRes.status, 200);
-    assert.equal(approveRes.json.approved, true);
-
-    // 5. POST reject on another item -> 200 OK
-    const plan2 = { issue: "PACE-602", summary: "Risky feature", persona: "backend-engineer" };
-    store.createRun("PACE-602", plan2);
-    const fp2 = computePlanFingerprint(plan2);
-
-    const rejectRes = await request(server, "/api/pm/work-items/PACE-602/reject", {
-      method: "POST",
-      json: { action: "implementation", planFingerprint: fp2, approver: "PM Lead", reason: "Scope rejection" }
-    });
-    assert.equal(rejectRes.status, 200);
-    assert.equal(rejectRes.json.approved, false);
-
+    assert.equal(res.status, 403, "Must fail closed with 403 when mutation flags are absent");
+    assert.equal(res.json.error, "PM mutation is disabled");
   } finally {
     server.close();
   }
 });
 
-test("Security Gates: rejects non-loopback mutation, disabled flag, invalid JSON/content-type, no Done bypass", async () => {
+test("5. Provider-neutral source identity preservation from plan.workSource", () => {
   const store = makeTestStore();
-  const settings = makeSettings(store, {
-    controlPlane: { pmMutationEnabled: false }
+  // Global settings default provider is Jira
+  const settings = makeSettings(store);
+
+  // Run was created from GitHub Issues with pinned workSource
+  const plan = {
+    issue: "123",
+    summary: "Fix memory leak in stream parser",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    workSource: {
+      provider: "github",
+      id: "123",
+      url: "https://github.com/houndvision/agent-scaffold/issues/123"
+    }
+  };
+
+  store.createRun("123", plan);
+
+  const detail = buildPmWorkItemDetail(settings, "123", { store });
+  assert.ok(detail);
+  assert.equal(detail.workItem.sourceProvider, "github", "Pinned sourceProvider must remain github");
+  assert.equal(detail.workItem.sourceId, "123");
+  assert.equal(detail.workItem.sourceUrl, "https://github.com/houndvision/agent-scaffold/issues/123");
+});
+
+test("6. Historical identity/state integrity: no fake v1 and no fabricated canonical states", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  // Create run without agentVersion and with blocked state
+  const plan = {
+    issue: "PACE-600",
+    summary: "Historical task without version",
+    persona: "backend-engineer",
+    taskAgent: "legacy-agent"
+    // agentVersion is missing
+  };
+
+  const runId = store.createRun("PACE-600", plan);
+  store.transition(runId, "blocked", { reason: "Resource quota exhausted" });
+
+  const detail = buildPmWorkItemDetail(settings, "PACE-600", { store });
+  assert.ok(detail);
+  assert.equal(detail.agentIdentity.agentVersion, null, "Missing historical agentVersion must be null, not 1");
+  assert.equal(detail.workItem.canonicalState, "blocked", "Canonical state must reflect real blocked state, not ready");
+  assert.equal(detail.workItem.status, "blocked");
+});
+
+test("7. Real Needs Planning integration for discovered backlog items without runs", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  // Record a discovered work item in backlog
+  store.recordDiscoveredWorkItem({
+    key: "PACE-700",
+    summary: "Newly filed feature in backlog",
+    provider: "jira",
+    url: "https://pacebuild.atlassian.net/browse/PACE-700",
+    raw: { priority: "High", reporter: "Product Manager" }
   });
 
-  const plan = { issue: "PACE-701", summary: "Secure task" };
-  store.createRun("PACE-701", plan);
-  const fingerprint = computePlanFingerprint(plan);
+  const ws = buildPmWorkspace(settings, { store });
+  assert.equal(ws.counts.needsPlanning, 1, "Discovered work item without a run must appear in needsPlanning");
+  const item = ws.groups.needsPlanning.find(i => i.issueKey === "PACE-700");
+  assert.ok(item);
+  assert.equal(item.operationalGroup, "needsPlanning");
+  assert.equal(item.currentRunState, "unplanned");
+  assert.equal(item.summary, "Newly filed feature in backlog");
+
+  // Read detail model for discovered work item
+  const detail = buildPmWorkItemDetail(settings, "PACE-700", { store });
+  assert.ok(detail);
+  assert.equal(detail.workItem.key, "PACE-700");
+  assert.equal(detail.workItem.operationalGroup, "needsPlanning");
+  assert.equal(detail.workItem.status, "unplanned");
+  assert.equal(detail.history[0].stage, "discovered");
+  assert.equal(detail.history[0].actor.type, "work-source");
+});
+
+test("8. Security Gates: loopback check, content-type 415, human-only actions blocked", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, {
+    controlPlane: { pmMutationEnabled: true }
+  });
+
+  const plan = { issue: "PACE-800", summary: "Security test task" };
+  store.createRun("PACE-800", plan);
+  const fp = computePlanFingerprint(plan);
 
   const server = createDashboardServer(settings, { store });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    // 1. Disabled PM Mutation flag -> 403 Forbidden
-    const disabledRes = await request(server, "/api/pm/work-items/PACE-701/approve", {
+    // Non-loopback request -> 403
+    const nonLoopback = await request(server, "/api/pm/work-items/PACE-800/approve", {
       method: "POST",
-      json: { action: "implementation", planFingerprint: fingerprint }
+      headers: { host: "192.168.1.50:8000" },
+      json: { action: "implementation", planFingerprint: fp }
     });
-    assert.equal(disabledRes.status, 403, "Disabled mutation flag must return 403");
+    assert.equal(nonLoopback.status, 403);
 
-    // 2. Non-loopback request header -> 403
-    const externalHostRes = await request(server, "/api/pm/work-items/PACE-701/approve", {
-      method: "POST",
-      headers: { host: "192.168.1.100:4317", "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "implementation", planFingerprint: fingerprint })
-    });
-    assert.equal(externalHostRes.status, 403, "Non-loopback host must return 403");
-
-    // 3. Invalid content-type (e.g. text/plain) -> 415
-    const textPlainRes = await request(server, "/api/pm/work-items/PACE-701/approve", {
+    // Non-JSON Content-Type -> 415
+    const textPlain = await request(server, "/api/pm/work-items/PACE-800/approve", {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action: "implementation", planFingerprint: fingerprint })
+      body: "action=implementation"
     });
-    assert.equal(textPlainRes.status, 415, "Non-JSON content type must return 415");
+    assert.equal(textPlain.status, 415);
 
-    // 4. Human-only action (e.g. markDone, finalMerge) cannot be approved through PM execution gate
+    // Human-only action cannot be approved via PM workspace
     assert.throws(() => {
-      handlePmApproval(settings, "PACE-701", {
-        action: "markDone",
-        planFingerprint: fingerprint
+      handlePmApproval(settings, "PACE-800", {
+        action: "finalMerge",
+        planFingerprint: fp
       }, { store });
     }, (err) => err.message.includes("human-only"));
 

@@ -1016,8 +1016,8 @@ function renderPmCard(item) {
 
   const metaTags = element("div", "pm-meta-tags");
   metaTags.append(
-    element("span", "meta-tag persona-tag", `🎭 ${item.persona}`),
-    element("span", "meta-tag", `🤖 ${item.taskAgent} v${item.agentVersion || 1}`),
+    element("span", "meta-tag persona-tag", `🎭 ${item.persona || 'unassigned'}`),
+    element("span", "meta-tag", `🤖 ${item.taskAgent || 'unassigned'} ${item.agentVersion != null ? `v${item.agentVersion}` : '(version unknown)'}`),
     element("span", "meta-tag", `⚡ ${item.executorProvider}${item.executorModel ? ` (${item.executorModel})` : ''}`),
     element("span", `meta-tag ${item.risk === 'high' ? 'risk-tag-high' : ''}`, `Risk: ${item.risk}`)
   );
@@ -1116,8 +1116,8 @@ function renderPmApprovals(items) {
 
     const details = element("div", "approval-details-grid");
     details.innerHTML = `
-      <div><strong>Task Agent:</strong> ${item.taskAgent} (v${item.agentVersion || 1})</div>
-      <div><strong>Orkestratör Persona:</strong> ${item.persona}</div>
+      <div><strong>Task Agent:</strong> ${item.taskAgent || 'unassigned'} ${item.agentVersion != null ? `(v${item.agentVersion})` : '(version unknown)'}</div>
+      <div><strong>Orkestratör Persona:</strong> ${item.persona || 'unassigned'}</div>
       <div><strong>Executor:</strong> ${item.executorProvider} (${item.executorModel || 'default'})</div>
       <div><strong>Risk Seviyesi:</strong> ${item.risk}</div>
       <div><strong>İzinli Yollar:</strong> ${(item.allowedPaths || []).join(", ") || "[]"}</div>
@@ -1269,12 +1269,12 @@ async function openDecisionTrace(issueKey) {
 
     // 2. Agent Identity Context Section (Pinned vs Live Registry)
     const agentSection = element("div", "trace-section");
-    const isVersionDiff = ag.liveRegistryVersion && ag.agentVersion !== ag.liveRegistryVersion;
+    const isVersionDiff = ag.liveRegistryVersion && ag.agentVersion && ag.agentVersion !== ag.liveRegistryVersion;
     agentSection.innerHTML = `
       <h4>🤖 Agent Registry Kimliği</h4>
       <div class="trace-grid-two">
-        <div class="trace-info-cell"><span>Tarihsel Run Snaphot</span><strong>${ag.agentId} v${ag.agentVersion || 1}</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.agentHash || '—').substring(0, 16)}...</small></div>
-        <div class="trace-info-cell"><span>Canlı Registry Durumu</span><strong style="color: ${ag.liveRegistryStatus === 'enabled' ? '#4ade80' : '#f87171'};">${ag.liveRegistryStatus?.toUpperCase()} (v${ag.liveRegistryVersion || 1})</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.liveRegistryHash || '—').substring(0, 16)}...</small></div>
+        <div class="trace-info-cell"><span>Tarihsel Run Snaphot</span><strong>${ag.agentId || 'unassigned'} ${ag.agentVersion != null ? `v${ag.agentVersion}` : '(version unknown)'}</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.agentHash || '—').substring(0, 16)}...</small></div>
+        <div class="trace-info-cell"><span>Canlı Registry Durumu</span><strong style="color: ${ag.liveRegistryStatus === 'enabled' ? '#4ade80' : '#f87171'};">${ag.liveRegistryStatus?.toUpperCase()} (v${ag.liveRegistryVersion || '—'})</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.liveRegistryHash || '—').substring(0, 16)}...</small></div>
       </div>
       ${isVersionDiff ? `<div class="pm-card-notice notice-approval" style="margin-top: 8px;"><span>⚠️ Bu run <strong>v${ag.agentVersion}</strong> tanımıyla kilitlenmiştir. Canlı registry'deki <strong>v${ag.liveRegistryVersion}</strong> güncellemesi tarihsel snapshot'ı değiştirmez.</span></div>` : ''}
     `;
