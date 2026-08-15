@@ -34,7 +34,7 @@ import {
   buildObservabilitySummary,
   redactTelemetryPayload
 } from "../lib/telemetry.js";
-import { spawnProviderAsync, handleReview } from "../lib/runtime.js";
+import { spawnProviderAsync, handleReview, createConfigSnapshot, issuePlan } from "../lib/runtime.js";
 import { CliOrchestratorProvider, CodexOrchestratorProvider } from "../lib/orchestrator.js";
 
 function makeTestStore() {
@@ -268,7 +268,40 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
     /does not exist/
   );
 
-  // 3. First insert returns recorded: true
+  // 3. Negative lifecycle tests:
+  const badRunId = store.createRun("PACE-202", { issue: "PACE-202" });
+
+  // A. started as first event -> rejected
+  const rBadStarted = store.recordTelemetryEvent({
+    eventId: "bad-started",
+    runId: badRunId,
+    stage: "started",
+    status: "running",
+    sequence: 1
+  });
+  assert.equal(rBadStarted.recorded, false, "started as first event without queued must be rejected");
+
+  // B. progress before started -> rejected
+  const rBadProgress = store.recordTelemetryEvent({
+    eventId: "bad-progress",
+    runId: badRunId,
+    stage: "progress",
+    status: "running",
+    sequence: 1
+  });
+  assert.equal(rBadProgress.recorded, false, "progress before started must be rejected");
+
+  // C. terminal as first event -> rejected
+  const rBadTerminal = store.recordTelemetryEvent({
+    eventId: "bad-terminal",
+    runId: badRunId,
+    stage: "terminal",
+    status: "completed",
+    sequence: 999
+  });
+  assert.equal(rBadTerminal.recorded, false, "terminal as first event without queued/started must be rejected");
+
+  // 4. Proper lifecycle progression on valid runId
   const r1 = store.recordTelemetryEvent({
     eventId: "evt-1",
     runId,
@@ -278,7 +311,16 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   });
   assert.deepEqual(r1, { eventId: "evt-1", recorded: true });
 
-  // 4. Duplicate eventId returns recorded: false with no new row
+  // 5. Progress before started (even after queued) -> rejected
+  const rProgBeforeStarted = store.recordTelemetryEvent({
+    eventId: "evt-prog-early",
+    runId,
+    stage: "progress",
+    sequence: 2
+  });
+  assert.equal(rProgBeforeStarted.recorded, false, "progress before started must be rejected");
+
+  // 6. Duplicate eventId returns recorded: false with no new row
   const rDuplicate = store.recordTelemetryEvent({
     eventId: "evt-1",
     runId,
@@ -289,7 +331,7 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   assert.deepEqual(rDuplicate, { eventId: "evt-1", recorded: false });
   assert.equal(store.listTelemetryEvents(runId).length, 1);
 
-  // 5. Sequence progression
+  // 7. Started after queued -> recorded: true
   const r2 = store.recordTelemetryEvent({
     eventId: "evt-2",
     runId,
@@ -299,7 +341,7 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   });
   assert.equal(r2.recorded, true);
 
-  // 6. Sequence cannot move backwards
+  // 8. Sequence cannot move backwards
   const rBackwards = store.recordTelemetryEvent({
     eventId: "evt-backwards",
     runId,
@@ -308,7 +350,7 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   });
   assert.equal(rBackwards.recorded, false);
 
-  // 7. Terminal event
+  // 9. Terminal event after queued & started -> recorded: true
   const rTerm = store.recordTelemetryEvent({
     eventId: "evt-term-1",
     runId,
@@ -319,7 +361,7 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   });
   assert.equal(rTerm.recorded, true);
 
-  // 8. Reject any event after terminal
+  // 10. Reject any event after terminal
   const rPostTerminal = store.recordTelemetryEvent({
     eventId: "evt-post-term",
     runId,
@@ -328,7 +370,7 @@ test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
   });
   assert.equal(rPostTerminal.recorded, false);
 
-  // 9. Reject duplicate terminal with a different eventId
+  // 11. Reject duplicate terminal with a different eventId
   const rDupTerm = store.recordTelemetryEvent({
     eventId: "evt-term-2",
     runId,
@@ -539,6 +581,57 @@ test("4. Orchestrator provider execution produces truthful queued -> started -> 
   assert.equal(events[2].stage, "terminal");
   assert.equal(events[2].status, "completed");
   assert.equal(events[2].usage.totalTokens, 600);
+
+  // B. Orchestrator returns malformed JSON -> throws OrchestratorParseError, terminal(failed) recorded
+  const malformedRuntime = {
+    spawnSync: () => ({ status: 0, stdout: "{ malformed json: not valid ...", stderr: "" })
+  };
+  const malformedProvider = new CliOrchestratorProvider("codex", { command: ["codex"] }, malformedRuntime);
+  const issueMalformed = { key: "PACE-402", summary: "Malformed plan" };
+  assert.throws(
+    () => malformedProvider.plan(issueMalformed, { store, settings }),
+    (err) => err.name === "OrchestratorParseError"
+  );
+  const planRunsMalformed = store.listRunsDetailed(10).filter(r => r.issue_key === "PACE-402");
+  assert.equal(planRunsMalformed.length, 1);
+  assert.equal(planRunsMalformed[0].state, "failed");
+  const malformedTelem = store.listTelemetryEvents(planRunsMalformed[0].id);
+  assert.equal(malformedTelem.length, 3);
+  assert.equal(malformedTelem[0].stage, "queued");
+  assert.equal(malformedTelem[1].stage, "started");
+  assert.equal(malformedTelem[2].stage, "terminal");
+  assert.equal(malformedTelem[2].status, "failed");
+  assert.equal(malformedTelem[2].error?.category, "telemetry_parse_error");
+
+  // C. Orchestrator returns invalid plan schema -> throws OrchestratorValidationError, terminal(failed) recorded
+  const invalidSchemaRuntime = {
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify({
+        issue: "PACE-403",
+        summary: "Invalid persona task",
+        persona: "non-existent-persona",
+        taskAgent: "non-existent-persona"
+      }),
+      stderr: ""
+    })
+  };
+  const invalidSchemaProvider = new CliOrchestratorProvider("codex", { command: ["codex"] }, invalidSchemaRuntime);
+  const issueInvalid = { key: "PACE-403", summary: "Invalid schema plan" };
+  assert.throws(
+    () => invalidSchemaProvider.plan(issueInvalid, { store, settings }),
+    (err) => err.name === "OrchestratorValidationError"
+  );
+  const planRunsInvalid = store.listRunsDetailed(10).filter(r => r.issue_key === "PACE-403");
+  assert.equal(planRunsInvalid.length, 1);
+  assert.equal(planRunsInvalid[0].state, "failed");
+  const invalidTelem = store.listTelemetryEvents(planRunsInvalid[0].id);
+  assert.equal(invalidTelem.length, 3);
+  assert.equal(invalidTelem[0].stage, "queued");
+  assert.equal(invalidTelem[1].stage, "started");
+  assert.equal(invalidTelem[2].stage, "terminal");
+  assert.equal(invalidTelem[2].status, "failed");
+  assert.equal(invalidTelem[2].error?.category, "policy_block");
 });
 
 // ── Test 5: Truthful token normalization (Partial usage) ─────────────────────
@@ -599,20 +692,56 @@ test("6. Truthful cost accounting: null for partial usage, historical run cost i
   assert.equal(costFull.currency, "USD");
   assert.equal(costFull.pricingVersion, "2026-Q1");
 
-  // 3. Historical run cost remains pinned when global pricing changes
+  // 3. Historical run cost remains pinned when global pricing changes (using real createConfigSnapshot)
   const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  const plan = {
-    issue: "PACE-601",
-    summary: "Cost immutability check",
-    configSnapshot: {
-      pricing: pricingV1,
-      executorProvider: "codex",
-      executorModel: "gpt-5"
+  const settings = makeSettings(store, {
+    policy: {
+      pricing: pricingV1
     }
+  });
+
+  const issue601 = {
+    key: "PACE-601",
+    summary: "Cost immutability check",
+    description: "Acceptance Criteria:\n- Unit tests pass",
+    labels: ["agent-ready"]
   };
-  const runId = store.createRun("PACE-601", plan);
+  const plan601 = issuePlan(settings, issue601, {
+    store,
+    runtime: {
+      spawnSync: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          issue: "PACE-601",
+          summary: "Cost immutability check",
+          persona: "backend-engineer",
+          taskAgent: "backend-engineer",
+          skills: ["minimal-change"],
+          risk: "low",
+          parallelSafe: true,
+          allowedPaths: ["backend/**"],
+          dependencies: [],
+          rationale: ["Cost immutability check"]
+        })
+      })
+    }
+  });
+  assert.ok(plan601.configSnapshot?.pricing, "createConfigSnapshot must pin pricing into configSnapshot");
+  assert.deepEqual(plan601.configSnapshot.pricing, pricingV1);
+
+  const runId = store.createRun("PACE-601", plan601);
+  store.recordTelemetryEvent({
+    eventId: `telem-${runId}-1-q`,
+    runId,
+    stage: "queued",
+    sequence: 1
+  });
+  store.recordTelemetryEvent({
+    eventId: `telem-${runId}-2-s`,
+    runId,
+    stage: "started",
+    sequence: 2
+  });
   store.recordTelemetryEvent({
     eventId: `telem-${runId}-term`,
     runId,
@@ -640,6 +769,44 @@ test("6. Truthful cost accounting: null for partial usage, historical run cost i
   const obsV2 = buildRunObservability(settings, runId, { store });
   assert.equal(obsV2.cost.amount, 18.0, "Historical run cost must remain pinned to snapshot pricing");
   assert.equal(obsV2.cost.pricingVersion, "2026-Q1");
+
+  // 4. Run without snapshot pricing returns cost: null without falling back to global settings pricing
+  const planNoPricing = {
+    issue: "PACE-602",
+    summary: "No pricing snapshot",
+    configSnapshot: {
+      pricing: null,
+      executorProvider: "codex",
+      executorModel: "gpt-5"
+    }
+  };
+  const runIdNoPricing = store.createRun("PACE-602", planNoPricing);
+  store.recordTelemetryEvent({
+    eventId: `telem-${runIdNoPricing}-1-q`,
+    runId: runIdNoPricing,
+    stage: "queued",
+    sequence: 1
+  });
+  store.recordTelemetryEvent({
+    eventId: `telem-${runIdNoPricing}-2-s`,
+    runId: runIdNoPricing,
+    stage: "started",
+    sequence: 2
+  });
+  store.recordTelemetryEvent({
+    eventId: `telem-${runIdNoPricing}-term`,
+    runId: runIdNoPricing,
+    stage: "terminal",
+    status: "completed",
+    sequence: 999,
+    provider: "codex",
+    model: "gpt-5",
+    usage: fullUsage
+  });
+  store.transition(runIdNoPricing, "completed", {});
+
+  const obsNoPricing = buildRunObservability(settings, runIdNoPricing, { store });
+  assert.equal(obsNoPricing.cost, null, "Cost must be null when snapshot.pricing is null (no fallback to mutable global pricing)");
 });
 
 // ── Test 7: Real durable provider cooldown ───────────────────────────────────
@@ -736,6 +903,18 @@ test("9. Pre-persistence redaction & HTTP API safety: secrets/prompts never pers
   };
 
   store.recordTelemetryEvent({
+    eventId: `telem-${runId}-1-q`,
+    runId,
+    stage: "queued",
+    sequence: 1
+  });
+  store.recordTelemetryEvent({
+    eventId: `telem-${runId}-2-s`,
+    runId,
+    stage: "started",
+    sequence: 2
+  });
+  store.recordTelemetryEvent({
     eventId: `telem-${runId}-term-dirty`,
     runId,
     issueKey: "PACE-901",
@@ -751,7 +930,8 @@ test("9. Pre-persistence redaction & HTTP API safety: secrets/prompts never pers
   store.transition(runId, "completed", { returnCode: 0 });
 
   // Direct SQLite inspection: assert raw secret strings NEVER hit disk
-  const rawDbRow = store.database.prepare("SELECT raw_payload, error_message FROM telemetry_events WHERE run_id = ?").get(runId);
+  const rawDbRow = store.database.prepare("SELECT raw_payload, error_message FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'").get(runId);
+  assert.ok(rawDbRow, "Terminal row must exist in SQLite");
   assert.ok(!rawDbRow.raw_payload.includes("sk-proj-superSecretAPIKey1234567890"), "Raw API key must not be in SQLite");
   assert.ok(!rawDbRow.raw_payload.includes("ghp_PersonalAccessTokenSecretValue123456"), "Raw GitHub token must not be in SQLite");
   assert.ok(!rawDbRow.raw_payload.includes("DatabasePassword999!"), "Raw password must not be in SQLite");
@@ -808,6 +988,53 @@ test("10. Aggregate summary API & Truthful zero state: windows (1h, 24h, 7d) and
     // 4. 405 on POST
     const res405 = await request(server, "/api/observability/providers", { method: "POST" });
     assert.equal(res405.status, 405);
+
+    // 5. Orchestrator usage from canonical terminal telemetry appears in aggregate summary
+    const orchRunId = store.createRun("PACE-1001", {
+      issue: "PACE-1001",
+      role: "orchestrator",
+      action: "planning",
+      taskAgent: "orchestrator"
+    });
+    store.recordTelemetryEvent({
+      eventId: `telem-${orchRunId}-1-q`,
+      runId: orchRunId,
+      issueKey: "PACE-1001",
+      role: "orchestrator",
+      action: "planning",
+      stage: "queued",
+      sequence: 1
+    });
+    store.recordTelemetryEvent({
+      eventId: `telem-${orchRunId}-2-s`,
+      runId: orchRunId,
+      issueKey: "PACE-1001",
+      role: "orchestrator",
+      action: "planning",
+      stage: "started",
+      sequence: 2
+    });
+    store.recordTelemetryEvent({
+      eventId: `telem-${orchRunId}-term-ok`,
+      runId: orchRunId,
+      issueKey: "PACE-1001",
+      role: "orchestrator",
+      action: "planning",
+      stage: "terminal",
+      status: "completed",
+      sequence: 999,
+      durationMs: 3200,
+      usage: { inputTokens: 5000, outputTokens: 2000, totalTokens: 7000, available: true }
+    });
+    store.transition(orchRunId, "completed", {});
+
+    const resOrch = await request(server, "/api/observability/summary?window=24h");
+    assert.equal(resOrch.status, 200);
+    assert.equal(resOrch.json.metrics.totalUsage.available, true);
+    assert.equal(resOrch.json.metrics.totalUsage.totalTokens, 7000);
+    assert.equal(resOrch.json.metrics.totalUsage.inputTokens, 5000);
+    assert.equal(resOrch.json.metrics.totalUsage.outputTokens, 2000);
+    assert.equal(resOrch.json.metrics.runsCompleted, 1);
   } finally {
     server.close();
   }
