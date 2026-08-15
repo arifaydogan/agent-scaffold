@@ -4,11 +4,15 @@
  * Dedicated Phase E Test Suite — PM Workspace Correctness Hardening:
  * 1. Orchestrator rationale/reasons never treated as blockers (eligible/ready with reasons != blocked)
  * 2. Real Phase A recordReviewerOutcome() integration with lossless structured findings preservation & clean review
- * 3. Server-authoritative action & attempt approval gating (distinguishing review vs implementation vs rework attempts)
+ * 3. Server-authoritative action & attempt approval gating:
+ *    - Manual mode review: pending approval, implementation -> 409, review -> ok, runtime authorized
+ *    - Supervised mode review: autonomous, approve -> 409 no approval pending, no decision written
+ *    - Already-approved implementation: duplicate approval -> 409, no duplicate decisions
+ *    - Rework attempt isolation: attempt 1 cannot approve attempt 2
  * 4. PM mutations fail closed by default (403 when flags absent)
  * 5. Provider-neutral source identity preservation from plan.workSource
  * 6. Historical identity/state integrity (no fake v1 or fabricated canonical states)
- * 7. Real durable Needs Planning integration for discovered backlog items without runs
+ * 7. Real durable Needs Planning integration via fake WorkSourceProvider discovery lifecycle
  * 8. HTTP server endpoints and security gates (loopback check, Content-Type 415, no-Done bypass)
  */
 
@@ -32,6 +36,7 @@ import {
 } from "../lib/pm-workspace.js";
 import { computePlanFingerprint, authorizeRuntimeAction } from "../lib/policy.js";
 import { recordReviewerOutcome } from "../lib/reconciler.js";
+import { WorkSourceProvider, discoverWorkItems } from "../lib/work-source.js";
 
 function makeTestStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-ws-hardened-"));
@@ -247,31 +252,32 @@ test("2. Real Phase A review outcome persistence shape & lossless findings integ
   assert.equal(detailClean.workItem.operationalGroup, "humanApproval");
 });
 
-test("3. Server-authoritative action and attempt for approvals & Phase B action isolation", () => {
+test("3. Server-authoritative action & attempt approval gating and duplicate protection", () => {
   const store = makeTestStore();
-  const settings = makeSettings(store, { operatingMode: "supervised" });
 
-  // A. Review Run: must resolve to action 'review'
-  const reviewPlan = {
+  // A. Manual mode review: review action is pending approval
+  const manualSettings = makeSettings(store, { operatingMode: "manual" });
+  const manualReviewPlan = {
     issue: "PACE-300",
     summary: "Manual review task",
     role: "reviewer",
     type: "review",
     persona: "qa-engineer",
-    taskAgent: "qa-engineer"
+    taskAgent: "qa-engineer",
+    configSnapshot: { operatingMode: "manual", taskAgent: "qa-engineer" }
   };
-  const runId = store.createRun("PACE-300", reviewPlan);
+  const runId = store.createRun("PACE-300", manualReviewPlan);
   store.transition(runId, "review-queued", { implementationSha: "c".repeat(40) });
 
-  const fp = computePlanFingerprint(reviewPlan);
-  const action = determineItemAction(store.getRun(runId), settings, store);
+  const manualFp = computePlanFingerprint(manualReviewPlan);
+  const action = determineItemAction(store.getRun(runId), manualSettings, store);
   assert.equal(action, "review", "Review run must resolve to action 'review'");
 
-  // Approving 'implementation' on a review run must return 409 Conflict
+  // Approving 'implementation' on a manual review run must return 409 Conflict
   assert.throws(() => {
-    handlePmApproval(settings, "PACE-300", {
+    handlePmApproval(manualSettings, "PACE-300", {
       action: "implementation",
-      planFingerprint: fp,
+      planFingerprint: manualFp,
       approver: "PM"
     }, { store });
   }, (err) => {
@@ -279,48 +285,121 @@ test("3. Server-authoritative action and attempt for approvals & Phase B action 
   });
 
   // Approving 'review' succeeds
-  const appResult = handlePmApproval(settings, "PACE-300", {
+  const appResult = handlePmApproval(manualSettings, "PACE-300", {
     action: "review",
-    planFingerprint: fp,
+    planFingerprint: manualFp,
     approver: "PM Lead"
   }, { store });
 
   assert.equal(appResult.ok, true);
   assert.equal(appResult.action, "review");
 
+  // Duplicate / stale second approval must return 409 Conflict without writing a duplicate decision
+  const decisionsBefore = store.getPmDecisions("PACE-300").length;
+  assert.throws(() => {
+    handlePmApproval(manualSettings, "PACE-300", {
+      action: "review",
+      planFingerprint: manualFp,
+      approver: "PM Lead"
+    }, { store });
+  }, (err) => {
+    return err.statusCode === 409 && err.message.includes("already approved");
+  });
+  const decisionsAfter = store.getPmDecisions("PACE-300").length;
+  assert.equal(decisionsAfter, decisionsBefore, "Duplicate approval request must not write a duplicate decision");
+
   // Runtime review authorization succeeds
-  const authReview = authorizeRuntimeAction(settings, store, {
+  const authReview = authorizeRuntimeAction(manualSettings, store, {
     issueKey: "PACE-300",
     action: "review",
-    plan: reviewPlan,
-    planFingerprint: fp
+    plan: manualReviewPlan,
+    planFingerprint: manualFp
   });
   assert.equal(authReview.allowed, true);
 
   // Implementation is NOT authorized
-  const authImpl = authorizeRuntimeAction(settings, store, {
+  const authImpl = authorizeRuntimeAction(manualSettings, store, {
     issueKey: "PACE-300",
     action: "implementation",
-    plan: reviewPlan,
-    planFingerprint: fp
+    plan: manualReviewPlan,
+    planFingerprint: manualFp
   });
   assert.equal(authImpl.allowed, false, "Approval of review must not authorize implementation");
 
-  // B. Rework attempt isolation: attempt 1 approval must not approve attempt 2
+  // B. Supervised mode review: review is autonomous -> PM approve returns 409 no approval pending
+  const supervisedSettings = makeSettings(store, { operatingMode: "supervised" });
+  const supervisedReviewPlan = {
+    issue: "PACE-302",
+    summary: "Supervised review task",
+    role: "reviewer",
+    type: "review",
+    persona: "qa-engineer",
+    taskAgent: "qa-engineer",
+    configSnapshot: { operatingMode: "supervised", taskAgent: "qa-engineer" }
+  };
+  const supRunId = store.createRun("PACE-302", supervisedReviewPlan);
+  store.transition(supRunId, "review-queued", { implementationSha: "d".repeat(40) });
+  const supFp = computePlanFingerprint(supervisedReviewPlan);
+
+  const supDecisionsBefore = store.getPmDecisions("PACE-302").length;
+  assert.throws(() => {
+    handlePmApproval(supervisedSettings, "PACE-302", {
+      action: "review",
+      planFingerprint: supFp,
+      approver: "PM"
+    }, { store });
+  }, (err) => {
+    return err.statusCode === 409 && err.message.includes("does not require approval");
+  });
+  const supDecisionsAfter = store.getPmDecisions("PACE-302").length;
+  assert.equal(supDecisionsAfter, supDecisionsBefore, "No approval decision written for autonomous action");
+
+  // C. Supervised implementation: duplicate approval protection
+  const supervisedImplPlan = {
+    issue: "PACE-303",
+    summary: "Supervised implementation task",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    configSnapshot: { operatingMode: "supervised", taskAgent: "backend-engineer" }
+  };
+  store.createRun("PACE-303", supervisedImplPlan);
+  const implFp = computePlanFingerprint(supervisedImplPlan);
+
+  // First approval succeeds
+  const firstImplApproval = handlePmApproval(supervisedSettings, "PACE-303", {
+    action: "implementation",
+    planFingerprint: implFp,
+    approver: "PM Lead"
+  }, { store });
+  assert.equal(firstImplApproval.ok, true);
+
+  // Second duplicate approval fails with 409
+  assert.throws(() => {
+    handlePmApproval(supervisedSettings, "PACE-303", {
+      action: "implementation",
+      planFingerprint: implFp,
+      approver: "PM Lead"
+    }, { store });
+  }, (err) => {
+    return err.statusCode === 409 && err.message.includes("already approved");
+  });
+
+  // D. Rework attempt isolation: attempt 1 approval must not approve attempt 2
   const reworkPlan = {
     issue: "PACE-301",
     summary: "Rework task attempt 2",
     role: "rework",
     attempt: 2,
     persona: "backend-engineer",
-    taskAgent: "backend-engineer"
+    taskAgent: "backend-engineer",
+    configSnapshot: { operatingMode: "supervised", taskAgent: "backend-engineer" }
   };
   store.createRun("PACE-301", reworkPlan);
   const reworkFp = computePlanFingerprint(reworkPlan);
 
   // Attempting to approve attempt 1 on attempt 2 run throws 409
   assert.throws(() => {
-    handlePmApproval(settings, "PACE-301", {
+    handlePmApproval(supervisedSettings, "PACE-301", {
       action: "rework",
       attempt: 1,
       planFingerprint: reworkFp,
@@ -331,7 +410,7 @@ test("3. Server-authoritative action and attempt for approvals & Phase B action 
   });
 
   // Approving attempt 2 succeeds
-  const reworkAppResult = handlePmApproval(settings, "PACE-301", {
+  const reworkAppResult = handlePmApproval(supervisedSettings, "PACE-301", {
     action: "rework",
     attempt: 2,
     planFingerprint: reworkFp,
@@ -428,35 +507,90 @@ test("6. Historical identity/state integrity: no fake v1 and no fabricated canon
   assert.equal(detail.workItem.status, "blocked");
 });
 
-test("7. Real Needs Planning integration for discovered backlog items without runs", () => {
+test("7. Real provider-neutral discovery path lifecycle and Needs Planning transition", async () => {
   const store = makeTestStore();
   const settings = makeSettings(store);
 
-  // Record a discovered work item in backlog
-  store.recordDiscoveredWorkItem({
-    key: "PACE-700",
-    summary: "Newly filed feature in backlog",
-    provider: "jira",
-    url: "https://pacebuild.atlassian.net/browse/PACE-700",
-    raw: { priority: "High", reporter: "Product Manager" }
+  // Fake WorkSourceProvider returning a BACKLOG / discovered item
+  class FakeWorkSourceProvider extends WorkSourceProvider {
+    constructor(items) {
+      super();
+      this._items = items;
+    }
+    async listWorkItems(query) {
+      return this._items;
+    }
+    async poll(query) {
+      return this._items;
+    }
+  }
+
+  const fakeWorkSource = new FakeWorkSourceProvider([
+    {
+      key: "PACE-901",
+      id: "PACE-901",
+      summary: "Add rate limiting middleware",
+      canonicalState: "backlog",
+      provider: "fake-provider",
+      url: "https://worksources.internal/issues/PACE-901",
+      labels: ["agent-ready"],
+      priority: "High",
+      reporter: "DevOps Lead"
+    }
+  ]);
+
+  // 1. Run does not yet exist
+  const existingRun = store.database.prepare("SELECT 1 FROM runs WHERE issue_key = ?").get("PACE-901");
+  assert.equal(existingRun, undefined);
+
+  // 2. Normal discovery path runs and records it durably
+  const discoveryResult = await discoverWorkItems(settings, {
+    store,
+    workSource: fakeWorkSource
   });
+  assert.equal(discoveryResult.ok, true);
+  assert.equal(discoveryResult.recorded.length, 1);
 
-  const ws = buildPmWorkspace(settings, { store });
-  assert.equal(ws.counts.needsPlanning, 1, "Discovered work item without a run must appear in needsPlanning");
-  const item = ws.groups.needsPlanning.find(i => i.issueKey === "PACE-700");
-  assert.ok(item);
-  assert.equal(item.operationalGroup, "needsPlanning");
-  assert.equal(item.currentRunState, "unplanned");
-  assert.equal(item.summary, "Newly filed feature in backlog");
+  // 3. buildPmWorkspace() shows it in needsPlanning
+  const wsBefore = buildPmWorkspace(settings, { store });
+  assert.equal(wsBefore.counts.needsPlanning, 1, "Backlog item must appear in needsPlanning before a run exists");
+  const pmItem = wsBefore.groups.needsPlanning.find(i => i.issueKey === "PACE-901");
+  assert.ok(pmItem);
+  assert.equal(pmItem.operationalGroup, "needsPlanning");
+  assert.equal(pmItem.currentRunState, "unplanned");
+  assert.equal(pmItem.summary, "Add rate limiting middleware");
+  assert.equal(pmItem.sourceProvider, "fake-provider");
+  assert.equal(pmItem.sourceUrl, "https://worksources.internal/issues/PACE-901");
 
-  // Read detail model for discovered work item
-  const detail = buildPmWorkItemDetail(settings, "PACE-700", { store });
+  // Read detail model
+  const detail = buildPmWorkItemDetail(settings, "PACE-901", { store });
   assert.ok(detail);
-  assert.equal(detail.workItem.key, "PACE-700");
+  assert.equal(detail.workItem.key, "PACE-901");
   assert.equal(detail.workItem.operationalGroup, "needsPlanning");
-  assert.equal(detail.workItem.status, "unplanned");
   assert.equal(detail.history[0].stage, "discovered");
-  assert.equal(detail.history[0].actor.type, "work-source");
+
+  // 4. Later an orchestrator plan and run are created for PACE-901
+  const runPlan = {
+    issue: "PACE-901",
+    summary: "Add rate limiting middleware",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    allowedPaths: ["backend/**"],
+    workSource: {
+      provider: "fake-provider",
+      id: "PACE-901",
+      url: "https://worksources.internal/issues/PACE-901"
+    }
+  };
+  const runId = store.createRun("PACE-901", runPlan);
+  store.transition(runId, "eligible", {});
+
+  // 5. buildPmWorkspace() is called again -> PACE-901 is NO LONGER in needsPlanning!
+  const wsAfter = buildPmWorkspace(settings, { store });
+  assert.equal(wsAfter.counts.needsPlanning, 0, "Item must disappear from needsPlanning once an active run exists");
+  const plannedItem = wsAfter.items.find(i => i.issueKey === "PACE-901");
+  assert.ok(plannedItem);
+  assert.notEqual(plannedItem.operationalGroup, "needsPlanning");
 });
 
 test("8. Security Gates: loopback check, content-type 415, human-only actions blocked", async () => {
