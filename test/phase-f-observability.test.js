@@ -1035,6 +1035,85 @@ test("10. Aggregate summary API & Truthful zero state: windows (1h, 24h, 7d) and
     assert.equal(resOrch.json.metrics.totalUsage.inputTokens, 5000);
     assert.equal(resOrch.json.metrics.totalUsage.outputTokens, 2000);
     assert.equal(resOrch.json.metrics.runsCompleted, 1);
+
+    // 6. Truthful Aggregate Token Ledger Tests (unknown is null, never zero):
+    // A. One run with input-only usage -> aggregate input known, output/total null
+    const partialStore = makeTestStore();
+    const partialSettings = makeSettings(partialStore);
+    const rPart1 = partialStore.createRun("PACE-1002", { issue: "PACE-1002" });
+    partialStore.recordTelemetryEvent({ eventId: `t-${rPart1}-1-q`, runId: rPart1, stage: "queued", sequence: 1 });
+    partialStore.recordTelemetryEvent({ eventId: `t-${rPart1}-2-s`, runId: rPart1, stage: "started", sequence: 2 });
+    partialStore.recordTelemetryEvent({
+      eventId: `t-${rPart1}-term`,
+      runId: rPart1,
+      stage: "terminal",
+      status: "completed",
+      sequence: 999,
+      usage: { inputTokens: 1000, outputTokens: null, totalTokens: null, available: true }
+    });
+    partialStore.transition(rPart1, "completed", {});
+
+    const sumPart1 = buildObservabilitySummary(partialSettings, { store: partialStore, window: "24h" });
+    assert.equal(sumPart1.metrics.totalUsage.available, true);
+    assert.equal(sumPart1.metrics.totalUsage.inputTokens, 1000);
+    assert.equal(sumPart1.metrics.totalUsage.outputTokens, null, "outputTokens must be null when unknown, not zero");
+    assert.equal(sumPart1.metrics.totalUsage.totalTokens, null, "totalTokens must be null when unknown, not zero");
+
+    // B. One full-usage run + one partial-usage run -> do not expose incomplete output/total sum as complete truth
+    const rFull2 = partialStore.createRun("PACE-1003", { issue: "PACE-1003" });
+    partialStore.recordTelemetryEvent({ eventId: `t-${rFull2}-1-q`, runId: rFull2, stage: "queued", sequence: 1 });
+    partialStore.recordTelemetryEvent({ eventId: `t-${rFull2}-2-s`, runId: rFull2, stage: "started", sequence: 2 });
+    partialStore.recordTelemetryEvent({
+      eventId: `t-${rFull2}-term`,
+      runId: rFull2,
+      stage: "terminal",
+      status: "completed",
+      sequence: 999,
+      usage: { inputTokens: 500, outputTokens: 250, totalTokens: 750, available: true }
+    });
+    partialStore.transition(rFull2, "completed", {});
+
+    const sumMixed = buildObservabilitySummary(partialSettings, { store: partialStore, window: "24h" });
+    assert.equal(sumMixed.metrics.totalUsage.available, true);
+    assert.equal(sumMixed.metrics.totalUsage.usageRuns, 2);
+    assert.equal(sumMixed.metrics.totalUsage.inputTokens, 1500, "inputTokens known for both runs (1000 + 500)");
+    assert.equal(sumMixed.metrics.totalUsage.outputTokens, null, "outputTokens must be null when contributing data is incomplete");
+    assert.equal(sumMixed.metrics.totalUsage.totalTokens, null, "totalTokens must be null when contributing data is incomplete");
+
+    // C. All runs have complete usage -> aggregate exact totals normally
+    const completeStore = makeTestStore();
+    const completeSettings = makeSettings(completeStore);
+    const rC1 = completeStore.createRun("PACE-1004", { issue: "PACE-1004" });
+    completeStore.recordTelemetryEvent({ eventId: `t-${rC1}-1-q`, runId: rC1, stage: "queued", sequence: 1 });
+    completeStore.recordTelemetryEvent({ eventId: `t-${rC1}-2-s`, runId: rC1, stage: "started", sequence: 2 });
+    completeStore.recordTelemetryEvent({
+      eventId: `t-${rC1}-term`,
+      runId: rC1,
+      stage: "terminal",
+      status: "completed",
+      sequence: 999,
+      usage: { inputTokens: 1000, outputTokens: 300, totalTokens: 1300, available: true }
+    });
+    completeStore.transition(rC1, "completed", {});
+
+    const rC2 = completeStore.createRun("PACE-1005", { issue: "PACE-1005" });
+    completeStore.recordTelemetryEvent({ eventId: `t-${rC2}-1-q`, runId: rC2, stage: "queued", sequence: 1 });
+    completeStore.recordTelemetryEvent({ eventId: `t-${rC2}-2-s`, runId: rC2, stage: "started", sequence: 2 });
+    completeStore.recordTelemetryEvent({
+      eventId: `t-${rC2}-term`,
+      runId: rC2,
+      stage: "terminal",
+      status: "completed",
+      sequence: 999,
+      usage: { inputTokens: 2000, outputTokens: 500, totalTokens: 2500, available: true }
+    });
+    completeStore.transition(rC2, "completed", {});
+
+    const sumComplete = buildObservabilitySummary(completeSettings, { store: completeStore, window: "24h" });
+    assert.equal(sumComplete.metrics.totalUsage.available, true);
+    assert.equal(sumComplete.metrics.totalUsage.inputTokens, 3000);
+    assert.equal(sumComplete.metrics.totalUsage.outputTokens, 800);
+    assert.equal(sumComplete.metrics.totalUsage.totalTokens, 3800);
   } finally {
     server.close();
   }
