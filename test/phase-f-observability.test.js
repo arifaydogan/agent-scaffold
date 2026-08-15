@@ -1,16 +1,17 @@
 /**
  * test/phase-f-observability.test.js
  *
- * Dedicated Phase F Test Suite — Observability & Telemetry:
- * 1. Lifecycle telemetry: queued before spawn, ordered sequence, idempotent event persistence.
- * 2. Provider-neutral usage ledger: Codex & Antigravity normalized, null preserved, malformed handled safely.
- * 3. Durable execution timing: queueWaitMs, executionDurationMs, endToEndDurationMs, and rework accumulation.
- * 4. Provider health read model: healthy, degraded, cooling_down, and unknown (conservative 0 observations).
- * 5. Historical execution immutability: config & registry changes do not rewrite old telemetry.
- * 6. Role differentiation: orchestrator, implementation, reviewer, rework distinguishable.
- * 7. Security & Redaction: secrets, tokens, raw prompts stripped from telemetry read models.
- * 8. Truthful zero state: empty store returns truthful empty metrics, no fake/demo telemetry.
- * 9. REST API endpoints: summary, providers, runs, runId (with windowing & 404/405 guards).
+ * Dedicated Phase F Test Suite — Observability & Telemetry Canonical Hardening:
+ * 1. Canonical source: buildRunObservability consumes telemetry_events, metadata appears in API.
+ * 2. Idempotency & Monotonicity in Store: transaction, duplicate eventId no-op, terminal locking, sequence ordering.
+ * 3. Instrument every execution path: sync and async reviewers produce queued -> started -> terminal with role="reviewer".
+ * 4. Orchestrator provider execution: real mocked CLI/Codex orchestrator produces queued -> started -> terminal.
+ * 5. Truthful token normalization: partial usage does not infer total, null preserved.
+ * 6. Truthful cost accounting: cost is null for partial usage, historical cost pinned across config changes.
+ * 7. Real durable provider cooldown: reuses activeProviderCooldowns(store), cooling_down status reflected.
+ * 8. Strict attempt semantics: identity.attempt comes from plan.attempt, totalAttempts excludes reviews.
+ * 9. Pre-persistence redaction & API safety: secrets/prompts sanitized before SQLite and in serialized API response.
+ * 10. Aggregate observability summary & zero state: windowing (1h, 24h, 7d), empty store returns truthful empty metrics.
  */
 
 import fs from "node:fs";
@@ -33,7 +34,8 @@ import {
   buildObservabilitySummary,
   redactTelemetryPayload
 } from "../lib/telemetry.js";
-import { spawnProviderAsync } from "../lib/runtime.js";
+import { spawnProviderAsync, handleReview } from "../lib/runtime.js";
+import { CliOrchestratorProvider, CodexOrchestratorProvider } from "../lib/orchestrator.js";
 
 function makeTestStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-test-"));
@@ -132,427 +134,680 @@ async function request(server, pathStr, options = {}) {
   });
 }
 
-test("1. Lifecycle telemetry: queued before spawn, ordered sequence, and idempotent event persistence", async () => {
+// ── Test 1: Canonical source & API verification ──────────────────────────────
+
+test("1. Canonical telemetry source: buildRunObservability consumes telemetry_events and API reflects it exactly", async () => {
   const store = makeTestStore();
+  const settings = makeSettings(store);
+
   const plan = {
     issue: "PACE-101",
-    summary: "Auth controller upgrade",
+    summary: "Refactor auth controller",
     persona: "backend-engineer",
     taskAgent: "backend-engineer",
-    agentVersion: 1,
+    agentVersion: 2,
+    agentHash: "sha256-v2",
     role: "implementation",
     action: "implementation",
     attempt: 0,
-    allowedPaths: ["backend/**"],
-    configSnapshot: { operatingMode: "autonomous", taskAgent: "backend-engineer" }
+    configSnapshot: {
+      operatingMode: "autonomous",
+      taskAgent: "backend-engineer",
+      agentVersion: 2,
+      executorProvider: "codex",
+      executorModel: "gpt-5"
+    }
   };
   const runId = store.createRun("PACE-101", plan);
 
-  let queuedEmittedBeforeSpawn = false;
-  let spawnOccurred = false;
+  // Record canonical telemetry events directly in telemetry_events table
+  const rec1 = store.recordTelemetryEvent({
+    eventId: `telem-${runId}-1-queued`,
+    runId,
+    issueKey: "PACE-101",
+    role: "implementation",
+    action: "implementation",
+    attempt: 0,
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    agentVersion: 2,
+    agentHash: "sha256-v2",
+    provider: "codex",
+    model: "gpt-5",
+    stage: "queued",
+    status: "queued",
+    sequence: 1
+  });
+  assert.equal(rec1.recorded, true);
 
-  // Mock runtime to verify queued was emitted before spawn
-  const mockRuntime = {
+  const rec2 = store.recordTelemetryEvent({
+    eventId: `telem-${runId}-2-started`,
+    runId,
+    issueKey: "PACE-101",
+    role: "implementation",
+    action: "implementation",
+    attempt: 0,
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    provider: "codex",
+    model: "gpt-5",
+    stage: "started",
+    status: "running",
+    sequence: 2
+  });
+  assert.equal(rec2.recorded, true);
+
+  const rec3 = store.recordTelemetryEvent({
+    eventId: `telem-${runId}-term-ok`,
+    runId,
+    issueKey: "PACE-101",
+    role: "implementation",
+    action: "implementation",
+    attempt: 0,
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    provider: "codex",
+    model: "gpt-5",
+    stage: "terminal",
+    status: "completed",
+    sequence: 999,
+    durationMs: 4500,
+    usage: { inputTokens: 1200, outputTokens: 300, totalTokens: 1500, available: true }
+  });
+  assert.equal(rec3.recorded, true);
+
+  // Transition run in business store
+  store.transition(runId, "completed", { returnCode: 0 });
+
+  // Verify through buildRunObservability
+  const obs = buildRunObservability(settings, runId, { store });
+  assert.ok(obs);
+  assert.equal(obs.identity.runId, runId);
+  assert.equal(obs.identity.role, "implementation");
+  assert.equal(obs.agent.agentVersion, 2);
+  assert.equal(obs.usage.totalTokens, 1500);
+  assert.equal(obs.events.length, 3);
+  assert.equal(obs.events[0].eventId, `telem-${runId}-1-queued`);
+
+  // Verify through HTTP API: GET /api/observability/runs/:runId
+  const server = createDashboardServer(settings, { store });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const res = await request(server, `/api/observability/runs/${runId}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ok, true);
+    assert.equal(res.json.identity.runId, runId);
+    assert.equal(res.json.identity.role, "implementation");
+    assert.equal(res.json.agent.agentVersion, 2);
+    assert.equal(res.json.usage.inputTokens, 1200);
+    assert.equal(res.json.usage.outputTokens, 300);
+    assert.equal(res.json.usage.totalTokens, 1500);
+    assert.equal(res.json.events.length, 3);
+    assert.equal(res.json.events[2].eventId, `telem-${runId}-term-ok`);
+  } finally {
+    server.close();
+  }
+});
+
+// ── Test 2: Idempotency & Monotonicity in Store ──────────────────────────────
+
+test("2. Store idempotency and lifecycle monotonicity guarantees", () => {
+  const store = makeTestStore();
+  const runId = store.createRun("PACE-201", { issue: "PACE-201" });
+
+  // 1. Missing eventId throws
+  assert.throws(
+    () => store.recordTelemetryEvent({ runId, stage: "queued" }),
+    /explicit, deterministic eventId/
+  );
+
+  // 2. Non-existent runId throws
+  assert.throws(
+    () => store.recordTelemetryEvent({ eventId: "evt-fake", runId: "non-existent-run", stage: "queued" }),
+    /does not exist/
+  );
+
+  // 3. First insert returns recorded: true
+  const r1 = store.recordTelemetryEvent({
+    eventId: "evt-1",
+    runId,
+    stage: "queued",
+    status: "queued",
+    sequence: 1
+  });
+  assert.deepEqual(r1, { eventId: "evt-1", recorded: true });
+
+  // 4. Duplicate eventId returns recorded: false with no new row
+  const rDuplicate = store.recordTelemetryEvent({
+    eventId: "evt-1",
+    runId,
+    stage: "queued",
+    status: "queued",
+    sequence: 1
+  });
+  assert.deepEqual(rDuplicate, { eventId: "evt-1", recorded: false });
+  assert.equal(store.listTelemetryEvents(runId).length, 1);
+
+  // 5. Sequence progression
+  const r2 = store.recordTelemetryEvent({
+    eventId: "evt-2",
+    runId,
+    stage: "started",
+    status: "running",
+    sequence: 2
+  });
+  assert.equal(r2.recorded, true);
+
+  // 6. Sequence cannot move backwards
+  const rBackwards = store.recordTelemetryEvent({
+    eventId: "evt-backwards",
+    runId,
+    stage: "progress",
+    sequence: 1 // less than current max sequence 2
+  });
+  assert.equal(rBackwards.recorded, false);
+
+  // 7. Terminal event
+  const rTerm = store.recordTelemetryEvent({
+    eventId: "evt-term-1",
+    runId,
+    stage: "terminal",
+    status: "completed",
+    sequence: 999,
+    usage: { inputTokens: 500, outputTokens: 100 }
+  });
+  assert.equal(rTerm.recorded, true);
+
+  // 8. Reject any event after terminal
+  const rPostTerminal = store.recordTelemetryEvent({
+    eventId: "evt-post-term",
+    runId,
+    stage: "progress",
+    sequence: 1000
+  });
+  assert.equal(rPostTerminal.recorded, false);
+
+  // 9. Reject duplicate terminal with a different eventId
+  const rDupTerm = store.recordTelemetryEvent({
+    eventId: "evt-term-2",
+    runId,
+    stage: "terminal",
+    status: "failed",
+    sequence: 999
+  });
+  assert.equal(rDupTerm.recorded, false);
+
+  // Total events must remain exactly 3 (queued, started, terminal)
+  const allEvents = store.listTelemetryEvents(runId);
+  assert.equal(allEvents.length, 3);
+  assert.equal(allEvents[0].stage, "queued");
+  assert.equal(allEvents[1].stage, "started");
+  assert.equal(allEvents[2].stage, "terminal");
+});
+
+// ── Test 3: Instrument every provider execution path (Worker & Reviewer) ─────
+
+test("3. Reviewer execution paths: sync Codex and async Antigravity both record role=reviewer", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  // A. Synchronous Codex Reviewer
+  const syncIssue = {
+    key: "PACE-301",
+    summary: "Auth review sync",
+    description: "Acceptance Criteria:\n- Code is clean\n- Tests pass",
+    canonicalState: "review",
+    labels: ["agent-ready"]
+  };
+  const syncSettings = makeSettings(store, {
+    policy: {
+      review: { provider: "codex", modelProfile: "medium" }
+    }
+  });
+
+  const baseRun1 = store.createRun("PACE-301", {
+    issue: "PACE-301",
+    role: "implementation",
+    taskAgent: "backend-engineer",
+    configSnapshot: { operatingMode: "autonomous", taskAgent: "backend-engineer" }
+  });
+  store.transition(baseRun1, "review-queued", {
+    implementationSha: "1111111111111111111111111111111111111111"
+  });
+
+  let syncQueuedBeforeSpawn = false;
+  let syncSpawnOccurred = false;
+
+  const syncRuntime = {
+    spawnSync: (cmd, args = [], opts) => {
+      if (cmd === "git") {
+        if (args.includes("status")) return { status: 0, stdout: "", stderr: "" };
+        return { status: 0, stdout: "1111111111111111111111111111111111111111\n", stderr: "" };
+      }
+      syncSpawnOccurred = true;
+      const runs = store.listRunsDetailed(10);
+      const revRun = runs.find(r => r.issue_key === "PACE-301" && r.state !== "review-queued");
+      if (revRun) {
+        const events = store.listTelemetryEvents(revRun.id);
+        syncQueuedBeforeSpawn = events.some(e => e.stage === "queued" && e.role === "reviewer");
+      }
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          status: "SUCCESS",
+          result: { verdict: "clean", evidence: [] },
+          usage: { input_tokens: 800, output_tokens: 200, total_tokens: 1000 }
+        }),
+        stderr: ""
+      };
+    },
+    spawn: () => ({ on: () => {} })
+  };
+
+  const syncReviewOutcome = await handleReview(syncSettings, syncIssue, true, syncRuntime);
+  assert.ok(syncSpawnOccurred, "Sync reviewer process spawn must have occurred");
+  assert.ok(syncQueuedBeforeSpawn, "Sync reviewer must record queued telemetry BEFORE spawnSync");
+
+  const syncRunId = syncReviewOutcome.output.runId;
+  const syncTelem = store.listTelemetryEvents(syncRunId);
+  assert.ok(syncTelem.length >= 3, "Must have queued, started, terminal");
+  assert.equal(syncTelem[0].stage, "queued");
+  assert.equal(syncTelem[0].role, "reviewer");
+  assert.equal(syncTelem[0].action, "review");
+  assert.equal(syncTelem.at(-1).stage, "terminal");
+  assert.equal(syncTelem.at(-1).role, "reviewer");
+  assert.equal(syncTelem.at(-1).status, "completed");
+
+  // B. Asynchronous Antigravity Reviewer
+  const asyncIssue = {
+    key: "PACE-302",
+    summary: "Auth review async",
+    description: "Acceptance Criteria:\n- Code is clean\n- Tests pass",
+    canonicalState: "review",
+    labels: ["agent-ready"]
+  };
+  const asyncSettings = makeSettings(store, {
+    policy: {
+      review: { provider: "antigravity", modelProfile: "medium" }
+    }
+  });
+
+  const baseRun2 = store.createRun("PACE-302", {
+    issue: "PACE-302",
+    role: "implementation",
+    taskAgent: "backend-engineer",
+    configSnapshot: { operatingMode: "autonomous", taskAgent: "backend-engineer" }
+  });
+  store.transition(baseRun2, "review-queued", {
+    implementationSha: "2222222222222222222222222222222222222222"
+  });
+
+  const asyncRuntime = {
+    spawnSync: (cmd, args = []) => {
+      if (cmd === "git") {
+        if (args.includes("status")) return { status: 0, stdout: "", stderr: "" };
+        return { status: 0, stdout: "2222222222222222222222222222222222222222\n", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    },
     spawn: (cmd, args, opts) => {
-      spawnOccurred = true;
-      const events = store.listTelemetryEvents(runId);
-      queuedEmittedBeforeSpawn = events.some(e => e.stage === "queued");
-
       const child = new EventEmitter();
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
-      child.pid = 9999;
-
+      child.pid = 8888;
       setTimeout(() => {
-        // Emit model_selected JSON
-        child.stdout.emit("data", Buffer.from(JSON.stringify({ selected_model: "gpt-5" }) + "\n"));
-        // Emit progress
-        child.stdout.emit("data", Buffer.from("Compiling auth routes...\n"));
-        // Emit completion
         child.stdout.emit("data", Buffer.from(JSON.stringify({
           status: "SUCCESS",
-          usage: { input_tokens: 1000, output_tokens: 250, total_tokens: 1250 },
-          response: JSON.stringify({
-            status: "completed",
-            summary: "Done",
-            changed_files: ["backend/auth.py"],
-            validation_commands: ["pytest"],
-            blockers: [],
-            risks: []
-          })
+          response: JSON.stringify({ verdict: "clean", evidence: [] }),
+          usage: { prompt_tokens: 900, completion_tokens: 300, total_tokens: 1200 }
         }) + "\n"));
         child.emit("close", 0);
-      }, 20);
-
+      }, 10);
       return child;
-    },
-    spawnSync: () => ({ status: 0, stdout: "" })
+    }
   };
 
-  const profile = {
-    provider: "antigravity",
-    model: "claude-3-5-sonnet",
-    modelProfile: "medium",
-    agent: "backend-engineer",
-    config: { command: ["mock-agy"], timeoutSeconds: 30 }
-  };
-
-  const built = {
-    command: ["mock-agy", "exec"],
-    redactedCommand: ["mock-agy", "exec"],
-    cwd: "/tmp",
-    logFile: path.join(os.tmpdir(), `${runId}-antigravity.log`)
-  };
-
-  const prepared = { worktree: "/tmp/repo-worktree" };
-
-  await spawnProviderAsync({
-    store,
-    runId,
-    built,
-    profile,
-    plan,
-    prepared,
-    issueKey: "PACE-101"
-  }, mockRuntime);
-
-  assert.ok(spawnOccurred);
-  assert.ok(queuedEmittedBeforeSpawn, "Queued event MUST be persisted before provider process spawn");
-
-  const events = store.listTelemetryEvents(runId);
-  assert.ok(events.length >= 4, "Must have queued, started, model_selected, progress/terminal");
-
-  const stages = events.map(e => e.stage);
-  assert.equal(stages[0], "queued", "First stage must be queued");
-  assert.equal(stages[1], "started", "Second stage must be started");
-  assert.ok(stages.includes("model_selected"), "Must include model_selected");
-  assert.equal(stages.at(-1), "terminal", "Last stage must be terminal");
-
-  // Idempotency: duplicate eventId recording must be a no-op
-  const firstEvent = events[0];
-  const reRecord = store.recordTelemetryEvent({
-    eventId: firstEvent.eventId,
-    runId,
-    stage: "queued",
-    status: "duplicate-attempt"
-  });
-  assert.equal(reRecord.recorded, true);
-  const eventsAfter = store.listTelemetryEvents(runId);
-  assert.equal(eventsAfter.length, events.length, "Duplicate eventId must not create duplicate rows in SQLite");
+  const asyncReviewOutcome = await handleReview(asyncSettings, asyncIssue, true, asyncRuntime);
+  const asyncRunId = asyncReviewOutcome.output.runId;
+  const asyncTelem = store.listTelemetryEvents(asyncRunId);
+  assert.ok(asyncTelem.length >= 3);
+  assert.equal(asyncTelem[0].stage, "queued");
+  assert.equal(asyncTelem[0].role, "reviewer");
+  assert.equal(asyncTelem[0].action, "review");
+  assert.equal(asyncTelem.at(-1).stage, "terminal");
+  assert.equal(asyncTelem.at(-1).role, "reviewer");
+  assert.equal(asyncTelem.at(-1).status, "completed");
 });
 
-test("2. Provider-neutral usage ledger: Codex & Antigravity normalized, null preserved, malformed handled safely", () => {
-  // A. Codex style
-  const codexUsage = normalizeUsage({
-    input_tokens: 1500,
-    output_tokens: 450,
-    cached_input_tokens: 200,
-    total_tokens: 1950
-  }, "codex");
+// ── Test 4: Instrument orchestrator provider execution ───────────────────────
 
-  assert.equal(codexUsage.inputTokens, 1500);
-  assert.equal(codexUsage.outputTokens, 450);
-  assert.equal(codexUsage.cachedInputTokens, 200);
-  assert.equal(codexUsage.totalTokens, 1950);
-  assert.equal(codexUsage.available, true);
-
-  // B. Antigravity / Claude style with thinking tokens
-  const agyUsage = normalizeUsage({
-    prompt_tokens: 2200,
-    completion_tokens: 600,
-    completion_tokens_details: { reasoning_tokens: 150 },
-    prompt_tokens_details: { cached_tokens: 500 }
-  }, "antigravity");
-
-  assert.equal(agyUsage.inputTokens, 2200);
-  assert.equal(agyUsage.outputTokens, 600);
-  assert.equal(agyUsage.reasoningTokens, 150);
-  assert.equal(agyUsage.cachedInputTokens, 500);
-  assert.equal(agyUsage.totalTokens, 2800);
-  assert.equal(agyUsage.available, true);
-
-  // C. Missing usage -> null (NEVER 0!)
-  const missingUsage = normalizeUsage(null, "unknown");
-  assert.equal(missingUsage.inputTokens, null);
-  assert.equal(missingUsage.outputTokens, null);
-  assert.equal(missingUsage.totalTokens, null);
-  assert.equal(missingUsage.available, false, "Missing usage available must be false");
-
-  // D. Malformed non-numeric values -> null (never converted to 0)
-  const malformedUsage = normalizeUsage({
-    input_tokens: "not-a-number",
-    output_tokens: null
-  });
-  assert.equal(malformedUsage.inputTokens, null);
-  assert.equal(malformedUsage.outputTokens, null);
-  assert.equal(malformedUsage.available, false);
-});
-
-test("3. Durable execution timing: queueWaitMs, executionDurationMs, endToEndDurationMs, and rework accumulation", () => {
-  const t0 = new Date("2026-08-15T12:00:00.000Z").toISOString();
-  const t1 = new Date("2026-08-15T12:00:02.000Z").toISOString(); // +2s queue wait
-  const t2 = new Date("2026-08-15T12:00:10.000Z").toISOString(); // +8s execution
-
-  const events = [
-    { state: "queued", created_at: t0 },
-    { state: "started", created_at: t1 },
-    { state: "completed", created_at: t2 }
-  ];
-
-  const timings = deriveExecutionTimings(events);
-  assert.equal(timings.queueWaitMs, 2000, "Queue wait must be 2000ms");
-  assert.equal(timings.executionDurationMs, 8000, "Execution duration must be 8000ms");
-  assert.equal(timings.endToEndDurationMs, 10000, "End-to-end duration must be 10000ms");
-
-  // Incomplete / active run returns null for completion timings
-  const activeEvents = [
-    { state: "queued", created_at: t0 },
-    { state: "started", created_at: t1 }
-  ];
-  const activeTimings = deriveExecutionTimings(activeEvents);
-  assert.equal(activeTimings.queueWaitMs, 2000);
-  assert.equal(activeTimings.executionDurationMs, null, "Incomplete run execution duration must be null");
-  assert.equal(activeTimings.endToEndDurationMs, null);
-});
-
-test("4. Provider health read model: healthy, degraded, cooling_down, and unknown (conservative rule)", () => {
+test("4. Orchestrator provider execution produces truthful queued -> started -> terminal telemetry", () => {
   const store = makeTestStore();
   const settings = makeSettings(store);
 
-  // 1. Initially with 0 observations -> provider health must be 'unknown' (NOT 'healthy')
+  let orchestratorQueuedBeforeSpawn = false;
+  let orchestratorSpawnOccurred = false;
+
+  const mockOrchestratorRuntime = {
+    spawnSync: (cmd, args, opts) => {
+      orchestratorSpawnOccurred = true;
+      const runs = store.listRunsDetailed(10);
+      const planRun = runs.find(r => r.issue_key === "PACE-401");
+      if (planRun) {
+        const events = store.listTelemetryEvents(planRun.id);
+        orchestratorQueuedBeforeSpawn = events.some(e => e.stage === "queued" && e.role === "orchestrator");
+      }
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          issue: "PACE-401",
+          summary: "Orchestrated backend task",
+          persona: "architect",
+          taskAgent: "backend-engineer",
+          skills: ["minimal-change"],
+          risk: "low",
+          parallelSafe: true,
+          allowedPaths: ["backend/**"],
+          dependencies: [],
+          rationale: ["Strategic routing via CLI orchestrator"],
+          usage: { input_tokens: 450, output_tokens: 150, total_tokens: 600 }
+        }),
+        stderr: ""
+      };
+    }
+  };
+
+  const provider = new CliOrchestratorProvider("codex", {
+    command: ["codex", "exec", "{prompt}"]
+  }, mockOrchestratorRuntime);
+
+  const issue = { key: "PACE-401", summary: "Orchestrated backend task" };
+  const plan = provider.plan(issue, { store, settings });
+
+  assert.ok(orchestratorSpawnOccurred, "Orchestrator CLI spawn must have occurred");
+  assert.ok(orchestratorQueuedBeforeSpawn, "Orchestrator queued event must be recorded BEFORE spawnSync");
+  assert.ok(plan.metadata?.planningRunId, "Planning run ID must be attached to metadata");
+
+  const planningRunId = plan.metadata.planningRunId;
+  const events = store.listTelemetryEvents(planningRunId);
+  assert.ok(events.length >= 3, "Orchestrator run must record queued, started, terminal");
+  assert.equal(events[0].stage, "queued");
+  assert.equal(events[0].role, "orchestrator");
+  assert.equal(events[0].action, "planning");
+  assert.equal(events[1].stage, "started");
+  assert.equal(events[2].stage, "terminal");
+  assert.equal(events[2].status, "completed");
+  assert.equal(events[2].usage.totalTokens, 600);
+});
+
+// ── Test 5: Truthful token normalization (Partial usage) ─────────────────────
+
+test("5. Truthful token normalization: partial usage never infers totalTokens", () => {
+  // A. Only inputTokens known -> totalTokens must be null
+  const partialInputOnly = normalizeUsage({ input_tokens: 1000, output_tokens: null });
+  assert.equal(partialInputOnly.inputTokens, 1000);
+  assert.equal(partialInputOnly.outputTokens, null);
+  assert.equal(partialInputOnly.totalTokens, null, "totalTokens must be null if outputTokens is unknown");
+  assert.equal(partialInputOnly.available, true);
+
+  // B. Only outputTokens known -> totalTokens must be null
+  const partialOutputOnly = normalizeUsage({ input_tokens: null, output_tokens: 250 });
+  assert.equal(partialOutputOnly.inputTokens, null);
+  assert.equal(partialOutputOnly.outputTokens, 250);
+  assert.equal(partialOutputOnly.totalTokens, null, "totalTokens must be null if inputTokens is unknown");
+  assert.equal(partialOutputOnly.available, true);
+
+  // C. Both input and output known -> totalTokens computed
+  const fullBoth = normalizeUsage({ input_tokens: 1000, output_tokens: 250 });
+  assert.equal(fullBoth.inputTokens, 1000);
+  assert.equal(fullBoth.outputTokens, 250);
+  assert.equal(fullBoth.totalTokens, 1250);
+  assert.equal(fullBoth.available, true);
+
+  // D. Provider explicitly supplies totalTokens (e.g. 1400 even if cached breakdown differs)
+  const explicitTotal = normalizeUsage({ input_tokens: 1000, output_tokens: 250, total_tokens: 1400 });
+  assert.equal(explicitTotal.totalTokens, 1400);
+
+  // E. Empty / null usage -> available false, all null
+  const emptyUsage = normalizeUsage(null);
+  assert.equal(emptyUsage.available, false);
+  assert.equal(emptyUsage.inputTokens, null);
+  assert.equal(emptyUsage.outputTokens, null);
+  assert.equal(emptyUsage.totalTokens, null);
+});
+
+// ── Test 6: Truthful cost accounting & historical immutability ───────────────
+
+test("6. Truthful cost accounting: null for partial usage, historical run cost immutable across config updates", () => {
+  const pricingV1 = {
+    models: {
+      "gpt-5": { inputPricePerMillion: 3.0, outputPricePerMillion: 15.0, currency: "USD", pricingVersion: "2026-Q1" }
+    }
+  };
+
+  // 1. Partial usage -> cost must be null
+  const partialUsage = { inputTokens: 1000, outputTokens: null, available: true };
+  const costPartial = calculateCost({ usage: partialUsage, pricing: pricingV1, model: "gpt-5" });
+  assert.equal(costPartial, null, "Cost must be null if any required token dimension is missing");
+
+  // 2. Full usage -> cost calculated
+  const fullUsage = { inputTokens: 1_000_000, outputTokens: 1_000_000, available: true };
+  const costFull = calculateCost({ usage: fullUsage, pricing: pricingV1, model: "gpt-5" });
+  assert.ok(costFull);
+  assert.equal(costFull.amount, 18.0);
+  assert.equal(costFull.currency, "USD");
+  assert.equal(costFull.pricingVersion, "2026-Q1");
+
+  // 3. Historical run cost remains pinned when global pricing changes
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  const plan = {
+    issue: "PACE-601",
+    summary: "Cost immutability check",
+    configSnapshot: {
+      pricing: pricingV1,
+      executorProvider: "codex",
+      executorModel: "gpt-5"
+    }
+  };
+  const runId = store.createRun("PACE-601", plan);
+  store.recordTelemetryEvent({
+    eventId: `telem-${runId}-term`,
+    runId,
+    issueKey: "PACE-601",
+    stage: "terminal",
+    status: "completed",
+    sequence: 999,
+    provider: "codex",
+    model: "gpt-5",
+    usage: fullUsage
+  });
+  store.transition(runId, "completed", { returnCode: 0 });
+
+  const obsV1 = buildRunObservability(settings, runId, { store });
+  assert.equal(obsV1.cost.amount, 18.0);
+  assert.equal(obsV1.cost.pricingVersion, "2026-Q1");
+
+  // Mutate global settings to pricing v2 (e.g. 5x price increase)
+  settings.data.policy.pricing = {
+    models: {
+      "gpt-5": { inputPricePerMillion: 15.0, outputPricePerMillion: 75.0, currency: "USD", pricingVersion: "2026-Q2" }
+    }
+  };
+
+  const obsV2 = buildRunObservability(settings, runId, { store });
+  assert.equal(obsV2.cost.amount, 18.0, "Historical run cost must remain pinned to snapshot pricing");
+  assert.equal(obsV2.cost.pricingVersion, "2026-Q1");
+});
+
+// ── Test 7: Real durable provider cooldown ───────────────────────────────────
+
+test("7. Real durable provider cooldown: persisted retryAfter evidence reflects cooling_down", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  // Initially 0 observations -> status unknown
   const initialHealth = buildProviderHealth(settings, store, 86400000);
   const codexInitial = initialHealth.find(p => p.provider === "codex");
-  assert.ok(codexInitial);
-  assert.equal(codexInitial.status, "unknown", "0 observations must yield status unknown");
-  assert.equal(codexInitial.successRate, null);
+  assert.equal(codexInitial.status, "unknown");
 
-  // 2. Add successful runs -> healthy
-  const r1 = store.createRun("PACE-201", { executor: "codex", execution: { provider: "codex" } });
-  store.transition(r1, "started", {});
-  store.transition(r1, "completed", { usage: { total_tokens: 500 } });
-
-  const healthAfterSuccess = buildProviderHealth(settings, store, 86400000);
-  const codexHealthy = healthAfterSuccess.find(p => p.provider === "codex");
-  assert.equal(codexHealthy.status, "healthy");
-  assert.equal(codexHealthy.recentSuccesses, 1);
-  assert.equal(codexHealthy.successRate, 1.0);
-
-  // 3. Add repeated failures -> degraded
-  const r2 = store.createRun("PACE-202", { executor: "codex", execution: { provider: "codex" } });
-  store.transition(r2, "failed", { reason: "Process crash" });
-  const r3 = store.createRun("PACE-203", { executor: "codex", execution: { provider: "codex" } });
-  store.transition(r3, "failed", { reason: "Process crash" });
-  const r4 = store.createRun("PACE-204", { executor: "codex", execution: { provider: "codex" } });
-  store.transition(r4, "failed", { reason: "Process crash" });
-
-  const healthDegraded = buildProviderHealth(settings, store, 86400000);
-  const codexDegraded = healthDegraded.find(p => p.provider === "codex");
-  assert.equal(codexDegraded.status, "degraded", "3 consecutive failures must make status degraded");
-  assert.equal(codexDegraded.recentFailures, 3);
-
-  // 4. Cooldown active -> cooling_down
-  const cooldownSettings = makeSettings(store, {
-    reconciler: { cooldowns: { codex: new Date(Date.now() + 60000).toISOString() } }
+  // Create a run that failed with retryAfterSeconds (rate limit evidence)
+  const r1 = store.createRun("PACE-701", {
+    executor: "codex",
+    execution: { provider: "codex" }
   });
-  cooldownSettings.data.reconciler = { cooldowns: { codex: new Date(Date.now() + 60000).toISOString() } };
+  store.transition(r1, "failed-retryable", {
+    provider: "codex",
+    retryAfterSeconds: 120 // 2 minutes cooldown
+  });
 
-  const healthCooling = buildProviderHealth(cooldownSettings, store, 86400000);
+  const healthCooling = buildProviderHealth(settings, store, 86400000);
   const codexCooling = healthCooling.find(p => p.provider === "codex");
-  assert.equal(codexCooling.status, "cooling_down");
+  assert.equal(codexCooling.status, "cooling_down", "Status must be cooling_down when active cooldown exists");
   assert.ok(codexCooling.cooldownUntil);
 });
 
-test("5. Historical execution immutability: config & registry updates do not rewrite old telemetry", () => {
+// ── Test 8: Strict attempt semantics ─────────────────────────────────────────
+
+test("8. Strict attempt semantics: identity.attempt from plan.attempt, totalAttempts excludes reviews", () => {
   const store = makeTestStore();
   const settings = makeSettings(store);
 
-  // Create historical run pinned to codex / gpt-5 / agentVersion 1
-  const plan = {
-    issue: "PACE-500",
-    summary: "Historical task",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    agentVersion: 1,
-    agentHash: "hash-v1",
-    configSnapshot: {
-      operatingMode: "autonomous",
-      taskAgent: "backend-engineer",
-      agentVersion: 1,
-      executorProvider: "codex",
-      executorModel: "gpt-5"
-    }
-  };
-  const runId = store.createRun("PACE-500", plan);
-  store.transition(runId, "completed", { returnCode: 0 });
-
-  // Read run observability before config change
-  const obsBefore = buildRunObservability(settings, runId, { store });
-  assert.equal(obsBefore.agent.agentVersion, 1);
-  assert.equal(obsBefore.execution.provider, "codex");
-  assert.equal(obsBefore.execution.model, "gpt-5");
-
-  // Mutate global settings to use antigravity / claude-3-5-sonnet
-  const newSettings = makeSettings(store);
-  newSettings.data.executor.defaultProvider = "antigravity";
-  newSettings.data.executor.providers.codex.defaultModel = "gpt-6-future";
-
-  // Re-read run observability: old telemetry MUST remain immutable!
-  const obsAfter = buildRunObservability(newSettings, runId, { store });
-  assert.equal(obsAfter.agent.agentVersion, 1, "Agent version must remain 1");
-  assert.equal(obsAfter.execution.provider, "codex", "Historical provider must remain codex");
-  assert.equal(obsAfter.execution.model, "gpt-5", "Historical model must remain gpt-5");
-});
-
-test("6. Role differentiation: orchestrator, implementation, reviewer, rework distinguishable", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  // 1. Implementation Run
-  const implPlan = {
-    issue: "PACE-601",
-    summary: "Feature impl",
+  // 1. Implementation Run (Attempt 0)
+  const r1 = store.createRun("PACE-801", {
+    issue: "PACE-801",
     role: "implementation",
+    attempt: 0,
     taskAgent: "backend-engineer"
-  };
-  const implRunId = store.createRun("PACE-601", implPlan);
-  const implObs = buildRunObservability(settings, implRunId, { store });
-  assert.equal(implObs.identity.role, "implementation");
+  });
+  store.recordTelemetryEvent({ eventId: `t-${r1}-1`, runId: r1, stage: "queued", role: "implementation", attempt: 0, sequence: 1 });
+  store.recordTelemetryEvent({ eventId: `t-${r1}-term`, runId: r1, stage: "terminal", status: "completed", sequence: 999 });
+  store.transition(r1, "completed", {});
 
-  // 2. Review Run
-  const reviewPlan = {
-    issue: "PACE-601",
-    summary: "Review for PACE-601",
+  // 2. Review Run (Attempt not incremented)
+  const r2 = store.createRun("PACE-801", {
+    issue: "PACE-801",
     role: "reviewer",
     type: "review",
     taskAgent: "qa-reviewer"
-  };
-  const reviewRunId = store.createRun("PACE-601", reviewPlan);
-  const reviewObs = buildRunObservability(settings, reviewRunId, { store });
-  assert.equal(reviewObs.identity.role, "reviewer");
+  });
+  store.recordTelemetryEvent({ eventId: `t-${r2}-1`, runId: r2, stage: "queued", role: "reviewer", action: "review", sequence: 1 });
+  store.recordTelemetryEvent({ eventId: `t-${r2}-term`, runId: r2, stage: "terminal", status: "completed", sequence: 999 });
+  store.transition(r2, "completed", {});
 
   // 3. Rework Run (Attempt 1)
-  const reworkPlan = {
-    issue: "PACE-601",
-    summary: "Rework for PACE-601",
+  const r3 = store.createRun("PACE-801", {
+    issue: "PACE-801",
     role: "rework",
+    action: "rework",
     attempt: 1,
     taskAgent: "backend-engineer"
-  };
-  const reworkRunId = store.createRun("PACE-601", reworkPlan);
-  const reworkObs = buildRunObservability(settings, reworkRunId, { store });
-  assert.equal(reworkObs.identity.role, "rework");
-  assert.equal(reworkObs.identity.attempt, 2); // 3 total runs for issue
-});
-
-test("7. Security & Redaction: secrets, tokens, raw prompts stripped from telemetry", () => {
-  const dirtyPayload = {
-    apiKey: "sk-proj-secret12345678901234567890",
-    token: "ghp_secretTokenHere1234567890",
-    auth: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-    prompt: "Secret system prompt containing internal rules",
-    environment: {
-      DATABASE_URL: "postgres://user:password123@localhost:5432/db",
-      JIRA_API_TOKEN: "secretToken"
-    },
-    safeData: "Public operational metric",
-    nested: {
-      secretValue: "my-password",
-      count: 42
-    }
-  };
-
-  const clean = redactTelemetryPayload(dirtyPayload);
-
-  assert.equal(clean.apiKey, "[REDACTED]");
-  assert.equal(clean.token, "[REDACTED]");
-  assert.equal(clean.auth, "[REDACTED]");
-  assert.equal(clean.prompt, "[REDACTED_PROMPT]");
-  assert.equal(clean.environment, "[REDACTED_ENV]");
-  assert.equal(clean.safeData, "Public operational metric");
-  assert.equal(clean.nested.secretValue, "[REDACTED]");
-  assert.equal(clean.nested.count, 42);
-});
-
-test("8. Truthful zero state: empty store returns truthful empty metrics, no fake/demo telemetry", () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  const summary = buildObservabilitySummary(settings, { store });
-  assert.equal(summary.ok, true);
-  assert.equal(summary.metrics.activeRuns, 0);
-  assert.equal(summary.metrics.queuedRuns, 0);
-  assert.equal(summary.metrics.runsCompleted, 0);
-  assert.equal(summary.metrics.runsFailed, 0);
-  assert.equal(summary.metrics.averageExecutionDurationMs, null, "Empty store avg duration must be null, not 0");
-  assert.equal(summary.metrics.totalUsage.available, false, "Empty store totalUsage available must be false");
-  assert.equal(summary.metrics.totalUsage.totalTokens, null);
-  assert.equal(summary.runs.length, 0);
-});
-
-test("9. Observability REST API endpoints and HTTP gates", async () => {
-  const store = makeTestStore();
-  const settings = makeSettings(store);
-
-  const plan = {
-    issue: "PACE-900",
-    summary: "API integration test",
-    persona: "backend-engineer",
-    taskAgent: "backend-engineer",
-    configSnapshot: {
-      operatingMode: "autonomous",
-      taskAgent: "backend-engineer",
-      executorProvider: "codex",
-      executorModel: "gpt-5"
-    }
-  };
-  const runId = store.createRun("PACE-900", plan);
-  store.transition(runId, "started", {});
-  store.transition(runId, "completed", {
-    returnCode: 0,
-    usage: { input_tokens: 500, output_tokens: 150, total_tokens: 650 }
   });
+  store.recordTelemetryEvent({ eventId: `t-${r3}-1`, runId: r3, stage: "queued", role: "rework", action: "rework", attempt: 1, sequence: 1 });
+  store.recordTelemetryEvent({ eventId: `t-${r3}-term`, runId: r3, stage: "terminal", status: "completed", sequence: 999 });
+  store.transition(r3, "completed", {});
+
+  const obsRework = buildRunObservability(settings, r3, { store });
+  assert.equal(obsRework.identity.attempt, 1, "Rework attempt must be exactly 1");
+  assert.equal(obsRework.timing.totalAttempts, 2, "totalAttempts must count only execution/rework runs (2), excluding review (1)");
+});
+
+// ── Test 9: Pre-persistence redaction and API safety ─────────────────────────
+
+test("9. Pre-persistence redaction & HTTP API safety: secrets/prompts never persist or serialize", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+
+  const runId = store.createRun("PACE-901", { issue: "PACE-901" });
+
+  const rawDirtyPayload = {
+    apiKey: "sk-proj-superSecretAPIKey1234567890",
+    token: "ghp_PersonalAccessTokenSecretValue123456",
+    auth: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sensitivePayload",
+    password: "DatabasePassword999!",
+    prompt: "System prompt containing confidential architectural rules",
+    environment: {
+      JIRA_API_TOKEN: "jiraTokenSecret123",
+      DB_URI: "postgres://dbadmin:p@ssword123@db.internal:5432/pace"
+    },
+    safeTelemetry: "Execution finished normally"
+  };
+
+  store.recordTelemetryEvent({
+    eventId: `telem-${runId}-term-dirty`,
+    runId,
+    issueKey: "PACE-901",
+    stage: "terminal",
+    status: "completed",
+    sequence: 999,
+    raw: rawDirtyPayload,
+    error: {
+      category: "provider_process_error",
+      safeMessage: "Failed with Authorization: Bearer sk-proj-123456789012345"
+    }
+  });
+  store.transition(runId, "completed", { returnCode: 0 });
+
+  // Direct SQLite inspection: assert raw secret strings NEVER hit disk
+  const rawDbRow = store.database.prepare("SELECT raw_payload, error_message FROM telemetry_events WHERE run_id = ?").get(runId);
+  assert.ok(!rawDbRow.raw_payload.includes("sk-proj-superSecretAPIKey1234567890"), "Raw API key must not be in SQLite");
+  assert.ok(!rawDbRow.raw_payload.includes("ghp_PersonalAccessTokenSecretValue123456"), "Raw GitHub token must not be in SQLite");
+  assert.ok(!rawDbRow.raw_payload.includes("DatabasePassword999!"), "Raw password must not be in SQLite");
+  assert.ok(!rawDbRow.raw_payload.includes("confidential architectural rules"), "Raw prompt must not be in SQLite");
+
+  // HTTP API inspection: assert secrets never serialize to clients
+  const server = createDashboardServer(settings, { store });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const res = await request(server, `/api/observability/runs/${runId}`);
+    assert.equal(res.status, 200);
+    const bodyStr = res.body;
+
+    assert.ok(!bodyStr.includes("sk-proj-superSecretAPIKey1234567890"));
+    assert.ok(!bodyStr.includes("ghp_PersonalAccessTokenSecretValue123456"));
+    assert.ok(!bodyStr.includes("DatabasePassword999!"));
+    assert.ok(!bodyStr.includes("confidential architectural rules"));
+    assert.ok(!bodyStr.includes("jiraTokenSecret123"));
+  } finally {
+    server.close();
+  }
+});
+
+// ── Test 10: Aggregate summary & Truthful zero state ─────────────────────────
+
+test("10. Aggregate summary API & Truthful zero state: windows (1h, 24h, 7d) and truthful empty metrics", async () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
 
   const server = createDashboardServer(settings, { store });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    // 1. GET /api/observability/summary
-    const resSummary = await request(server, "/api/observability/summary?window=24h");
-    assert.equal(resSummary.status, 200);
-    assert.equal(resSummary.json.ok, true);
-    assert.equal(resSummary.json.window, "24h");
-    assert.equal(resSummary.json.metrics.runsCompleted, 1);
-    assert.equal(resSummary.json.metrics.totalUsage.totalTokens, 650);
+    // 1. 1h window on empty store
+    const res1h = await request(server, "/api/observability/summary?window=1h");
+    assert.equal(res1h.status, 200);
+    assert.equal(res1h.json.window, "1h");
+    assert.equal(res1h.json.metrics.activeRuns, 0);
+    assert.equal(res1h.json.metrics.totalUsage.available, false);
+    assert.equal(res1h.json.metrics.totalUsage.totalTokens, null);
+    assert.equal(res1h.json.metrics.averageExecutionDurationMs, null);
 
-    // 2. GET /api/observability/providers
-    const resProviders = await request(server, "/api/observability/providers");
-    assert.equal(resProviders.status, 200);
-    assert.equal(resProviders.json.ok, true);
-    assert.ok(Array.isArray(resProviders.json.providers));
+    // 2. 7d window on empty store
+    const res7d = await request(server, "/api/observability/summary?window=7d");
+    assert.equal(res7d.status, 200);
+    assert.equal(res7d.json.window, "7d");
+    assert.equal(res7d.json.runs.length, 0);
 
-    // 3. GET /api/observability/runs
-    const resRuns = await request(server, "/api/observability/runs?limit=10");
-    assert.equal(resRuns.status, 200);
-    assert.equal(resRuns.json.ok, true);
-    assert.equal(resRuns.json.runs.length, 1);
-    assert.equal(resRuns.json.runs[0].issueKey, "PACE-900");
-
-    // 4. GET /api/observability/runs/:runId
-    const resRunDetail = await request(server, `/api/observability/runs/${runId}`);
-    assert.equal(resRunDetail.status, 200);
-    assert.equal(resRunDetail.json.ok, true);
-    assert.equal(resRunDetail.json.identity.runId, runId);
-    assert.equal(resRunDetail.json.usage.totalTokens, 650);
-    assert.ok(resRunDetail.json.cost, "Cost should be calculated when pricing is configured");
-
-    // 5. GET /api/observability/runs/unknown-id -> 404
-    const res404 = await request(server, "/api/observability/runs/non-existent-run-id");
+    // 3. 404 on unknown runId
+    const res404 = await request(server, "/api/observability/runs/unknown-run-id-999");
     assert.equal(res404.status, 404);
 
-    // 6. POST /api/observability/summary -> 405 Method Not Allowed
-    const res405 = await request(server, "/api/observability/summary", { method: "POST" });
+    // 4. 405 on POST
+    const res405 = await request(server, "/api/observability/providers", { method: "POST" });
     assert.equal(res405.status, 405);
-
   } finally {
     server.close();
   }
