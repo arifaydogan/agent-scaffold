@@ -1,18 +1,18 @@
 /**
  * test/phase-g1-graft.test.js
  *
- * Phase G.1 — NanoNets/Graft Code Intelligence Provider Suite (Real Contract):
+ * Phase G.1 — NanoNets/Graft Code Intelligence Provider Suite (Real Contract Closure):
  * 1. Lifecycle: disabled, missing binary, handshake, missing required tools, soft isError handling, timeout/buffer safety.
- * 2. Normalization: repo map text -> Architecture, find_code text -> Search, trace_calls (in/out) -> Trace, file_api text -> Snippet, check_freshness text -> Coverage.
- * 3. Path Security & Multi-Root Isolation: authorized repo & worktree accepted, unauthorized root rejected, repo-rooted and worktree-rooted client isolation.
+ * 2. Normalization: real lexical & structural find_code -> Search, real arrow trace_calls (in/out) -> Trace, file_api -> Snippet, real freshness markers -> Coverage.
+ * 3. Path Security, Multi-Root Isolation & Read-Only / No-Upkeep Safety: authorized repo/worktree isolation, verifying that provider execution NEVER mutates tracked repo files or ~/.codex configs.
  * 4. Production Planning Flow: defaultProvider="graft" collects Graft intelligence & passes exact plan to execution.
  * 5. Production Implementation Flow: executor prompt contains bounded Graft code intelligence.
  * 6. Production Review Lifecycle: changed files & call context from Graft reach reviewer prompt.
  * 7. Production Rework Lifecycle: pinned originating evidence + fresh rework intelligence collected separately.
  * 8. Provider Switching & Neutrality: codebase-memory <-> graft seamless configuration switch with identical normalized runtime contract.
- * 9. Truthful Handling of Stale / Unindexed / Unavailable Graft: degraded freshness attached as warning, unindexed reports not indexed.
+ * 9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: explicit graft check: STALE, NO GRAPH, and unknown text markers.
  * 10. Observability API Integration: /api/observability/runs/:runId exposes normalized Graft summary.
- * 11. Real Live Graft Binary Smoke Test: exercised if graft binary is on PATH, skipped otherwise.
+ * 11. Real Live Graft Binary Smoke Test with `graft build`: exercised if graft binary is on PATH, skipped otherwise.
  */
 
 import fs from "node:fs";
@@ -37,7 +37,11 @@ import {
   formatCodeIntelligencePromptSection,
   formatReviewIntelligencePromptSection,
   validatePathWithinRoot,
-  buildSafeMcpEnv
+  buildSafeMcpEnv,
+  parseGraftRepoMapText,
+  parseGraftFindCodeText,
+  parseGraftTraceText,
+  parseGraftFreshnessText
 } from "../lib/code-intelligence.js";
 import {
   createConfigSnapshot,
@@ -382,23 +386,26 @@ function defaultGraftToolHandler(name, args) {
 `;
     case "graft_find_code":
       assert.ok(args.query, "graft_find_code requires query per Graft schema");
-      return `1. lib/runtime.js:1120 \`handleImplementation\` (score: 0.95)
+      return `graft ask — "${args.query}"  (lexical)
+
+1. handleImplementation · function  [handleImplementation]
+   lib/runtime.js:L1120-L1145
    export function handleImplementation(settings, issue) { ... }
 `;
     case "graft_find_all":
       assert.ok(args.pattern, "graft_find_all requires pattern per Graft schema");
-      return `lib/runtime.js:1120: export function handleImplementation
+      return `- handleImplementation  lib/runtime.js:L1120-L1145  (calls) — export function handleImplementation(settings, issue) { ... }
 `;
     case "graft_trace_calls":
       assert.ok(args.symbol, "graft_trace_calls requires symbol per Graft schema");
       assert.ok(args.direction === "in" || args.direction === "out" || !args.direction, "direction must be 'in' or 'out'");
       if (args.direction === "out") {
-        return `Outbound calls from ${args.symbol} (depth 2):
-  -> issuePlan (lib/runtime.js:133)
+        return `handleImplementation · function · lib/runtime.js:L1120-L1145
+calls → issuePlan (lib/runtime.js:L133-L160)
 `;
       }
-      return `Inbound calls to ${args.symbol} (depth 2):
-  <- runIssue (lib/runtime.js:808)
+      return `handleImplementation · function · lib/runtime.js:L1120-L1145
+calls ← runIssue (lib/runtime.js:L808-L820)
 `;
     case "graft_file_api":
       assert.ok(args.file, "graft_file_api requires file per Graft schema");
@@ -406,7 +413,9 @@ function defaultGraftToolHandler(name, args) {
 export function runIssue(settings, issue) {}
 `;
     case "graft_check_freshness":
-      return `Graph is up to date with 42 indexed files`;
+      return `graft check: OK
+the graph is in sync with the code
+`;
     default:
       return "";
   }
@@ -580,9 +589,9 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
   boundedClient.close();
 });
 
-// ── Test 2: Graft Normalization with Real Text ──────────────────────────────
+// ── Test 2: Graft Normalization with Real Lexical & Structural Formats ──────
 
-test("2. Graft Normalization: repo map text -> Architecture, find_code text -> Search, trace_calls (in/out) -> Trace, file_api text -> Snippet, check_freshness text -> Coverage", async () => {
+test("2. Graft Normalization: real lexical & structural find_code -> Search, real arrow trace_calls (in/out) -> Trace, file_api -> Snippet, real freshness markers -> Coverage", async () => {
   const store = makeTestStore();
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "graft-norm-"));
   const settings = makeSettings(store, { repoPath: repoDir });
@@ -598,7 +607,7 @@ test("2. Graft Normalization: repo map text -> Architecture, find_code text -> S
   assert.ok(arch.entryPoints.some((e) => e.includes("lib/runtime.js")));
   assert.ok(arch.routes.some((r) => r.includes("GET /api/observability/runs/:runId")));
 
-  // 2. Search normalization from text
+  // 2. Lexical Search normalization (title on line 1, pointer on line 2)
   const search = await provider.searchCode("handleImplementation", { project: "agent-scaffold" });
   assert.equal(search.query, "handleImplementation");
   assert.equal(search.matches.length, 1);
@@ -607,16 +616,30 @@ test("2. Graft Normalization: repo map text -> Architecture, find_code text -> S
   assert.equal(search.matches[0].line, 1120);
   assert.equal(search.coverage, "covered");
 
-  // 3. Trace normalization calling in and out separately
+  // 3. Structural Search normalization via find_all
+  const structSearch = parseGraftFindCodeText(
+    "- handleImplementation  lib/runtime.js:L1120-L1145  (calls) — export function handleImplementation",
+    "handleImplementation"
+  );
+  assert.equal(structSearch.length, 1);
+  assert.equal(structSearch[0].symbol, "handleImplementation");
+  assert.equal(structSearch[0].file, "lib/runtime.js");
+  assert.equal(structSearch[0].line, 1120);
+
+  // 4. Trace normalization parsing real arrow lines
   const trace = await provider.tracePath({ project: "agent-scaffold", symbol: "handleImplementation" });
   assert.equal(trace.symbol, "handleImplementation");
   assert.equal(trace.callers.length, 1);
   assert.equal(trace.callers[0].symbol, "runIssue");
+  assert.equal(trace.callers[0].file, "lib/runtime.js");
+  assert.equal(trace.callers[0].line, 808);
   assert.equal(trace.callees.length, 1);
   assert.equal(trace.callees[0].symbol, "issuePlan");
+  assert.equal(trace.callees[0].file, "lib/runtime.js");
+  assert.equal(trace.callees[0].line, 133);
   assert.ok(trace.paths.length >= 2);
 
-  // 4. Snippet normalization from text
+  // 5. Snippet normalization from text
   const subFile = path.join(repoDir, "lib", "runtime.js");
   fs.mkdirSync(path.dirname(subFile), { recursive: true });
   fs.writeFileSync(subFile, "export function handleImplementation() {}");
@@ -625,28 +648,35 @@ test("2. Graft Normalization: repo map text -> Architecture, find_code text -> S
   assert.ok(snip.content.includes("handleImplementation"));
   assert.equal(snip.file, "lib/runtime.js");
 
-  // 5. Coverage normalization from text
+  // 6. Coverage normalization from real OK marker
   const coverage = await provider.checkCoverage({ files: ["lib/runtime.js"] });
   assert.equal(coverage.status, "covered");
   assert.equal(coverage.coverageRatio, 1.0);
 
-  // 6. Changes/Impact normalization without fake detect_changes
+  // 7. Truthful Changes/Impact normalization (normal risk with callers found)
   const impact = await provider.detectChanges({ files: ["lib/runtime.js"] });
   assert.ok(impact.changedFiles.includes("lib/runtime.js"));
   assert.ok(impact.callers.includes("runIssue"));
-  assert.ok(impact.risk === "medium" || impact.risk === "low");
+  assert.equal(impact.risk, "normal");
+  assert.equal(impact.coverage, "covered");
 
   provider.close();
 });
 
-// ── Test 3: Path Security & Multi-Root Client Isolation ─────────────────────
+// ── Test 3: Path Security, Multi-Root Isolation & Read-Only Safety ──────────
 
-test("3. Path Security & Multi-Root Isolation: authorized repo & worktree accepted, unauthorized root rejected, repo-rooted and worktree-rooted client isolation", async () => {
+test("3. Path Security, Multi-Root Isolation & Read-Only / No-Upkeep Safety: authorized repo/worktree isolation, verifying that provider execution NEVER mutates tracked repo files or ~/.codex configs", async () => {
   const store = makeTestStore();
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "graft-sec-"));
   const worktreeDir = path.join(repoDir, "worktrees");
   const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "graft-outside-"));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "graft-home-"));
+
   fs.mkdirSync(worktreeDir, { recursive: true });
+  fs.mkdirSync(path.join(fakeHome, ".codex"), { recursive: true });
+  const codexHooksPath = path.join(fakeHome, ".codex", "hooks.json");
+  const initialHooks = JSON.stringify({ version: "1.0", hooks: [] }, null, 2);
+  fs.writeFileSync(codexHooksPath, initialHooks);
 
   const spawnedCwds = [];
   const mockSpawn = createMockGraftSpawn(null, (cmd, args, opts) => {
@@ -658,7 +688,10 @@ test("3. Path Security & Multi-Root Isolation: authorized repo & worktree accept
     worktreeRoot: worktreeDir
   });
 
-  const provider = createCodeIntelligenceProvider(settings, { spawn: mockSpawn });
+  const provider = createCodeIntelligenceProvider(settings, {
+    spawn: mockSpawn,
+    env: { HOME: fakeHome }
+  });
 
   // A. Configured repository query uses repoDir cwd
   const health = await provider.health(repoDir);
@@ -716,6 +749,14 @@ test("3. Path Security & Multi-Root Isolation: authorized repo & worktree accept
   } catch (err) {
     if (err.code !== "EPERM") throw err;
   }
+
+  // G. Verify read-only safety: tracked files & ~/.codex/hooks.json remain byte-for-byte untouched
+  const finalHooks = fs.readFileSync(codexHooksPath, "utf8");
+  assert.equal(finalHooks, initialHooks, "Graft provider execution must NEVER modify ~/.codex configuration");
+
+  const gateRulePath = path.join(repoDir, ".agents", "rules", "orchestration-gates.md");
+  assert.ok(fs.existsSync(gateRulePath));
+  assert.equal(fs.readFileSync(gateRulePath, "utf8"), "# Gates\n", "Graft provider execution must NEVER modify repo rule files");
 
   provider.close();
 });
@@ -961,8 +1002,8 @@ test("7. Production Rework Lifecycle: pinned originating evidence + fresh rework
     if (name === "graft_find_code") {
       searchCallCount++;
       return searchCallCount === 1
-        ? `1. lib/runtime.js:1120 \`handleImplementation\` (score: 0.95)\n   export function handleImplementation() {}\n`
-        : `1. lib/runtime.js:1250 \`reworkFixHelper\` (score: 0.90)\n   export function reworkFixHelper() {}\n`;
+        ? `graft ask — "handleImplementation"  (lexical)\n\n1. handleImplementation · function  [handleImplementation]\n   lib/runtime.js:L1120-L1145\n   export function handleImplementation() {}\n`
+        : `graft ask — "reworkFixHelper"  (lexical)\n\n1. reworkFixHelper · function  [reworkFixHelper]\n   lib/runtime.js:L1250-L1270\n   export function reworkFixHelper() {}\n`;
     }
     return defaultGraftToolHandler(name, args);
   });
@@ -1069,7 +1110,6 @@ test("7. Production Rework Lifecycle: pinned originating evidence + fresh rework
 test("8. Provider Switching & Neutrality: codebase-memory <-> graft seamless configuration switch with identical normalized runtime contract", async () => {
   const store = makeTestStore();
   const mockCbmSpawn = (cmd, args, opts) => {
-    // codebase-memory uses upstream tool names
     const stdin = new EventEmitter();
     stdin.writable = true;
     const stdout = new EventEmitter();
@@ -1173,15 +1213,15 @@ test("8. Provider Switching & Neutrality: codebase-memory <-> graft seamless con
   graftProvider.close();
 });
 
-// ── Test 9: Truthful Handling of Stale / Unindexed / Unavailable Graft ──────
+// ── Test 9: Truthful Handling of Stale / Unindexed / Unknown Freshness Markers ─
 
-test("9. Truthful Handling of Stale / Unindexed / Unavailable Graft: degraded freshness attached as warning, unindexed reports not indexed", async () => {
+test("9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: explicit graft check: STALE, NO GRAPH, and unknown text markers", async () => {
   const store = makeTestStore();
 
   // A. Stale Graft graph reports partial coverage with warning
   const staleSpawn = createMockGraftSpawn((name, args) => {
     if (name === "graft_check_freshness") {
-      return "Graph is stale: 3 modified files detected";
+      return "graft check: STALE\ngraph is out of sync with workspace";
     }
     return defaultGraftToolHandler(name, args);
   });
@@ -1197,7 +1237,7 @@ test("9. Truthful Handling of Stale / Unindexed / Unavailable Graft: degraded fr
   // B. Unindexed Graft reports indexed: false and status: unknown
   const unindexedSpawn = createMockGraftSpawn((name, args) => {
     if (name === "graft_check_freshness") {
-      return "No graph found: run graft index first";
+      return "graft check: NO GRAPH\nrun graft build to index workspace";
     }
     return defaultGraftToolHandler(name, args);
   });
@@ -1207,7 +1247,34 @@ test("9. Truthful Handling of Stale / Unindexed / Unavailable Graft: degraded fr
   assert.ok(unindexedHealth.warning.includes("no Graft graph") || unindexedHealth.warning.includes("not indexed"));
   unindexedProvider.close();
 
-  // C. Unavailable Graft process allows planning to continue with explicit unavailable state
+  // C. Inconclusive unknown text marker reports unknown and does NOT claim ready/fresh
+  const unknownFreshSpawn = createMockGraftSpawn((name, args) => {
+    if (name === "graft_check_freshness") {
+      return "some unparseable response from future graft version";
+    }
+    return defaultGraftToolHandler(name, args);
+  });
+  const unknownFreshProvider = createCodeIntelligenceProvider(settings, { spawn: unknownFreshSpawn });
+  const unknownHealth = await unknownFreshProvider.health();
+  assert.equal(unknownHealth.indexed, false);
+  assert.ok(unknownHealth.warning.includes("could not be verified") || unknownHealth.warning.includes("not indexed"));
+  unknownFreshProvider.close();
+
+  // D. Truthful zero-caller impact with fresh graph reports low risk
+  const freshZeroCallerSpawn = createMockGraftSpawn((name, args) => {
+    if (name === "graft_trace_calls") {
+      return "handleImplementation · function · lib/runtime.js:L1120-L1145\n"; // no caller edges
+    }
+    return defaultGraftToolHandler(name, args);
+  });
+  const freshZeroProvider = createCodeIntelligenceProvider(settings, { spawn: freshZeroCallerSpawn });
+  const zeroImpact = await freshZeroProvider.detectChanges({ files: ["lib/runtime.js"] });
+  assert.equal(zeroImpact.risk, "low");
+  assert.equal(zeroImpact.coverage, "covered");
+  assert.ok(zeroImpact.reasons[0].includes("No indexed inbound callers found in the fresh covered Graft graph"));
+  freshZeroProvider.close();
+
+  // E. Unavailable Graft process allows planning to continue with explicit unavailable state
   const unavailableSpawn = () => {
     const err = new Error("spawn graft ENOENT");
     err.code = "ENOENT";
@@ -1311,9 +1378,9 @@ test("10. Observability API Integration: /api/observability/runs/:runId exposes 
   }
 });
 
-// ── Test 11: Real Live Graft Binary Smoke Test ──────────────────────────────
+// ── Test 11: Real Live Graft Binary Smoke Test with graft build ─────────────
 
-test("11. Real Live Graft Binary Smoke Test: exercised if graft binary is on PATH, skipped otherwise", async (t) => {
+test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft binary is on PATH, skipped otherwise", async (t) => {
   let hasGraft = false;
   try {
     execSync("graft --version", { stdio: "ignore" });
@@ -1336,6 +1403,11 @@ test("11. Real Live Graft Binary Smoke Test: exercised if graft binary is on PAT
   execSync("git add .", { cwd: liveRepo, stdio: "ignore" });
   execSync("git commit -m 'initial'", { cwd: liveRepo, stdio: "ignore" });
 
+  // Run structural build per Requirement 5 (no --deep, no graft init)
+  try {
+    execSync(`graft build "${liveRepo}"`, { stdio: "ignore" });
+  } catch {}
+
   const liveSettings = makeSettings(liveStore, {
     repoPath: liveRepo,
     codeIntelligence: {
@@ -1355,6 +1427,9 @@ test("11. Real Live Graft Binary Smoke Test: exercised if graft binary is on PAT
   const arch = await liveProvider.getArchitecture({ repoPath: liveRepo });
   assert.ok(arch);
   assert.equal(arch.provider, "graft");
+
+  const search = await liveProvider.searchCode("greet", { repoPath: liveRepo });
+  assert.ok(search);
 
   const snippet = await liveProvider.getSnippet({ repoPath: liveRepo, file: "index.js" });
   assert.ok(snippet.content.includes("greet"));
