@@ -1218,7 +1218,33 @@ test("8. Provider Switching & Neutrality: codebase-memory <-> graft seamless con
 test("9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: explicit graft check: STALE, NO GRAPH, and unknown text markers", async () => {
   const store = makeTestStore();
 
-  // A. Stale Graft graph reports partial coverage with warning
+  // A. Freshness precedence assertions:
+  // 1. graft check: OK & graph check: STALE => fresh: false
+  const p1 = parseGraftFreshnessText("graft check: OK\ngraph check: STALE");
+  assert.equal(p1.isFresh, false);
+  assert.equal(p1.isIndexed, true);
+
+  // 2. graft check: STALE & graph check: OK => fresh: false
+  const p2 = parseGraftFreshnessText("graft check: STALE\ngraph check: OK");
+  assert.equal(p2.isFresh, false);
+  assert.equal(p2.isIndexed, true);
+
+  // 3. graft check: NO GRAPH & graph check: OK => never fresh (indexed: false, fresh: false)
+  const p3 = parseGraftFreshnessText("graft check: NO GRAPH\ngraph check: OK");
+  assert.equal(p3.isFresh, false);
+  assert.equal(p3.isIndexed, false);
+
+  // 4. graft check: OK & graph check: OK => fresh: true
+  const p4 = parseGraftFreshnessText("graft check: OK\ngraph check: OK\nthe graph is in sync with the code");
+  assert.equal(p4.isFresh, true);
+  assert.equal(p4.isIndexed, true);
+
+  // 5. Unknown text marker => unindexed and unverified
+  const p5 = parseGraftFreshnessText("random unrecognized output");
+  assert.equal(p5.isFresh, false);
+  assert.equal(p5.isIndexed, false);
+
+  // B. Stale Graft graph reports partial coverage with warning
   const staleSpawn = createMockGraftSpawn((name, args) => {
     if (name === "graft_check_freshness") {
       return "graft check: STALE\ngraph is out of sync with workspace";
@@ -1234,7 +1260,7 @@ test("9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: exp
   assert.ok(coverage.warnings.some((w) => w.includes("stale") || w.includes("out of sync")));
   staleProvider.close();
 
-  // B. Unindexed Graft reports indexed: false and status: unknown
+  // C. Unindexed Graft reports indexed: false and status: unknown
   const unindexedSpawn = createMockGraftSpawn((name, args) => {
     if (name === "graft_check_freshness") {
       return "graft check: NO GRAPH\nrun graft build to index workspace";
@@ -1246,19 +1272,6 @@ test("9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: exp
   assert.equal(unindexedHealth.indexed, false);
   assert.ok(unindexedHealth.warning.includes("no Graft graph") || unindexedHealth.warning.includes("not indexed"));
   unindexedProvider.close();
-
-  // C. Inconclusive unknown text marker reports unknown and does NOT claim ready/fresh
-  const unknownFreshSpawn = createMockGraftSpawn((name, args) => {
-    if (name === "graft_check_freshness") {
-      return "some unparseable response from future graft version";
-    }
-    return defaultGraftToolHandler(name, args);
-  });
-  const unknownFreshProvider = createCodeIntelligenceProvider(settings, { spawn: unknownFreshSpawn });
-  const unknownHealth = await unknownFreshProvider.health();
-  assert.equal(unknownHealth.indexed, false);
-  assert.ok(unknownHealth.warning.includes("could not be verified") || unknownHealth.warning.includes("not indexed"));
-  unknownFreshProvider.close();
 
   // D. Truthful zero-caller impact with fresh graph reports low risk
   const freshZeroCallerSpawn = createMockGraftSpawn((name, args) => {
@@ -1274,7 +1287,23 @@ test("9. Truthful Handling of Stale / Unindexed / Unknown Freshness Markers: exp
   assert.ok(zeroImpact.reasons[0].includes("No indexed inbound callers found in the fresh covered Graft graph"));
   freshZeroProvider.close();
 
-  // E. Unavailable Graft process allows planning to continue with explicit unavailable state
+  // E. Per-file impact tracking: when one of multiple traces fails, risk is NEVER downgraded to low
+  const partialFailSpawn = createMockGraftSpawn((name, args) => {
+    if (name === "graft_trace_calls") {
+      if (args.symbol === "file1.js") {
+        return "file1 · function · file1.js:L1-L10\n"; // 0 callers
+      }
+      return { isError: true, text: "Trace failed for file2.js" };
+    }
+    return defaultGraftToolHandler(name, args);
+  });
+  const partialFailProvider = createCodeIntelligenceProvider(settings, { spawn: partialFailSpawn });
+  const partialImpact = await partialFailProvider.detectChanges({ files: ["file1.js", "file2.js"] });
+  assert.equal(partialImpact.risk, "unknown", "Must not claim low risk when one trace failed");
+  assert.equal(partialImpact.coverage, "partial", "Coverage must be partial when some traces failed");
+  partialFailProvider.close();
+
+  // F. Unavailable Graft process allows planning to continue with explicit unavailable state
   const unavailableSpawn = () => {
     const err = new Error("spawn graft ENOENT");
     err.code = "ENOENT";
@@ -1399,14 +1428,19 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
   execSync("git init", { cwd: liveRepo, stdio: "ignore" });
   execSync("git config user.name 'GraftLiveTest'", { cwd: liveRepo, stdio: "ignore" });
   execSync("git config user.email 'graft-live@test.local'", { cwd: liveRepo, stdio: "ignore" });
-  fs.writeFileSync(path.join(liveRepo, "index.js"), "export function greet(name) { return `Hello, ${name}`; }\n");
+
+  // Create a fixture with at least two functions where one calls the other
+  const mathFile = path.join(liveRepo, "src", "math.js");
+  fs.mkdirSync(path.dirname(mathFile), { recursive: true });
+  fs.writeFileSync(
+    mathFile,
+    "export function add(a, b) {\n  return a + b;\n}\n\nexport function calculateTotal(items) {\n  return items.reduce((acc, item) => add(acc, item), 0);\n}\n"
+  );
   execSync("git add .", { cwd: liveRepo, stdio: "ignore" });
   execSync("git commit -m 'initial'", { cwd: liveRepo, stdio: "ignore" });
 
-  // Run structural build per Requirement 5 (no --deep, no graft init)
-  try {
-    execSync(`graft build "${liveRepo}"`, { stdio: "ignore" });
-  } catch {}
+  // Run structural build per Requirement 4 without swallowing errors
+  execSync(`graft build "${liveRepo}"`);
 
   const liveSettings = makeSettings(liveStore, {
     repoPath: liveRepo,
@@ -1419,20 +1453,35 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
   });
 
   const liveProvider = createCodeIntelligenceProvider(liveSettings);
+
   const health = await liveProvider.health(liveRepo);
   assert.equal(health.configured, true);
   assert.equal(health.available, true);
-  assert.ok(health.capabilities.includes("graft_find_code") || health.capabilities.includes("graft_repo_map"));
+  assert.equal(health.indexed, true);
+
+  const coverage = await liveProvider.checkCoverage({ repoPath: liveRepo, files: ["src/math.js"] });
+  assert.equal(coverage.status, "covered");
 
   const arch = await liveProvider.getArchitecture({ repoPath: liveRepo });
   assert.ok(arch);
   assert.equal(arch.provider, "graft");
 
-  const search = await liveProvider.searchCode("greet", { repoPath: liveRepo });
-  assert.ok(search);
+  const search = await liveProvider.searchCode("calculateTotal", { repoPath: liveRepo });
+  assert.ok(search.matches.length > 0);
+  assert.ok(search.matches.some((m) => m.symbol === "calculateTotal" || m.file?.includes("math.js")));
 
-  const snippet = await liveProvider.getSnippet({ repoPath: liveRepo, file: "index.js" });
-  assert.ok(snippet.content.includes("greet"));
+  const traceIn = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "add", direction: "in" });
+  assert.ok(traceIn);
+
+  const traceOut = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "calculateTotal", direction: "out" });
+  assert.ok(traceOut);
+
+  const snippet = await liveProvider.getSnippet({ repoPath: liveRepo, file: "src/math.js" });
+  assert.ok(snippet.content.includes("calculateTotal"));
+
+  // Verify provider execution did not modify tracked repo files
+  const gitStatus = execSync("git status --porcelain", { cwd: liveRepo }).toString("utf8").trim();
+  assert.equal(gitStatus, "", "Graft provider execution must not leave modified or untracked repository files");
 
   liveProvider.close();
 });
