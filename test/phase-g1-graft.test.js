@@ -242,9 +242,48 @@ function createMockGraftSpawn(toolHandler, onSpawn) {
           toolName = "graft_find_code";
           toolArgs = { query: args[1] };
         } else if (subcmd === "callers" || subcmd === "trace") {
+          // Reject invalid / fabricated options
+          if (args.includes("--out")) {
+            stderr.emit("data", Buffer.from("error: unrecognized option '--out'\n"));
+            child.emit("close", 1);
+            return;
+          }
+
+          // Check --in path-prefix option
+          const inIdx = args.indexOf("--in");
+          if (inIdx !== -1) {
+            const inVal = args[inIdx + 1];
+            if (!inVal || inVal.startsWith("--")) {
+              stderr.emit("data", Buffer.from("error: option '--in' requires an argument\n"));
+              child.emit("close", 1);
+              return;
+            }
+            toolArgs.in = inVal;
+          }
+
+          // Check --direction option
+          let direction = "in";
+          const dirIdx = args.indexOf("--direction");
+          if (dirIdx !== -1) {
+            const dirVal = args[dirIdx + 1];
+            if (dirVal !== "in" && dirVal !== "out") {
+              stderr.emit("data", Buffer.from(`error: invalid value '${dirVal}' for '--direction' (must be 'in' or 'out')\n`));
+              child.emit("close", 1);
+              return;
+            }
+            direction = dirVal;
+          }
+
+          const depthIdx = args.indexOf("--depth");
+          if (depthIdx !== -1) {
+            toolArgs.depth = Number(args[depthIdx + 1]);
+          }
+
           toolName = "graft_trace_calls";
-          toolArgs = { symbol: args[1], direction: args.includes("--out") ? "out" : "in" };
-        } else if (subcmd === "skeleton" || subcmd === "api") {
+          toolArgs.symbol = args[1];
+          toolArgs.direction = direction;
+        }
+ else if (subcmd === "skeleton" || subcmd === "api") {
           toolName = "graft_file_api";
           toolArgs = { file: args[1] };
         } else if (subcmd === "grep") {
@@ -628,6 +667,21 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
   const healthRes = await boundedProvider.health();
   assert.equal(healthRes.available, false);
   assert.ok(healthRes.warning.includes("exceeded maximum buffer size"));
+
+  // G. Strict CLI argument grammar: rejects fabricated --out and --in without argument
+  const strictCliProvider = new GraftCodeIntelligenceProvider(
+    "graft",
+    { enabled: true, command: ["graft"] },
+    { spawn: createMockGraftSpawn() }
+  );
+  await assert.rejects(
+    strictCliProvider._execGraft(process.cwd(), "callers", ["handleImplementation", "--out"]),
+    /unrecognized option '--out'/
+  );
+  await assert.rejects(
+    strictCliProvider._execGraft(process.cwd(), "callers", ["handleImplementation", "--in"]),
+    /option '--in' requires an argument/
+  );
 });
 
 // ── Test 2: Graft Normalization with Real Lexical & Structural Formats ──────
@@ -1533,11 +1587,19 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
 
   const traceIn = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "add", direction: "in" });
   assert.ok(traceIn);
-  assert.ok(traceIn.callers.length > 0 || traceIn.paths.length > 0);
+  assert.ok(
+    traceIn.callers.some((c) => c.symbol === "calculateTotal" || c.file?.includes("math.js") || (typeof c === "string" && c.includes("calculateTotal"))) ||
+    traceIn.paths.some((p) => p.includes("calculateTotal")),
+    "tracePath(add, in) must contain calculateTotal as caller"
+  );
 
   const traceOut = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "calculateTotal", direction: "out" });
   assert.ok(traceOut);
-  assert.ok(traceOut.callees.length > 0 || traceOut.paths.length > 0);
+  assert.ok(
+    traceOut.callees.some((c) => c.symbol === "add" || c.file?.includes("math.js") || (typeof c === "string" && c.includes("add"))) ||
+    traceOut.paths.some((p) => p.includes("add")),
+    "tracePath(calculateTotal, out) must contain add as callee"
+  );
 
   const snippet = await liveProvider.getSnippet({ repoPath: liveRepo, file: "src/math.js" });
   assert.ok(snippet.content.includes("calculateTotal"));
