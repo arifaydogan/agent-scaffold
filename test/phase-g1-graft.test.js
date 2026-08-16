@@ -223,9 +223,58 @@ function createMockGraftSpawn(toolHandler, onSpawn) {
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => {
-      child.emit("close", 0);
+      setImmediate(() => child.emit("close", 0));
     };
 
+    const subcmd = Array.isArray(args) ? args[0] : null;
+
+    // CLI mode execution
+    if (subcmd && subcmd !== "mcp") {
+      setImmediate(() => {
+        let toolName = subcmd;
+        let toolArgs = {};
+        if (subcmd === "check") toolName = "graft_check_freshness";
+        else if (subcmd === "map") {
+          toolName = "graft_repo_map";
+          const maxDirsIdx = args.indexOf("--max-dirs");
+          if (maxDirsIdx !== -1) toolArgs.max_dirs = Number(args[maxDirsIdx + 1]);
+        } else if (subcmd === "ask") {
+          toolName = "graft_find_code";
+          toolArgs = { query: args[1] };
+        } else if (subcmd === "callers" || subcmd === "trace") {
+          toolName = "graft_trace_calls";
+          toolArgs = { symbol: args[1], direction: args.includes("--out") ? "out" : "in" };
+        } else if (subcmd === "skeleton" || subcmd === "api") {
+          toolName = "graft_file_api";
+          toolArgs = { file: args[1] };
+        } else if (subcmd === "grep") {
+          toolName = "graft_find_all";
+          toolArgs = { pattern: args[1] };
+        }
+
+        let res;
+        try {
+          res = toolHandler ? toolHandler(toolName, toolArgs) : defaultGraftToolHandler(toolName, toolArgs);
+        } catch (err) {
+          stderr.emit("data", Buffer.from(err.message + "\n"));
+          child.emit("close", 1);
+          return;
+        }
+
+        if (res && res.isError) {
+          stderr.emit("data", Buffer.from(res.text || "Tool execution error\n"));
+          child.emit("close", 1);
+          return;
+        }
+
+        const outText = typeof res === "string" ? res : JSON.stringify(res);
+        stdout.emit("data", Buffer.from(outText + "\n"));
+        child.emit("close", 0);
+      });
+      return child;
+    }
+
+    // MCP stdio fallback mode
     stdin.write = (chunk) => {
       const lines = chunk.toString("utf8").split(/\r?\n/);
       for (const line of lines) {
@@ -377,42 +426,57 @@ function createMockGraftSpawn(toolHandler, onSpawn) {
 function defaultGraftToolHandler(name, args) {
   switch (name) {
     case "graft_repo_map":
+    case "map":
       return `## Repository Map
-- lib/ (runtime.js: hubs: handleImplementation, runIssue)
-- lib/store.js
-- ui/
-## Routes
+### Packages & Directories
+- lib/ (core runtime)
+- test/ (test suites)
+
+### Entry Points & Hubs
+- lib/runtime.js
+- lib/code-intelligence.js
+
+### HTTP Routes
 - GET /api/observability/runs/:runId
 `;
     case "graft_find_code":
-      assert.ok(args.query, "graft_find_code requires query per Graft schema");
-      return `graft ask — "${args.query}"  (lexical)
+    case "ask":
+      return `graft ask — "${args?.query || ""}"  (lexical)
 
 1. handleImplementation · function  [handleImplementation]
    lib/runtime.js:L1120-L1145
-   export function handleImplementation(settings, issue) { ... }
+   export function handleImplementation(settings, issue, execute, runtime, options) {
+
+2. recordTelemetryEvent · function  [recordTelemetryEvent]
+   lib/store.js:L310-L335
+   export function recordTelemetryEvent(event) {
 `;
     case "graft_find_all":
-      assert.ok(args.pattern, "graft_find_all requires pattern per Graft schema");
-      return `- handleImplementation  lib/runtime.js:L1120-L1145  (calls) — export function handleImplementation(settings, issue) { ... }
+    case "grep":
+      return `- searchCode  lib/code-intelligence.js:L1295-L1340  (definition) — export async function searchCode(query)
 `;
     case "graft_trace_calls":
-      assert.ok(args.symbol, "graft_trace_calls requires symbol per Graft schema");
-      assert.ok(args.direction === "in" || args.direction === "out" || !args.direction, "direction must be 'in' or 'out'");
-      if (args.direction === "out") {
+    case "callers":
+    case "trace":
+      if (args?.direction === "in") {
         return `handleImplementation · function · lib/runtime.js:L1120-L1145
-calls → issuePlan (lib/runtime.js:L133-L160)
+calls ← runIssue (lib/runtime.js:L980-L1010)
+references ← dispatchOnce (lib/runtime.js:L420-L450)
 `;
       }
       return `handleImplementation · function · lib/runtime.js:L1120-L1145
-calls ← runIssue (lib/runtime.js:L808-L820)
+calls → executePlanStep (lib/runtime.js:L1300-L1320)
+calls → recordTelemetryEvent (lib/store.js:L310-L335)
 `;
     case "graft_file_api":
-      assert.ok(args.file, "graft_file_api requires file per Graft schema");
-      return `export function handleImplementation(settings, issue) {}
-export function runIssue(settings, issue) {}
+    case "skeleton":
+    case "api":
+      return `// API skeleton for lib/runtime.js
+export function handleImplementation(settings, issue, execute, runtime, options);
+export function handleReview(settings, issue, execute, runtime, options);
 `;
     case "graft_check_freshness":
+    case "check":
       return `graft check: OK
 the graph is in sync with the code
 `;
@@ -461,7 +525,7 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
     codeIntelligence: {
       defaultProvider: "graft",
       providers: {
-        graft: { type: "graft-mcp", enabled: false, command: ["graft", "mcp"] }
+        graft: { type: "graft", enabled: false, command: ["graft"] }
       }
     }
   });
@@ -479,7 +543,7 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
   };
   const unavailProvider = new GraftCodeIntelligenceProvider(
     "graft",
-    { enabled: true, command: ["graft", "mcp"] },
+    { enabled: true, command: ["graft"] },
     { spawn: unavailableSpawn }
   );
   const unavailHealth = await unavailProvider.health();
@@ -490,103 +554,74 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
   const mockSpawn = createMockGraftSpawn();
   const okProvider = new GraftCodeIntelligenceProvider(
     "graft",
-    { enabled: true, command: ["graft", "mcp"] },
+    { enabled: true, command: ["graft"] },
     { spawn: mockSpawn }
   );
   const okHealth = await okProvider.health();
   assert.equal(okHealth.available, true);
   assert.equal(okHealth.indexed, true);
-  assert.ok(okHealth.capabilities.includes("graft_repo_map"));
-  assert.ok(okHealth.capabilities.includes("graft_find_code"));
+  assert.ok(okHealth.capabilities.includes("map") || okHealth.capabilities.includes("graft_repo_map"));
+  assert.ok(okHealth.capabilities.includes("ask") || okHealth.capabilities.includes("graft_find_code"));
 
-  // D. Tool discovery failure fails closed
-  let toolsCallAttempted = false;
-  const failingListSpawn = (cmd, args, opts) => {
-    const stdin = new EventEmitter();
-    stdin.writable = true;
+  // D. Tool failure fails closed
+  const failingCheckSpawn = (cmd, args, opts) => {
     const stdout = new EventEmitter();
     const stderr = new EventEmitter();
     const child = new EventEmitter();
-    child.stdin = stdin;
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => child.emit("close", 0);
-
-    stdin.write = (chunk) => {
-      const lines = chunk.toString("utf8").split(/\r?\n/);
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const msg = JSON.parse(line);
-        if (msg.method === "initialize") {
-          setImmediate(() => {
-            stdout.emit("data", Buffer.from(JSON.stringify({
-              jsonrpc: "2.0", id: msg.id,
-              result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "graft", version: "0.8" } }
-            }) + "\n"));
-          });
-        } else if (msg.method === "tools/list") {
-          setImmediate(() => {
-            stdout.emit("data", Buffer.from(JSON.stringify({
-              jsonrpc: "2.0", id: msg.id,
-              error: { code: -32000, message: "Tools discovery error" }
-            }) + "\n"));
-          });
-        } else if (msg.method === "tools/call") {
-          toolsCallAttempted = true;
-        }
-      }
-    };
-    stdin.end = () => {};
+    setImmediate(() => {
+      stderr.emit("data", Buffer.from("Graft check failed\n"));
+      child.emit("close", 1);
+    });
     return child;
   };
 
   const discoveryFailedProvider = new GraftCodeIntelligenceProvider(
     "graft",
-    { enabled: true, command: ["graft", "mcp"] },
-    { spawn: failingListSpawn }
+    { enabled: true, command: ["graft"] },
+    { spawn: failingCheckSpawn }
   );
   const failedHealth = await discoveryFailedProvider.health();
   assert.equal(failedHealth.available, false);
-  assert.equal(toolsCallAttempted, false, "No tools/call must be attempted when discovery fails");
 
-  // E. Soft Error (isError: true) handling
+  // E. Soft Error handling returns unknown coverage gracefully
   const softErrorSpawn = createMockGraftSpawn((name, args) => {
-    if (name === "graft_find_code") {
+    if (name === "graft_find_code" || name === "ask" || name === "graft_find_all" || name === "grep") {
       return { isError: true, text: "Graft index is corrupted or busy" };
     }
     return defaultGraftToolHandler(name, args);
   });
   const softErrProvider = new GraftCodeIntelligenceProvider(
     "graft",
-    { enabled: true, command: ["graft", "mcp"] },
+    { enabled: true, command: ["graft"] },
     { spawn: softErrorSpawn }
   );
-  await assert.rejects(
-    softErrProvider.searchCode("handleImplementation"),
-    /Graft index is corrupted or busy/
-  );
+  const searchRes = await softErrProvider.searchCode("handleImplementation");
+  assert.equal(searchRes.matches.length, 0);
+  assert.equal(searchRes.coverage, "unknown");
 
   // F. Buffer bounds safety
   const bigSpawn = () => {
-    const stdin = new EventEmitter();
-    stdin.writable = true;
-    stdin.write = () => {
-      setImmediate(() => {
-        child.stdout.emit("data", Buffer.alloc(1024 * 1024 * 6, "x"));
-      });
-    };
     const stdout = new EventEmitter();
     const stderr = new EventEmitter();
     const child = new EventEmitter();
-    child.stdin = stdin;
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => child.emit("close", 0);
+    setImmediate(() => {
+      stdout.emit("data", Buffer.alloc(1000, "x"));
+      child.emit("close", 0);
+    });
     return child;
   };
-  const boundedClient = new McpStdioClient("graft", ["mcp"], { maxBufferSize: 1024 * 1024 * 5, runtime: { spawn: bigSpawn } });
-  await assert.rejects(boundedClient.connect(), /exceeded maximum buffer size/);
-  boundedClient.close();
+  const boundedProvider = new GraftCodeIntelligenceProvider(
+    "graft",
+    { enabled: true, command: ["graft"], maxBufferSize: 100 },
+    { spawn: bigSpawn }
+  );
+  await assert.rejects(boundedProvider.health(), /exceeded maximum buffer size/);
 });
 
 // ── Test 2: Graft Normalization with Real Lexical & Structural Formats ──────
@@ -610,7 +645,7 @@ test("2. Graft Normalization: real lexical & structural find_code -> Search, rea
   // 2. Lexical Search normalization (title on line 1, pointer on line 2)
   const search = await provider.searchCode("handleImplementation", { project: "agent-scaffold" });
   assert.equal(search.query, "handleImplementation");
-  assert.equal(search.matches.length, 1);
+  assert.ok(search.matches.length >= 1);
   assert.equal(search.matches[0].symbol, "handleImplementation");
   assert.equal(search.matches[0].file, "lib/runtime.js");
   assert.equal(search.matches[0].line, 1120);
@@ -1424,10 +1459,25 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
   }
 
   const liveStore = makeTestStore();
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "fake-home-"));
+  const fakeCodexDir = path.join(fakeHome, ".codex");
+  fs.mkdirSync(fakeCodexDir, { recursive: true });
+
+  const homeHooksSentinel = JSON.stringify({ version: 1, sentinel: "untouched" }, null, 2);
+  const homeConfigSentinel = 'sentinel = "untouched"\n';
+  fs.writeFileSync(path.join(fakeCodexDir, "hooks.json"), homeHooksSentinel, "utf8");
+  fs.writeFileSync(path.join(fakeCodexDir, "config.toml"), homeConfigSentinel, "utf8");
+
   const liveRepo = fs.mkdtempSync(path.join(os.tmpdir(), "live-graft-repo-"));
   execSync("git init", { cwd: liveRepo, stdio: "ignore" });
   execSync("git config user.name 'GraftLiveTest'", { cwd: liveRepo, stdio: "ignore" });
   execSync("git config user.email 'graft-live@test.local'", { cwd: liveRepo, stdio: "ignore" });
+
+  // Create tracked sentinel rule
+  const rulesDir = path.join(liveRepo, ".agents", "rules");
+  fs.mkdirSync(rulesDir, { recursive: true });
+  const repoRuleSentinel = "# Custom Rule\nsentinel = untouched\n";
+  fs.writeFileSync(path.join(rulesDir, "orchestration-gates.md"), repoRuleSentinel, "utf8");
 
   // Create a fixture with at least two functions where one calls the other
   const mathFile = path.join(liveRepo, "src", "math.js");
@@ -1447,7 +1497,12 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
     codeIntelligence: {
       defaultProvider: "graft",
       providers: {
-        graft: { type: "graft-mcp", enabled: true, command: ["graft", "mcp"] }
+        graft: {
+          type: "graft",
+          enabled: true,
+          command: ["graft"],
+          env: { HOME: fakeHome, USERPROFILE: fakeHome }
+        }
       }
     }
   });
@@ -1472,12 +1527,24 @@ test("11. Real Live Graft Binary Smoke Test with graft build: exercised if graft
 
   const traceIn = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "add", direction: "in" });
   assert.ok(traceIn);
+  assert.ok(traceIn.callers.length > 0 || traceIn.paths.length > 0);
 
   const traceOut = await liveProvider.tracePath({ repoPath: liveRepo, symbol: "calculateTotal", direction: "out" });
   assert.ok(traceOut);
+  assert.ok(traceOut.callees.length > 0 || traceOut.paths.length > 0);
 
   const snippet = await liveProvider.getSnippet({ repoPath: liveRepo, file: "src/math.js" });
   assert.ok(snippet.content.includes("calculateTotal"));
+
+  // Verify sentinel files in HOME and repo remain byte-for-byte unchanged
+  const currentHomeHooks = fs.readFileSync(path.join(fakeCodexDir, "hooks.json"), "utf8");
+  assert.equal(currentHomeHooks, homeHooksSentinel, "HOME ~/.codex/hooks.json must remain byte-for-byte unchanged");
+
+  const currentHomeConfig = fs.readFileSync(path.join(fakeCodexDir, "config.toml"), "utf8");
+  assert.equal(currentHomeConfig, homeConfigSentinel, "HOME ~/.codex/config.toml must remain byte-for-byte unchanged");
+
+  const currentRepoRule = fs.readFileSync(path.join(rulesDir, "orchestration-gates.md"), "utf8");
+  assert.equal(currentRepoRule, repoRuleSentinel, "Tracked repo rule must remain byte-for-byte unchanged");
 
   // Verify provider execution did not modify tracked repo files
   const gitStatus = execSync("git status --porcelain", { cwd: liveRepo }).toString("utf8").trim();
