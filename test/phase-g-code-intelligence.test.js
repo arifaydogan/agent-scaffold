@@ -494,19 +494,23 @@ test("1. Provider Lifecycle: disabled, unavailable, MCP handshake, env sanitizat
   boundedClient.close();
 });
 
-// ── Test 2: Real Index Lifecycle & Symlink Path Boundary ────────────────────
+// ── Test 2: Real Index Lifecycle & Authorized Root / Symlink Boundaries ────
 
-test("2. Real Index Lifecycle & Symlink Path Boundary: unindexed -> index_repository -> indexed, realpath symlink escape rejection", async () => {
+test("2. Real Index Lifecycle & Symlink Path Boundary: unindexed -> index_repository -> indexed, authorized root enforcement, relative snippet containment", async () => {
   const store = makeTestStore();
   let indexedState = false;
   let indexRepositoryCalled = false;
+
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "safe-repo-"));
+  const worktreeDir = path.join(repoDir, "worktrees");
+  fs.mkdirSync(worktreeDir, { recursive: true });
 
   const lifecycleSpawn = createMockMcpSpawn((name, args) => {
     if (name === "index_status") {
       return { is_indexed: indexedState, project_name: "agent-scaffold" };
     }
     if (name === "list_projects") {
-      return { projects: indexedState ? [{ name: "agent-scaffold", path: "/tmp/repo", indexed: true }] : [] };
+      return { projects: indexedState ? [{ name: "agent-scaffold", path: repoDir, indexed: true }] : [] };
     }
     if (name === "index_repository") {
       indexRepositoryCalled = true;
@@ -516,51 +520,95 @@ test("2. Real Index Lifecycle & Symlink Path Boundary: unindexed -> index_reposi
     return defaultToolHandler(name, args);
   });
 
-  const provider = new McpCodeIntelligenceProvider(
-    "codebase-memory",
-    { enabled: true, command: ["codebase-memory-mcp"] },
-    { spawn: lifecycleSpawn }
-  );
+  const settings = makeSettings(store, {
+    repoPath: repoDir,
+    worktreeRoot: worktreeDir
+  });
 
-  const health = await provider.health("/tmp/repo");
+  const provider = createCodeIntelligenceProvider(settings, { spawn: lifecycleSpawn });
+
+  const health = await provider.health(repoDir);
   assert.equal(health.available, true);
   assert.equal(health.indexed, true, "Provider must trigger index_repository and report indexed");
   assert.equal(indexRepositoryCalled, true, "index_repository must be called for unindexed repo");
 
-  // Real Symlink Path Safety: create real temp dirs and symlink escaping root
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "safe-root-"));
-  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "outside-root-"));
-  const targetInside = path.join(rootDir, "valid.js");
-  fs.writeFileSync(targetInside, "console.log('valid');");
+  // A. Authorized Root Enforcement: configured repo /safe/project
+  const safeProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), "safe-project-"));
+  const otherProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), "other-project-"));
+  const safeSettings = makeSettings(store, {
+    repoPath: safeProjectDir,
+    worktreeRoot: path.join(safeProjectDir, "worktrees")
+  });
+  const rootEnforcedProvider = createCodeIntelligenceProvider(safeSettings, { spawn: createMockMcpSpawn() });
 
-  // Inside file is allowed
-  assert.equal(validatePathWithinRoot(targetInside, [rootDir]), targetInside);
+  // provider.health("/etc") -> rejected (must not authorize itself)
+  await assert.rejects(
+    rootEnforcedProvider.health("/etc"),
+    /outside the authorized roots/
+  );
 
-  // Outside file is rejected
-  const targetOutside = path.join(outsideDir, "secret.js");
-  fs.writeFileSync(targetOutside, "SECRET");
-  assert.throws(() => validatePathWithinRoot(targetOutside, [rootDir]), /outside the authorized roots/);
+  // provider.searchCode(..., { repoPath: "/tmp/other-project" }) -> rejected
+  await assert.rejects(
+    rootEnforcedProvider.searchCode("query", { repoPath: otherProjectDir }),
+    /outside the authorized roots/
+  );
 
-  // Symlink pointing outside is rejected via fs.realpathSync
-  const symlinkPath = path.join(rootDir, "escape_link");
+  // Authorized worktree root is accepted
+  const leafWorktree = path.join(safeProjectDir, "worktrees", "PACE-101-leaf");
+  fs.mkdirSync(leafWorktree, { recursive: true });
+  const worktreeArch = await rootEnforcedProvider.getArchitecture({ repoPath: leafWorktree, project: "agent-scaffold" });
+  assert.ok(worktreeArch);
+
+  // Unauthorized worktree outside worktreeRoot is rejected
+  const unauthorizedWorktree = path.join(otherProjectDir, "unauthorized-worktree");
+  fs.mkdirSync(unauthorizedWorktree, { recursive: true });
+  await assert.rejects(
+    rootEnforcedProvider.getArchitecture({ repoPath: unauthorizedWorktree, project: "agent-scaffold" }),
+    /outside the authorized roots/
+  );
+
+  // B. Relative Snippet Paths: file = "lib/runtime.js" resolves relative to canonical repo root
+  const subFile = path.join(safeProjectDir, "lib", "runtime.js");
+  fs.mkdirSync(path.dirname(subFile), { recursive: true });
+  fs.writeFileSync(subFile, "export function handleImplementation() {}");
+
+  const validSnippet = await rootEnforcedProvider.getSnippet({ file: "lib/runtime.js", symbol: "handleImplementation" });
+  assert.ok(validSnippet);
+  assert.ok(validSnippet.content.includes("handleImplementation"));
+
+  // Relative traversal snippet paths escaping root are rejected
+  await assert.rejects(
+    rootEnforcedProvider.getSnippet({ file: "../../etc/passwd" }),
+    /outside the authorized roots/
+  );
+
+  // C. Real Symlink Path Safety: symlink escaping root is rejected via fs.realpathSync
+  const symlinkPath = path.join(safeProjectDir, "escape_link");
   try {
-    fs.symlinkSync(outsideDir, symlinkPath, "dir");
+    fs.symlinkSync(otherProjectDir, symlinkPath, "dir");
     const escapedFile = path.join(symlinkPath, "secret.js");
-    assert.throws(() => validatePathWithinRoot(escapedFile, [rootDir]), /outside the authorized roots/);
+    await assert.rejects(
+      rootEnforcedProvider.getSnippet({ file: escapedFile }),
+      /outside the authorized roots/
+    );
   } catch (err) {
     if (err.code !== "EPERM") throw err; // Windows non-admin symlink privilege fallback
   }
+
+  provider.close();
+  rootEnforcedProvider.close();
 });
 
-// ── Test 3: Real MCP Upstream Tool Schemas ──────────────────────────────────
+// ── Test 3: Real MCP Upstream Tool Schemas & Fail-Closed Tool Discovery ─────
 
-test("3. Real Upstream Tool Schemas: get_code_snippet (qualified_name), search_graph (name_pattern), trace_path (function_name), strict schema check", async () => {
+test("3. Real Upstream Tool Schemas: fail-closed tool discovery, unsupported tool rejection, strict schema check", async () => {
+  const store = makeTestStore();
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "schema-repo-"));
+  const settings = makeSettings(store, { repoPath: repoDir });
+
+  // A. Normal operation with all tools supported
   const mockSpawn = createMockMcpSpawn();
-  const provider = new McpCodeIntelligenceProvider(
-    "codebase-memory",
-    { enabled: true, command: ["codebase-memory-mcp"] },
-    { spawn: mockSpawn }
-  );
+  const provider = createCodeIntelligenceProvider(settings, { spawn: mockSpawn });
 
   // 1. getArchitecture (passes only project and aspects)
   const arch = await provider.getArchitecture({ project: "agent-scaffold" });
@@ -589,6 +637,165 @@ test("3. Real Upstream Tool Schemas: get_code_snippet (qualified_name), search_g
   assert.ok(snip.content.includes("handleImplementation"));
 
   provider.close();
+
+  // B. initialize succeeds + tools/list fails -> health unavailable/degraded & no tools/call attempted
+  let toolsCallAttempted1 = false;
+  const failingToolsListSpawn = (cmd, args, opts) => {
+    const stdin = new EventEmitter();
+    stdin.writable = true;
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const child = new EventEmitter();
+    child.stdin = stdin;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => child.emit("close", 0);
+
+    stdin.write = (chunk) => {
+      const lines = chunk.toString("utf8").split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "test", version: "1.0" } }
+            }) + "\n"));
+          });
+        } else if (msg.method === "notifications/initialized") {
+          // ack
+        } else if (msg.method === "tools/list") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              error: { code: -32000, message: "Tools list failed internal server error" }
+            }) + "\n"));
+          });
+        } else if (msg.method === "tools/call") {
+          toolsCallAttempted1 = true;
+        }
+      }
+    };
+    stdin.end = () => {};
+    return child;
+  };
+
+  const discoveryFailedProvider = createCodeIntelligenceProvider(settings, { spawn: failingToolsListSpawn });
+  const failedDiscoveryHealth = await discoveryFailedProvider.health();
+  assert.equal(failedDiscoveryHealth.available, false);
+  assert.ok(failedDiscoveryHealth.warning.includes("discovery failed") || failedDiscoveryHealth.warning.includes("Tools list failed"));
+  assert.equal(toolsCallAttempted1, false, "No tools/call must be attempted when tool discovery fails");
+
+  // C. initialize succeeds + tools/list returns [] -> operations rejected as unsupported
+  let toolsCallAttempted2 = false;
+  const emptyToolsListSpawn = (cmd, args, opts) => {
+    const stdin = new EventEmitter();
+    stdin.writable = true;
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const child = new EventEmitter();
+    child.stdin = stdin;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => child.emit("close", 0);
+
+    stdin.write = (chunk) => {
+      const lines = chunk.toString("utf8").split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "test", version: "1.0" } }
+            }) + "\n"));
+          });
+        } else if (msg.method === "notifications/initialized") {
+          // ack
+        } else if (msg.method === "tools/list") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: { tools: [] }
+            }) + "\n"));
+          });
+        } else if (msg.method === "tools/call") {
+          toolsCallAttempted2 = true;
+        }
+      }
+    };
+    stdin.end = () => {};
+    return child;
+  };
+
+  const emptyToolsProvider = createCodeIntelligenceProvider(settings, { spawn: emptyToolsListSpawn });
+  await assert.rejects(
+    emptyToolsProvider.getArchitecture({ project: "agent-scaffold" }),
+    /not supported by the provider/
+  );
+  await assert.rejects(
+    emptyToolsProvider.searchCode("query", { project: "agent-scaffold" }),
+    /not supported by the provider/
+  );
+  assert.equal(toolsCallAttempted2, false, "No tools/call must be sent when tools/list returned empty list");
+
+  // D. tools/list omits get_code_snippet -> getSnippet rejected before tools/call
+  let snippetCallAttempted = false;
+  const omittingSnippetSpawn = (cmd, args, opts) => {
+    const stdin = new EventEmitter();
+    stdin.writable = true;
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const child = new EventEmitter();
+    child.stdin = stdin;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => child.emit("close", 0);
+
+    stdin.write = (chunk) => {
+      const lines = chunk.toString("utf8").split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "test", version: "1.0" } }
+            }) + "\n"));
+          });
+        } else if (msg.method === "notifications/initialized") {
+          // ack
+        } else if (msg.method === "tools/list") {
+          setImmediate(() => {
+            stdout.emit("data", Buffer.from(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: {
+                tools: [
+                  { name: "get_architecture", inputSchema: UPSTREAM_TOOL_SCHEMAS.get_architecture }
+                ]
+              }
+            }) + "\n"));
+          });
+        } else if (msg.method === "tools/call") {
+          if (msg.params?.name === "get_code_snippet") {
+            snippetCallAttempted = true;
+          }
+        }
+      }
+    };
+    stdin.end = () => {};
+    return child;
+  };
+
+  const omittingProvider = createCodeIntelligenceProvider(settings, { spawn: omittingSnippetSpawn });
+  await assert.rejects(
+    omittingProvider.getSnippet({ file: "lib/runtime.js", symbol: "test" }),
+    /MCP tool 'get_code_snippet' is not supported by the provider/
+  );
+  assert.equal(snippetCallAttempted, false, "get_code_snippet must be rejected before tools/call");
 });
 
 // ── Test 4: Production Planning-to-Execution Flow ───────────────────────────
