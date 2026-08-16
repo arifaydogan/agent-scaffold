@@ -621,7 +621,13 @@ test("1. Graft Lifecycle: disabled, missing binary, handshake, missing required 
     { enabled: true, command: ["graft"], maxBufferSize: 100 },
     { spawn: bigSpawn }
   );
-  await assert.rejects(boundedProvider.health(), /exceeded maximum buffer size/);
+  await assert.rejects(
+    boundedProvider._execGraft(process.cwd(), "check", []),
+    /exceeded maximum buffer size/
+  );
+  const healthRes = await boundedProvider.health();
+  assert.equal(healthRes.available, false);
+  assert.ok(healthRes.warning.includes("exceeded maximum buffer size"));
 });
 
 // ── Test 2: Graft Normalization with Real Lexical & Structural Formats ──────
@@ -664,14 +670,14 @@ test("2. Graft Normalization: real lexical & structural find_code -> Search, rea
   // 4. Trace normalization parsing real arrow lines
   const trace = await provider.tracePath({ project: "agent-scaffold", symbol: "handleImplementation" });
   assert.equal(trace.symbol, "handleImplementation");
-  assert.equal(trace.callers.length, 1);
+  assert.equal(trace.callers.length, 2);
   assert.equal(trace.callers[0].symbol, "runIssue");
   assert.equal(trace.callers[0].file, "lib/runtime.js");
-  assert.equal(trace.callers[0].line, 808);
-  assert.equal(trace.callees.length, 1);
-  assert.equal(trace.callees[0].symbol, "issuePlan");
+  assert.equal(trace.callers[0].line, 980);
+  assert.equal(trace.callees.length, 2);
+  assert.equal(trace.callees[0].symbol, "executePlanStep");
   assert.equal(trace.callees[0].file, "lib/runtime.js");
-  assert.equal(trace.callees[0].line, 133);
+  assert.equal(trace.callees[0].line, 1300);
   assert.ok(trace.paths.length >= 2);
 
   // 5. Snippet normalization from text
