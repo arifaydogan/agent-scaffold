@@ -1201,7 +1201,7 @@ test("9. Security & Factory Enforcement: prompt injection treated as data, graft
 
   assert.deepEqual(plan.allowedPaths, ["backend/**"], "Prompt injection in graph data cannot escape hard policy");
 
-  // B. Graft provider rejection: factory does not yet accept graft-mcp
+  // B. Factory creates graft-mcp provider and rejects unsupported provider types
   const graftSettings = makeSettings(store, {
     codeIntelligence: {
       defaultProvider: "graft",
@@ -1211,9 +1211,22 @@ test("9. Security & Factory Enforcement: prompt injection treated as data, graft
     }
   });
 
+  const createdGraft = createCodeIntelligenceProvider(graftSettings);
+  assert.ok(createdGraft);
+  assert.equal(createdGraft.name, "graft");
+
+  const unsupportedSettings = makeSettings(store, {
+    codeIntelligence: {
+      defaultProvider: "unsupported",
+      providers: {
+        unsupported: { type: "unsupported-provider-type", command: ["unsupported"] }
+      }
+    }
+  });
+
   assert.throws(
-    () => createCodeIntelligenceProvider(graftSettings),
-    /Graft provider is not yet supported/
+    () => createCodeIntelligenceProvider(unsupportedSettings),
+    /Unsupported code intelligence provider type/
   );
 
   // C. Boundary path validation rejection for snippet outside repo
