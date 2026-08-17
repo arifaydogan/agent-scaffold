@@ -3,36 +3,52 @@ const state = {
   filter: "all",
   query: "",
   connected: false,
-  loading: true
+  loading: true,
+  currentView: "overview-view",
+  currentPmFilter: "inbox",
+  currentAgentFilter: "all",
+  currentObsWindow: "24h",
+  selectedParentKey: null
 };
 
 const elements = {
-  grid: document.querySelector("#agent-grid"),
-  empty: document.querySelector("#empty-state"),
-  activity: document.querySelector("#activity-body"),
-  providers: document.querySelector("#provider-list"),
-  controlPlane: document.querySelector("#control-plane-list"),
-  capabilityCount: document.querySelector("#capability-count"),
-  connectionDot: document.querySelector("#connection-dot"),
-  connectionLabel: document.querySelector("#connection-label"),
-  syncTime: document.querySelector("#sync-time"),
-  error: document.querySelector("#error-banner"),
-  demo: document.querySelector("#demo-badge"),
-  project: document.querySelector("#project-key"),
-  capacityTotal: document.querySelector("#capacity-total"),
-  metricActive: document.querySelector("#metric-active"),
-  metricReview: document.querySelector("#metric-review"),
-  metricBlocked: document.querySelector("#metric-blocked"),
-  metricTokens: document.querySelector("#metric-tokens"),
-  metricCapacity: document.querySelector("#metric-capacity"),
-  search: document.querySelector("#run-search"),
-  supervisorCard: document.querySelector("#supervisor-card"),
-  supervisorDot: document.querySelector("#supervisor-dot"),
-  supervisorStatusText: document.querySelector("#supervisor-status-text"),
-  supervisorPid: document.querySelector("#supervisor-pid"),
-  supervisorMode: document.querySelector("#supervisor-mode"),
-  supervisorCycles: document.querySelector("#supervisor-cycles"),
-  supervisorHeartbeat: document.querySelector("#supervisor-heartbeat")
+  grid: typeof document !== "undefined" ? document.querySelector("#agent-grid") : null,
+  empty: typeof document !== "undefined" ? document.querySelector("#empty-state") : null,
+  activity: typeof document !== "undefined" ? document.querySelector("#activity-body") : null,
+  providers: typeof document !== "undefined" ? document.querySelector("#provider-list") : null,
+  controlPlane: typeof document !== "undefined" ? document.querySelector("#control-plane-list") : null,
+  capabilityCount: typeof document !== "undefined" ? document.querySelector("#capability-count") : null,
+  connectionDot: typeof document !== "undefined" ? document.querySelector("#connection-dot") : null,
+  connectionLabel: typeof document !== "undefined" ? document.querySelector("#connection-label") : null,
+  syncTime: typeof document !== "undefined" ? document.querySelector("#sync-time") : null,
+  error: typeof document !== "undefined" ? document.querySelector("#error-banner") : null,
+  demo: typeof document !== "undefined" ? document.querySelector("#demo-badge") : null,
+  project: typeof document !== "undefined" ? document.querySelector("#project-key") : null,
+  capacityTotal: typeof document !== "undefined" ? document.querySelector("#capacity-total") : null,
+  metricActive: typeof document !== "undefined" ? document.querySelector("#metric-active") : null,
+  metricQueued: typeof document !== "undefined" ? document.querySelector("#metric-queued") : null,
+  metricReview: typeof document !== "undefined" ? document.querySelector("#metric-review") : null,
+  metricRework: typeof document !== "undefined" ? document.querySelector("#metric-rework") : null,
+  metricBlocked: typeof document !== "undefined" ? document.querySelector("#metric-blocked") : null,
+  metricAwaitingApproval: typeof document !== "undefined" ? document.querySelector("#metric-awaiting-approval") : null,
+  metricHumanApproval: typeof document !== "undefined" ? document.querySelector("#metric-human-approval") : null,
+  metricActiveParents: typeof document !== "undefined" ? document.querySelector("#metric-active-parents") : null,
+  metricParentConflicts: typeof document !== "undefined" ? document.querySelector("#metric-parent-conflicts") : null,
+  metricTokens: typeof document !== "undefined" ? document.querySelector("#metric-tokens") : null,
+  metricCapacity: typeof document !== "undefined" ? document.querySelector("#metric-capacity") : null,
+  search: typeof document !== "undefined" ? document.querySelector("#run-search") : null,
+  operatingModePill: typeof document !== "undefined" ? document.querySelector("#operating-mode-pill") : null,
+  operatingModeLabel: typeof document !== "undefined" ? document.querySelector("#operating-mode-label") : null,
+  overviewModeTitle: typeof document !== "undefined" ? document.querySelector("#overview-mode-title") : null,
+  overviewModeBadge: typeof document !== "undefined" ? document.querySelector("#overview-mode-badge") : null,
+  overviewModeDesc: typeof document !== "undefined" ? document.querySelector("#overview-mode-desc") : null,
+  supervisorCard: typeof document !== "undefined" ? document.querySelector("#supervisor-card") : null,
+  supervisorDot: typeof document !== "undefined" ? document.querySelector("#supervisor-dot") : null,
+  supervisorStatusText: typeof document !== "undefined" ? document.querySelector("#supervisor-status-text") : null,
+  supervisorPid: typeof document !== "undefined" ? document.querySelector("#supervisor-pid") : null,
+  supervisorMode: typeof document !== "undefined" ? document.querySelector("#supervisor-mode") : null,
+  supervisorCycles: typeof document !== "undefined" ? document.querySelector("#supervisor-cycles") : null,
+  supervisorHeartbeat: typeof document !== "undefined" ? document.querySelector("#supervisor-heartbeat") : null
 };
 
 const STATUS_LABELS = {
@@ -55,7 +71,11 @@ const STATUS_LABELS = {
   human_action_required: "Senden aksiyon bekliyor",
   "failed-retryable": "Tekrar denenebilir",
   "failed-scope": "Scope ihlali",
-  failed: "Başarısız"
+  failed: "Başarısız",
+  "blocked-conflict": "Entegrasyon Çatışması",
+  integrated: "Entegre Edildi",
+  waiting_human: "İnsan Onayında",
+  human_approval: "İnsan Onayında"
 };
 
 const PERSONA_INITIALS = {
@@ -70,6 +90,30 @@ const PERSONA_INITIALS = {
   "pm-analyst": "PM"
 };
 
+function safeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function getElem(id) {
+  if (typeof document === "undefined") return null;
+  if (typeof document.getElementById === "function") return document.getElementById(id);
+  if (typeof document.querySelector === "function") return document.querySelector("#" + id);
+  return null;
+}
+
 function getWorkerInfo(run) {
   return { status: run.workerStatus || "finished", pid: run.workerPid };
 }
@@ -81,13 +125,6 @@ function formatWorkerLabel(run) {
     return pid ? `Çalışıyor · PID ${pid}` : "Çalışıyor";
   }
   return "Tamamlandı";
-}
-
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = text;
-  return node;
 }
 
 function formatNumber(value) {
@@ -112,7 +149,7 @@ function formatTime(value, includeDate = false) {
 }
 
 function displayModel(run) {
-  if (!run.model) return run.provider;
+  if (!run.model) return run.provider || "—";
   return run.model
     .replace("claude-", "")
     .replace("-thinking", " · thinking")
@@ -122,7 +159,7 @@ function displayModel(run) {
 }
 
 function statePill(run) {
-  const pill = element("span", `state-pill ${run.stateKind}`);
+  const pill = element("span", `state-pill ${run.stateKind || run.state}`);
   pill.textContent = STATUS_LABELS[run.state] || run.state;
   return pill;
 }
@@ -255,46 +292,41 @@ function roleLane(lane) {
 
   const retryable = ["failed-retryable", "blocked"].includes(run.state) && !run.humanActionRequired;
   if (retryable) {
-    const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
+    const maxAttempts = state.snapshot?.policy?.maxAttempts || 3;
     const retryPanel = element("div", "retry-panel");
     const retryBtn = element("button", "retry-button", "Blocker çözüldü — aynı işi yeniden çalıştır");
-    const retryStatus = element("p", "retry-status", "");
-    const hasHandler = state.snapshot.capabilities?.retryHandler;
-    const canRetry = (run.attempt || lane.attempts.length) < maxAttempts;
-    if (!hasHandler || !canRetry) {
+    const hasHandler = Boolean(state.snapshot?.capabilities?.retryHandler);
+    const exhausted = (run.attempt || lane.attempts.length) >= maxAttempts;
+
+    if (!hasHandler) {
       retryBtn.disabled = true;
-      retryStatus.textContent = !hasHandler
-        ? "Yeniden çalıştırma servisi şu anda bağlı değil."
-        : `${maxAttempts}/${maxAttempts} otomatik deneme kullanıldı; yeni worker başlatılmayacak.`;
+      retryBtn.title = "Sunucuda aktif retry handler tanımlı değil";
+    } else if (exhausted) {
+      retryBtn.disabled = true;
+      retryBtn.title = "Maksimum retry deneme limitine ulaşıldı";
     } else {
       retryBtn.onclick = async () => {
-        if (!confirm("Teknik blocker çözüldü mü? Aynı güvenli plan yeni deneme olarak kuyruğa alınacak.")) return;
+        const confirmed = typeof confirm === "function" ? confirm("Bu iş için yeniden deneme kaydı oluşturulsun mu?") : true;
+        if (!confirmed) return;
         retryBtn.disabled = true;
         retryBtn.textContent = "Kuyruğa alınıyor…";
-        retryStatus.textContent = "İstek coordinator kuyruğuna yazılıyor.";
         try {
-          const response = await fetch("/api/retry", {
+          const res = await fetch("/api/retry", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ runId: run.id, issueKey: run.issue })
           });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(body.error || "Retry request rejected");
+          if (!res.ok) throw new Error("Retry isteği reddedildi");
           retryBtn.textContent = "Yeniden deneme kuyruğunda";
-          retryStatus.textContent = "Statü güncellendi; uygun worker slotu açıldığında iş başlayacak.";
           await refresh();
-        } catch (error) {
+        } catch {
           retryBtn.disabled = false;
-          retryBtn.textContent = "Blocker çözüldü — aynı işi yeniden çalıştır";
-          retryStatus.textContent = `Yeniden deneme başlatılamadı: ${error.message}`;
+          retryBtn.textContent = "Tekrar dene";
+          retryBtn.title = "Yeniden deneme isteği gönderilemedi";
         }
       };
     }
-    retryPanel.append(
-      element("p", "retry-help", "Bu işlem onay veya merge vermez; aynı branch ve güvenli planla yeni worker denemesi oluşturur."),
-      retryBtn,
-      retryStatus
-    );
+    retryPanel.append(retryBtn);
     section.append(retryPanel);
   }
 
@@ -302,11 +334,10 @@ function roleLane(lane) {
 }
 
 function taskCard(group) {
-  const run = group.latest;
-  const allRuns = group.attempts;
-  const latestLane = group.lanes.find((lane) => lane.latest.id === run.id) || group.lanes[0];
-  const attempts = latestLane.attempts;
-  const card = element("article", `agent-card state-${run.stateKind}`);
+  const { latest: run, attempts, lanes } = group;
+  const allRuns = attempts && attempts.length ? attempts : [run];
+
+  const card = element("article", `agent-card state-${run.stateKind || run.state}`);
   card.setAttribute("aria-label", `${run.issue}: ${run.summary}`);
 
   const topline = element("div", "card-topline");
@@ -346,9 +377,12 @@ function taskCard(group) {
   taskLink.rel = "noopener noreferrer";
   taskTitle.append(taskLink);
   card.append(taskTitle);
-  const lanes = element("div", "role-lanes");
-  lanes.append(...group.lanes.map(roleLane));
-  card.append(lanes);
+
+  const lanesContainer = element("div", "role-lanes");
+  if (lanes && lanes.length > 0) {
+    lanesContainer.append(...lanes.map(roleLane));
+  }
+  card.append(lanesContainer);
 
   const meta = element("div", "agent-meta");
   meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
@@ -366,7 +400,7 @@ function taskCard(group) {
   if (!run.skills?.length) skills.append(element("span", "skill-chip", "skill atanmamış"));
   card.append(skills);
 
-  if (!group.lanes.length && (run.blockers?.length || run.stateKind === "blocked")) {
+  if (!lanes?.length && (run.blockers?.length || run.stateKind === "blocked")) {
     const blocker = element("div", "blocker-note");
     blocker.style.display = "flex";
     blocker.style.flexDirection = "column";
@@ -398,7 +432,7 @@ function taskCard(group) {
   const details = detailsFor(run);
   if (details) card.append(details);
 
-  if (!group.lanes.length && attempts.length > 1) {
+  if (!lanes?.length && attempts?.length > 1) {
     const timeline = element("details", "attempts-timeline");
     timeline.style.marginTop = "0.5rem";
     timeline.style.fontSize = "0.85rem";
@@ -423,56 +457,18 @@ function taskCard(group) {
     card.append(timeline);
   }
 
-  const isTerminal = ["failed", "failed-retryable", "failed-scope", "blocked", "human_action_required"].includes(run.state);
-  const maxAttempts = state.snapshot.policy?.maxAttempts || 3;
-  if (isTerminal) {
-    const canRetry = ["failed-retryable", "blocked", "human_action_required"].includes(run.state) && (run.attempt || attempts.length) < maxAttempts;
-    const hasHandler = state.snapshot.capabilities?.retryHandler;
-
-    const retryBtn = element("button", "retry-button", "Retry Attempt");
-    retryBtn.style.marginTop = "0.5rem";
-    if (!hasHandler) {
-      retryBtn.disabled = true;
-      retryBtn.title = "No injected retry handler on server";
-    } else if (!canRetry) {
-      retryBtn.disabled = true;
-      retryBtn.title = attempts.length >= maxAttempts ? "Attempt limit reached" : "Run not retryable";
-    } else {
-      retryBtn.onclick = async () => {
-        if (confirm("Are you sure you want to retry this task?")) {
-          retryBtn.disabled = true;
-          retryBtn.textContent = "Kuyruğa alınıyor…";
-          try {
-            const response = await fetch("/api/retry", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ runId: run.id, issueKey: run.issue })
-            });
-            if (!response.ok) throw new Error("Retry request rejected");
-            retryBtn.textContent = "Yeniden deneme kuyruğunda";
-            await refresh();
-          } catch {
-            retryBtn.disabled = false;
-            retryBtn.textContent = "Tekrar dene";
-            retryBtn.title = "Yeniden deneme isteği gönderilemedi";
-          }
-        }
-      };
-    }
-    card.append(retryBtn);
-  }
-
   const footer = element("footer", "agent-card-footer");
   const taskTokens = allRuns.reduce((sum, r) => sum + (r.tokens || 0), 0);
   const latestTokens = run.tokens;
 
-  const tokenText = (latestTokens === undefined || latestTokens === null || latestTokens === 0)
-    ? "Usage unavailable"
-    : `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
-
-  const taskTokenText = taskTokens > 0
-    ? `${formatNumber(taskTokens)} token toplam - ${run.usageAvailable && latestTokens > 0 ? `${formatNumber(latestTokens)} son deneme` : "son deneme usage unavailable"}`
-    : tokenText;
+  let taskTokenText = "Usage unavailable";
+  if (latestTokens !== undefined && latestTokens !== null && latestTokens > 0) {
+    taskTokenText = `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
+  }
+  if (taskTokens > 0) {
+    const latestUsagePart = run.usageAvailable && latestTokens > 0 ? `${formatNumber(latestTokens)} son deneme` : "son deneme usage unavailable";
+    taskTokenText = `${formatNumber(taskTokens)} token toplam - ${latestUsagePart}`;
+  }
 
   footer.append(
     element("span", "", taskTokenText),
@@ -484,13 +480,14 @@ function taskCard(group) {
 }
 
 function visibleRuns() {
-  if (!state.snapshot) return [];
-  const query = state.query.trim().toLocaleLowerCase("tr-TR");
+  if (!state.snapshot || !Array.isArray(state.snapshot.runs)) return [];
+  const query = state.query ? state.query.trim().toLocaleLowerCase("tr-TR") : "";
 
   const groups = {};
   for (const run of state.snapshot.runs) {
-    if (!groups[run.issue]) groups[run.issue] = [];
-    groups[run.issue].push(run);
+    const key = run.issue || run.issueKey || "UNKNOWN";
+    if (!groups[key]) groups[key] = [];
+    groups[key].push({ ...run, issue: key });
   }
 
   const groupedTasks = Object.values(groups).map((group) => {
@@ -533,13 +530,13 @@ function visibleRuns() {
       latest,
       attempts,
       lanes,
-      stateKind: latest.stateKind
+      stateKind: latest.stateKind || latest.state
     };
   });
 
   return groupedTasks.filter((task) => {
     const run = task.latest;
-    const matchesFilter = state.filter === "all" || task.lanes.some((lane) => lane.latest.stateKind === state.filter);
+    const matchesFilter = state.filter === "all" || task.lanes.some((lane) => lane.latest.stateKind === state.filter || lane.latest.state === state.filter);
     const text = task.attempts.flatMap((attempt) => [
       attempt.issue, attempt.summary, attempt.persona, attempt.taskAgent,
       attempt.provider, attempt.model, ...(attempt.skills || [])
@@ -553,17 +550,21 @@ function visibleRuns() {
 
 function renderRuns() {
   const tasks = visibleRuns();
-  elements.grid.replaceChildren(...tasks.map(taskCard));
-  elements.grid.setAttribute("aria-busy", "false");
-  elements.grid.hidden = tasks.length === 0;
-  elements.empty.hidden = tasks.length !== 0;
+  if (elements.grid) {
+    elements.grid.replaceChildren(...tasks.map(taskCard));
+    elements.grid.setAttribute("aria-busy", "false");
+    elements.grid.hidden = tasks.length === 0;
+  }
+  if (elements.empty) {
+    elements.empty.hidden = tasks.length !== 0;
+  }
 }
 
 function providerItem(provider) {
   const wrapper = element("div", "provider-item");
   const label = element("div", "capacity-label");
   const name = element("span", "provider-name");
-  name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name));
+  name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name || ""));
 
   const statsSpan = element("span", "capacity-stats");
   statsSpan.style.display = "flex";
@@ -592,10 +593,15 @@ function providerItem(provider) {
 }
 
 function renderCapacity() {
+  if (!state.snapshot?.capacity) return;
   const { capacity } = state.snapshot;
   const queuedText = capacity.queued ? ` (${capacity.queued} kuyrukta)` : "";
-  elements.capacityTotal.textContent = `${capacity.active} / ${capacity.total}${queuedText}`;
-  elements.providers.replaceChildren(...capacity.providers.map(providerItem));
+  if (elements.capacityTotal) {
+    elements.capacityTotal.textContent = `${capacity.active} / ${capacity.total}${queuedText}`;
+  }
+  if (elements.providers && Array.isArray(capacity.providers)) {
+    elements.providers.replaceChildren(...capacity.providers.map(providerItem));
+  }
 }
 
 function renderControlPlane() {
@@ -606,7 +612,8 @@ function renderControlPlane() {
     workSource: "Work source",
     orchestrator: "Orchestrator",
     executor: "Executor",
-    codeIntelligence: "Code intelligence"
+    codeIntelligence: "Code intelligence",
+    sourceControl: "Source control"
   };
   const rows = Object.entries(labels).map(([key, label]) => {
     const row = element("div", "control-plane-row");
@@ -620,7 +627,9 @@ function renderControlPlane() {
   });
   rows.push(capabilityRow);
   elements.controlPlane.replaceChildren(...rows);
-  elements.capabilityCount.textContent = capabilities.length + " capability";
+  if (elements.capabilityCount) {
+    elements.capabilityCount.textContent = capabilities.length + " capability";
+  }
 }
 
 function renderSupervisor() {
@@ -656,23 +665,24 @@ function renderSupervisor() {
 
   const statusInfo = STATUS_MAP[status] || { label: status, class: "is-stopped" };
 
-  elements.supervisorDot.className = `supervisor-dot ${statusInfo.class}`;
-  elements.supervisorStatusText.textContent = statusInfo.label;
-  elements.supervisorPid.textContent = supervisor.pid ?? "—";
-  elements.supervisorMode.textContent = supervisor.mode || "—";
-  elements.supervisorCycles.textContent = supervisor.cycleCount ?? 0;
+  if (elements.supervisorDot) elements.supervisorDot.className = `supervisor-dot ${statusInfo.class}`;
+  if (elements.supervisorStatusText) elements.supervisorStatusText.textContent = statusInfo.label;
+  if (elements.supervisorPid) elements.supervisorPid.textContent = supervisor.pid ?? "—";
+  if (elements.supervisorMode) elements.supervisorMode.textContent = supervisor.mode || "—";
+  if (elements.supervisorCycles) elements.supervisorCycles.textContent = supervisor.cycleCount ?? 0;
 
-  if (supervisor.lastHeartbeatAt) {
+  if (supervisor.lastHeartbeatAt && elements.supervisorHeartbeat) {
     const nowMs = snapshot.generatedAt ? new Date(snapshot.generatedAt).getTime() : Date.now();
     const hbMs = new Date(supervisor.lastHeartbeatAt).getTime();
     const diffSec = Math.max(0, Math.floor((nowMs - hbMs) / 1000));
     elements.supervisorHeartbeat.textContent = diffSec < 60 ? `${diffSec}sn önce` : formatTime(supervisor.lastHeartbeatAt);
-  } else {
+  } else if (elements.supervisorHeartbeat) {
     elements.supervisorHeartbeat.textContent = "—";
   }
 }
 
 function renderActivity() {
+  if (!elements.activity || !state.snapshot) return;
   const rows = (state.snapshot.activity || []).slice(0, 12).map((event) => {
     const row = document.createElement("tr");
     const time = element("td", "", formatTime(event.createdAt, true));
@@ -698,781 +708,820 @@ function renderActivity() {
     row.append(time, issueCell, actionCell, statusCell);
     return row;
   });
-  if (!rows.length) {
-    const row = document.createElement("tr");
-    const cell = element("td", "", "Henüz runtime hareketi yok.");
-    cell.colSpan = 4;
-    row.append(cell);
-    rows.push(row);
-  }
+
   elements.activity.replaceChildren(...rows);
 }
 
-function renderSummary() {
-  const { totals, capacity, project, mode, generatedAt } = state.snapshot;
-  elements.metricActive.textContent = capacity.active;
-  elements.metricReview.textContent = totals.review;
-  elements.metricBlocked.textContent = totals.blocked;
-  elements.metricTokens.textContent = formatNumber(totals.tokens);
-  const queuedText = capacity.queued ? ` (${capacity.queued} kuyrukta)` : "";
-  elements.metricCapacity.textContent = `${capacity.active}/${capacity.total} worker slot kullanımda${queuedText}`;
-  elements.project.textContent = project;
-  elements.demo.hidden = mode !== "demo";
-  elements.syncTime.textContent = formatTime(generatedAt);
+// ── View Navigation & URL State Management ───────────────────────────────────
+
+function updateUrlState(params = {}) {
+  if (typeof window === "undefined" || !window.location || !window.history) return;
+  try {
+    const url = new URL(window.location.href);
+    if (params.view !== undefined) {
+      if (params.view) url.searchParams.set("view", params.view.replace("-view", ""));
+      else url.searchParams.delete("view");
+    }
+    if (params.parent !== undefined) {
+      if (params.parent) url.searchParams.set("parent", params.parent);
+      else url.searchParams.delete("parent");
+    }
+    if (params.issue !== undefined) {
+      if (params.issue) url.searchParams.set("issue", params.issue);
+      else url.searchParams.delete("issue");
+    }
+    if (params.run !== undefined) {
+      if (params.run) url.searchParams.set("run", params.run);
+      else url.searchParams.delete("run");
+    }
+    window.history.replaceState({}, "", url.toString());
+  } catch {}
 }
 
-function render() {
+function restoreUrlState() {
+  if (typeof window === "undefined" || !window.location) return;
+  try {
+    const url = new URL(window.location.href);
+    const viewParam = url.searchParams.get("view");
+    const parentParam = url.searchParams.get("parent");
+    const issueParam = url.searchParams.get("issue");
+    const runParam = url.searchParams.get("run");
+
+    if (viewParam) {
+      const targetId = viewParam.endsWith("-view") ? viewParam : `${viewParam}-view`;
+      switchView(targetId, false);
+    }
+    if (parentParam) {
+      state.selectedParentKey = parentParam;
+      renderParentsView(parentParam);
+    }
+    if (issueParam) {
+      openDecisionTrace(issueParam);
+    }
+    if (runParam) {
+      openTelemetryDetail(runParam);
+    }
+  } catch {}
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("popstate", () => restoreUrlState());
+}
+
+function switchView(targetViewId, updateUrl = true) {
+  if (typeof document === "undefined") return;
+  const tabs = document.querySelectorAll(".tab-button");
+  const contents = document.querySelectorAll(".tab-content");
+  if (!tabs.length) return;
+
+  tabs.forEach(b => b.classList.remove("is-active"));
+  contents.forEach(c => {
+    c.classList.remove("is-active");
+    c.hidden = true;
+  });
+
+  const activeBtn = Array.from(tabs).find(b => b.dataset.target === targetViewId);
+  const activeContent = document.getElementById(targetViewId);
+
+  if (activeBtn) activeBtn.classList.add("is-active");
+  if (activeContent) {
+    activeContent.classList.add("is-active");
+    activeContent.hidden = false;
+  }
+
+  state.currentView = targetViewId;
+  if (updateUrl) {
+    updateUrlState({ view: targetViewId });
+  }
+
+  if (targetViewId === "parents-view") {
+    renderParentsView(state.selectedParentKey);
+  } else if (targetViewId === "pm-view") {
+    renderPmWorkspace();
+  } else if (targetViewId === "observability-view") {
+    renderObservability();
+  } else if (targetViewId === "config-view") {
+    renderConfigView();
+  } else if (targetViewId === "agents-view") {
+    renderAgentDefinitions();
+  }
+}
+
+// ── Overview & Metrics Rendering ────────────────────────────────────────────
+
+function renderOverview() {
   if (!state.snapshot) return;
-  renderSummary();
+  const snap = state.snapshot;
+  const ws = snap.pmWorkspace || {};
+  const counts = ws.counts || {};
+  const totals = snap.totals || {};
+
+  // Operating Mode
+  const mode = (snap.config?.operatingMode || ws.operatingMode || "AUTONOMOUS").toUpperCase();
+  if (elements.operatingModeLabel) elements.operatingModeLabel.textContent = mode;
+  if (elements.overviewModeBadge) elements.overviewModeBadge.textContent = mode;
+  if (elements.operatingModePill) {
+    elements.operatingModePill.className = `mode-pill mode-${mode.toLowerCase()}`;
+  }
+  if (elements.overviewModeDesc) {
+    if (mode === "MANUAL") {
+      elements.overviewModeDesc.innerHTML = `<strong>MANUAL:</strong> Tüm görev adımları, branch oluşturma ve review süreçleri insan onayına tabidir. Otonom başlatma yapılmaz.`;
+    } else if (mode === "SUPERVISED") {
+      elements.overviewModeDesc.innerHTML = `<strong>SUPERVISED:</strong> Düşük riskli işler otonom yürütülür; yüksek riskli işler ve branch değişiklikleri plan parmak izi korumalı PM onayı bekler.`;
+    } else {
+      elements.overviewModeDesc.innerHTML = `<strong>AUTONOMOUS:</strong> Ready işler otonom yürütülür, review ve parent entegrasyonu otomatik işletilir; nihai Develop merge ve Done geçişi insan kontrolündedir.`;
+    }
+  }
+
+  // Supervisor Status
   renderSupervisor();
+
+  // Truthful Top Metrics
+  if (elements.metricActive) elements.metricActive.textContent = counts.executing || 0;
+  if (elements.metricQueued) elements.metricQueued.textContent = counts.ready || 0;
+  if (elements.metricReview) elements.metricReview.textContent = counts.inReview || 0;
+  if (elements.metricRework) elements.metricRework.textContent = counts.needsRework || 0;
+  if (elements.metricBlocked) elements.metricBlocked.textContent = counts.blocked || 0;
+  if (elements.metricAwaitingApproval) elements.metricAwaitingApproval.textContent = counts.awaitingApproval || 0;
+  if (elements.metricHumanApproval) elements.metricHumanApproval.textContent = counts.humanApproval || 0;
+
+  // Active Parents & Conflicts
+  const parents = snap.parentExecutions || [];
+  const activeParentsCount = parents.filter(p => ["active", "integrating", "waiting_approval", "in_review"].includes(p.state)).length;
+  if (elements.metricActiveParents) elements.metricActiveParents.textContent = activeParentsCount || parents.length || 0;
+
+  let conflictCount = 0;
+  parents.forEach(p => {
+    if (p.driftDetected) conflictCount++;
+  });
+  if (elements.metricParentConflicts) {
+    elements.metricParentConflicts.textContent = conflictCount > 0 ? `${conflictCount} çatışma` : "0 çatışma";
+  }
+
+  // Token Usage (Truthful: show unavailable if unknown)
+  if (elements.metricTokens) {
+    if (totals.tokens != null && totals.tokens > 0) {
+      elements.metricTokens.textContent = formatNumber(totals.tokens);
+    } else {
+      elements.metricTokens.textContent = "—";
+    }
+  }
+
+  if (elements.project) elements.project.textContent = snap.project || "PACE";
+
+  // Capacity & Providers
   renderCapacity();
   renderControlPlane();
+
+  // Fleet Runs grid & Activity stream
   renderRuns();
   renderActivity();
-  if (typeof renderTabs === "function") renderTabs();
 }
 
-function setConnection(connected) {
-  state.connected = connected;
-  elements.connectionDot.classList.toggle("is-live", connected);
-  elements.connectionDot.classList.toggle("is-error", !connected && !state.loading);
-  elements.connectionLabel.textContent = connected ? "Canlı" : state.loading ? "Bağlanıyor" : "Bağlantı kesildi";
-  elements.error.hidden = connected || state.loading;
-}
+// ── Parent Orchestration View ───────────────────────────────────────────────
 
-async function refresh() {
+async function renderParentsView(selectedKey = null) {
+  const select = document.querySelector("#parent-select");
+  const summaryCard = document.querySelector("#parent-summary-card");
+  const humanCard = document.querySelector("#parent-human-approval-card");
+  const dagContainer = document.querySelector("#parent-dag-container");
+  const textFallback = document.querySelector("#parent-dag-text-fallback");
+  const intLane = document.querySelector("#parent-integration-lane");
+  if (!select) return;
+
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
-    if (!response.ok) throw new Error(`Snapshot failed: ${response.status}`);
-    state.snapshot = await response.json();
-    state.loading = false;
-    setConnection(true);
-    render();
-  } catch {
-    state.loading = false;
-    setConnection(false);
-    if (!state.snapshot) {
-      elements.grid.setAttribute("aria-busy", "false");
-      elements.grid.hidden = true;
-      elements.empty.hidden = false;
-      elements.empty.querySelector("h3").textContent = "Runtime verisine ulaşılamıyor";
-      elements.empty.querySelector("p").textContent = "Dashboard server bağlantısını kontrol edin.";
+    let parents = state.snapshot?.parentExecutions || [];
+    if (parents.length === 0) {
+      const res = await fetch("/api/pm/parents");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.parents)) parents = data.parents;
+      }
+    }
+
+    select.innerHTML = parents.length === 0
+      ? '<option value="">Kayıtlı parent / epic bulunamadı</option>'
+      : parents.map(p => `<option value="${safeHtml(p.parentKey)}" ${p.parentKey === selectedKey ? 'selected' : ''}>${safeHtml(p.parentKey)} — ${safeHtml(p.summary || p.parentKey)} (${safeHtml(p.state)})</option>`).join("");
+
+    const activeKey = selectedKey || (parents.length > 0 ? parents[0].parentKey : null);
+    if (!activeKey) {
+      if (summaryCard) summaryCard.innerHTML = `<div style="padding: 20px; color: var(--muted);">Aktif parent orkestrasyon kaydı bulunamadı.</div>`;
+      if (dagContainer) dagContainer.innerHTML = "";
+      if (intLane) intLane.innerHTML = "";
+      return;
+    }
+
+    state.selectedParentKey = activeKey;
+    updateUrlState({ parent: activeKey });
+
+    const detailRes = await fetch(`/api/pm/parents/${activeKey}`);
+    if (!detailRes.ok) throw new Error("Parent detay bilgisi alınamadı");
+    const detailData = await detailRes.json();
+    if (!detailData.ok) throw new Error(detailData.error || "Detay verisi geçersiz");
+
+    const parent = detailData.parent;
+    renderParentSummary(parent, summaryCard, humanCard);
+    renderParentDag(parent, dagContainer, textFallback);
+    renderParentIntegrationLane(parent, intLane);
+
+  } catch (err) {
+    if (summaryCard) {
+      summaryCard.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
     }
   }
 }
 
-document.querySelectorAll("[data-filter]").forEach((button) => {
-  button.addEventListener("click", () => {
-    state.filter = button.dataset.filter;
-    document.querySelectorAll("[data-filter]").forEach((item) => {
-      const selected = item === button;
-      item.classList.toggle("is-selected", selected);
-      item.setAttribute("aria-pressed", String(selected));
-    });
-    renderRuns();
-  });
-});
+function renderParentSummary(parent, cardEl, humanCardEl) {
+  if (!cardEl) return;
+  const p = parent.parent || parent;
+  const stateVal = (parent.state || p.state || "active").toLowerCase();
 
-elements.search.addEventListener("input", (event) => {
-  state.query = event.target.value;
-  renderRuns();
-});
-
-function renderPmMessages() {
-  const container = document.getElementById("pm-messages");
-  if (!container || !state.snapshot.pmMessages) return;
-  container.innerHTML = "";
-  if (state.snapshot.pmMessages.length === 0) {
-    container.innerHTML = '<div class="empty-state">Mesaj bulunmuyor</div>';
-    return;
-  }
-  state.snapshot.pmMessages.forEach(msg => {
-    const div = element("div", `pm-message ${msg.role}`);
-    div.append(
-      element("strong", "", msg.role === 'user' ? 'Sen' : 'PM Agent'),
-      element("span", "time", formatTime(msg.createdAt)),
-      element("p", "", msg.content)
-    );
-    container.append(div);
-  });
-}
-
-function renderPmDecisions() {
-  const container = document.getElementById("pm-decisions");
-  if (!container || !state.snapshot.pmDecisions) return;
-  container.innerHTML = "";
-  if (state.snapshot.pmDecisions.length === 0) {
-    container.innerHTML = '<div class="empty-state">Karar kaydı bulunmuyor</div>';
-    return;
-  }
-  state.snapshot.pmDecisions.forEach(decision => {
-    const div = element("div", "pm-decision");
-    div.append(
-      element("strong", "", decision.type),
-      element("span", "time", formatTime(decision.createdAt)),
-      element("pre", "", JSON.stringify(decision.payload, null, 2))
-    );
-    container.append(div);
-  });
-}
-
-function renderAgentDefinitions() {
-  const container = document.getElementById("agent-definitions");
-  if (!container || !state.snapshot.agentDefinitions) return;
-  container.innerHTML = "";
-  if (state.snapshot.agentDefinitions.length === 0) {
-    container.innerHTML = '<div class="empty-state">Kayıtlı agent bulunmuyor</div>';
-    return;
-  }
-  state.snapshot.agentDefinitions.forEach(agent => {
-    const def = agent.definition || {};
-    const div = element("div", "agent-definition");
-    div.style.marginBottom = "1rem";
-    div.style.padding = "1rem";
-    div.style.background = "var(--panel-subtle, rgba(255,255,255,0.03))";
-    div.style.borderRadius = "8px";
-    div.style.border = "1px solid var(--border-subtle, rgba(255,255,255,0.1))";
-
-    const header = element("div", "agent-header");
-    header.style.display = "flex";
-    header.style.justifyContent = "space-between";
-    header.style.alignItems = "center";
-    header.style.marginBottom = "0.5rem";
-
-    const titleBox = element("div");
-    titleBox.append(
-      element("strong", "", agent.displayName || agent.id),
-      element("small", "", ` (${agent.id})`),
-      element("span", `badge badge-${agent.status || 'enabled'}`, ` ${agent.status || 'enabled'} `),
-      element("span", "badge badge-version", ` v${agent.version} `)
-    );
-
-    const actionsBox = element("div", "agent-actions");
-    actionsBox.style.display = "flex";
-    actionsBox.style.gap = "0.5rem";
-
-    if (agent.status === "enabled") {
-      const disableBtn = element("button", "btn-sm", "Devre Dışı Bırak");
-      disableBtn.onclick = async () => {
-        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/disable`, { method: "POST" });
-        refresh();
-      };
-      const archiveBtn = element("button", "btn-sm", "Arşivle");
-      archiveBtn.onclick = async () => {
-        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/archive`, { method: "POST" });
-        refresh();
-      };
-      actionsBox.append(disableBtn, archiveBtn);
-    } else if (agent.status === "disabled") {
-      const enableBtn = element("button", "btn-sm", "Etkinleştir");
-      enableBtn.onclick = async () => {
-        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/enable`, { method: "POST" });
-        refresh();
-      };
-      const archiveBtn = element("button", "btn-sm", "Arşivle");
-      archiveBtn.onclick = async () => {
-        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/archive`, { method: "POST" });
-        refresh();
-      };
-      actionsBox.append(enableBtn, archiveBtn);
-    } else if (agent.status === "archived") {
-      const enableBtn = element("button", "btn-sm", "Tekrar Etkinleştir");
-      enableBtn.onclick = async () => {
-        await fetch(`/api/agents/${encodeURIComponent(agent.id)}/enable`, { method: "POST" });
-        refresh();
-      };
-      actionsBox.append(enableBtn);
-    }
-
-    const versionsBtn = element("button", "btn-sm", "Versiyonlar");
-    versionsBtn.onclick = async () => {
-      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/versions`);
-      const data = await res.json();
-      alert(`Agent ${agent.id} Versiyon Geçmişi:\n` + JSON.stringify(data.versions, null, 2));
-    };
-    actionsBox.append(versionsBtn);
-
-    header.append(titleBox, actionsBox);
-
-    const details = element("div", "agent-details");
-    details.style.fontSize = "0.85rem";
-    details.style.color = "var(--text-muted, #888)";
-    details.innerHTML = `
-      <div><strong>Rol:</strong> ${def.role || 'implementation'} | <strong>Default Persona:</strong> ${def.defaultPersona || 'startup-cto'} | <strong>Risk:</strong> ${def.risk || 'normal'}</div>
-      <div><strong>Skills:</strong> ${(def.skills || []).join(", ") || "—"}</div>
-      <div><strong>Allowed Paths:</strong> ${(def.allowedPaths || []).join(", ") || "[]"}</div>
-    `;
-
-    div.append(header, details);
-    container.append(div);
-  });
-}
-
-function renderUsageEvents() {
-  const container = document.getElementById("usage-events");
-  if (!container || !state.snapshot.usageEvents) return;
-  container.innerHTML = "";
-  if (state.snapshot.usageEvents.length === 0) {
-    container.innerHTML = '<div class="empty-state">Kullanım verisi bulunmuyor</div>';
-    return;
-  }
-  state.snapshot.usageEvents.forEach(event => {
-    const div = element("div", "usage-event");
-    div.append(
-      element("strong", "", `${event.provider} · ${event.model}`),
-      element("span", "time", formatTime(event.createdAt)),
-      element("p", "", `Run: ${event.runId} | Süre: ${event.durationMs}ms | Token: In ${event.inputTokens} / Out ${event.outputTokens}`)
-    );
-    container.append(div);
-  });
-}
-
-function getElem(id) {
-  if (typeof document === "undefined") return null;
-  if (typeof document.getElementById === "function") return document.getElementById(id);
-  if (typeof document.querySelector === "function") return document.querySelector("#" + id);
-  return null;
-}
-
-// ── PM Workspace Rendering ──────────────────────────────────────────────────
-
-let currentPmFilter = "inbox";
-
-function setupPmSubNav() {
-  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
-  const filterButtons = document.querySelectorAll(".pm-filter-btn");
-  if (Array.isArray(filterButtons) || (filterButtons && typeof filterButtons.forEach === "function")) {
-    filterButtons.forEach(btn => {
-      btn.onclick = () => {
-        filterButtons.forEach(b => b.classList.remove("is-active"));
-        btn.classList.add("is-active");
-        currentPmFilter = btn.dataset.pmFilter;
-
-        const inbox = getElem("pm-inbox-section");
-        const attention = getElem("pm-attention-section");
-        const approvals = getElem("pm-approvals-section");
-        const journal = getElem("pm-journal-section");
-
-        if (inbox) inbox.hidden = currentPmFilter !== "inbox";
-        if (attention) attention.hidden = currentPmFilter !== "attention";
-        if (approvals) approvals.hidden = currentPmFilter !== "approvals";
-        if (journal) journal.hidden = currentPmFilter !== "journal";
-      };
-    });
-  }
-
-  const closeBtn = getElem("trace-close-btn");
-  const modal = getElem("decision-trace-modal");
-  if (closeBtn && modal) {
-    closeBtn.onclick = () => { modal.hidden = true; };
-    modal.onclick = (e) => {
-      if (e.target === modal) modal.hidden = true;
-    };
-  }
-}
-
-function renderPmWorkspace() {
-  const ws = state.snapshot.pmWorkspace;
-  if (!ws) return;
-
-  const counts = ws.counts || {};
-  const groups = ws.groups || {};
-
-  // Summary counts
-  const elApprovals = getElem("pm-stat-approvals");
-  const elBlocked = getElem("pm-stat-blocked");
-  const elExecuting = getElem("pm-stat-executing");
-  const elReview = getElem("pm-stat-review");
-  const elRework = getElem("pm-stat-rework");
-  const elReady = getElem("pm-stat-ready");
-  const elHumanApproval = getElem("pm-stat-human-approval");
-  const badgeAttention = getElem("pm-badge-attention");
-  const badgeApprovals = getElem("pm-badge-approvals");
-
-  if (elApprovals) elApprovals.textContent = counts.awaitingApproval || 0;
-  if (elBlocked) elBlocked.textContent = counts.blocked || 0;
-  if (elExecuting) elExecuting.textContent = counts.executing || 0;
-  if (elReview) elReview.textContent = counts.inReview || 0;
-  if (elRework) elRework.textContent = counts.needsRework || 0;
-  if (elReady) elReady.textContent = counts.ready || 0;
-  if (elHumanApproval) elHumanApproval.textContent = counts.humanApproval || 0;
-  if (badgeAttention) badgeAttention.textContent = counts.needsAttention || 0;
-  if (badgeApprovals) badgeApprovals.textContent = counts.awaitingApproval || 0;
-
-  renderPmInbox(groups);
-  renderPmApprovals(groups.awaitingApproval || []);
-  renderPmAttention([...(groups.blocked || []), ...(groups.needsRework || []), ...(groups.awaitingApproval || [])]);
-}
-
-function renderPmCard(item) {
-  const card = element("div", "pm-card");
-
-  const top = element("div", "pm-card-top");
-  const keySpan = element("span", "pm-card-key", item.issueKey);
-  const statePillNode = element("span", `state-pill ${item.currentRunState ? (item.currentRunState.includes("review") ? "review" : (item.currentRunState.includes("failed") || item.currentRunState.includes("blocked") ? "blocked" : "active")) : "idle"}`, item.currentRunState || "ready");
-  top.append(keySpan, statePillNode);
-
-  const title = element("h4", "pm-card-summary", item.summary);
-
-  const metaTags = element("div", "pm-meta-tags");
-  metaTags.append(
-    element("span", "meta-tag persona-tag", `🎭 ${item.persona || 'unassigned'}`),
-    element("span", "meta-tag", `🤖 ${item.taskAgent || 'unassigned'} ${item.agentVersion != null ? `v${item.agentVersion}` : '(version unknown)'}`),
-    element("span", "meta-tag", `⚡ ${item.executorProvider}${item.executorModel ? ` (${item.executorModel})` : ''}`),
-    element("span", `meta-tag ${item.risk === 'high' ? 'risk-tag-high' : ''}`, `Risk: ${item.risk}`)
-  );
-
-  if (!item.agentUpToDate && item.agentLiveVersion) {
-    metaTags.append(element("span", "meta-tag version-diff-tag", `⚠️ Live: v${item.agentLiveVersion} (${item.agentLiveStatus})`));
-  }
-
-  card.append(top, title, metaTags);
-
-  if (item.operationalGroup === "awaitingApproval" || item.approvalReason) {
-    const notice = element("div", "pm-card-notice notice-approval");
-    notice.innerHTML = `<span>⏳ <strong>Onay Gerekli:</strong> ${item.approvalReason || 'İşlem PM onayı bekliyor.'}</span>`;
-    card.append(notice);
-  } else if (item.operationalGroup === "blocked" || item.blockedReason) {
-    const notice = element("div", "pm-card-notice notice-blocked");
-    notice.innerHTML = `<span>🛑 <strong>Bloke:</strong> ${item.blockedReason || item.currentRunState}</span>`;
-    card.append(notice);
-  } else if (item.operationalGroup === "humanApproval") {
-    const notice = element("div", "pm-card-notice notice-human-approval");
-    notice.innerHTML = `<span>✅ <strong>İnsan Onayı:</strong> Review tamamlandı. Final merge / Done bekleniyor.</span>`;
-    card.append(notice);
-  }
-
-  const actions = element("div", "pm-card-actions");
-  const traceBtn = element("button", "btn-trace", "🔍 Decision Trace / Detay");
-  traceBtn.onclick = () => openDecisionTrace(item.issueKey);
-  actions.append(traceBtn);
-
-  card.append(actions);
-  return card;
-}
-
-function renderPmInbox(groups) {
-  const container = getElem("pm-queue-container");
-  if (!container) return;
-  container.innerHTML = "";
-
-  const sectionDefs = [
-    { key: "awaitingApproval", title: "⏳ Onay Bekleyenler (Awaiting Approval)", color: "#fbbf24" },
-    { key: "blocked", title: "🛑 Bloke & İlgi Gerekenler (Blocked / Attention)", color: "#f87171" },
-    { key: "executing", title: "⚡ Yürütülen İşler (Executing)", color: "#38bdf8" },
-    { key: "inReview", title: "👁 Review Aşamasındakiler (In Review)", color: "#a78bfa" },
-    { key: "needsRework", title: "🔄 Rework Bekleyenler (Needs Rework)", color: "#fb923c" },
-    { key: "ready", title: "🚀 Başlamaya Hazır (Agent Ready)", color: "#4ade80" },
-    { key: "humanApproval", title: "🏁 İnsan Onay Kapısı (Human Approval / Done)", color: "#22c55e" },
-    { key: "needsPlanning", title: "📋 Planlama Bekleyenler (Needs Planning)", color: "#94a3b8" }
-  ];
-
-  let totalRendered = 0;
-  sectionDefs.forEach(def => {
-    const items = groups[def.key] || [];
-    if (items.length === 0 && def.key !== "executing" && def.key !== "awaitingApproval" && def.key !== "blocked") return;
-
-    const groupDiv = element("div", "pm-group-section");
-    const groupHeader = element("div", "pm-group-header");
-    const titleNode = element("div", "pm-group-title");
-    titleNode.innerHTML = `<span style="color: ${def.color}">●</span> <strong>${def.title}</strong> <span class="badge-count" style="background: rgba(255,255,255,0.1); color:#fff;">${items.length}</span>`;
-    groupHeader.append(titleNode);
-    groupDiv.append(groupHeader);
-
-    if (items.length === 0) {
-      groupDiv.append(element("div", "empty-state", "Bu grupta bekleyen iş paketi yok"));
+  // WAITING_HUMAN Completion Evidence Banner
+  if (humanCardEl) {
+    if (stateVal === "waiting_human" || parent.waitingHuman) {
+      humanCardEl.hidden = false;
+      const review = parent.integrationReview || parent.completionPacket?.integrationReview;
+      humanCardEl.innerHTML = `
+        <div class="human-badge">★ HAZIR · İNSAN ONAYI BEKLİYOR</div>
+        <h4 style="margin: 0 0 8px 0; color: #fff; font-size: 1.05rem;">Parent Entegrasyonu Tamamlandı — Geliştirme Dalına Merge Bekliyor</h4>
+        <p style="margin: 0 0 12px 0; color: #cbd5e1; font-size: 0.85rem; line-height: 1.4;">
+          Tüm alt görevler başarıyla entegre edildi ve aggregate reviewer tarafından doğrulandı. Otonom teslimat tamamlanmıştır.
+          <strong>Güvenlik Sınırı:</strong> Otomatik merge veya deploy butonu bulunmaz; nihai <code>develop</code> merge ve <code>Done</code> geçişi insan kontrolündedir.
+        </p>
+        <div style="background: rgba(0,0,0,0.3); border-radius: 6px; padding: 10px; font-size: 0.8rem;">
+          <div><strong>Branch:</strong> <code>${safeHtml(parent.integrationBranch || p.integrationBranch || '—')}</code> (SHA: <code>${safeHtml(parent.integrationHeadSha?.slice(0, 8) || '—')}</code>)</div>
+          <div><strong>Reviewer:</strong> ${safeHtml(review?.reviewerId || 'lead-reviewer')} · <strong>Verdict:</strong> <span style="color: #4ade80; font-weight: bold;">${safeHtml(review?.verdict?.toUpperCase() || 'CLEAN')}</span> · <strong>Süre:</strong> ${review?.durationMs ? Math.round(review.durationMs / 1000) + 's' : '—'}</div>
+        </div>
+      `;
     } else {
-      const grid = element("div", "pm-cards-grid");
-      items.forEach(item => grid.append(renderPmCard(item)));
-      groupDiv.append(grid);
+      humanCardEl.hidden = true;
+      humanCardEl.innerHTML = "";
     }
-
-    container.append(groupDiv);
-    totalRendered += items.length;
-  });
-
-  if (totalRendered === 0) {
-    container.innerHTML = '<div class="empty-state"><h3>Kuyrukta iş paketi bulunmuyor</h3><p>Yeni bir issue planlayın veya dispatch edin.</p></div>';
-  }
-}
-
-function renderPmApprovals(items) {
-  const container = getElem("pm-approvals-list");
-  if (!container) return;
-  container.innerHTML = "";
-
-  if (items.length === 0) {
-    container.innerHTML = '<div class="empty-state"><h3>Bekleyen onay talebi bulunmuyor</h3><p>Tüm otonom veya onaylı süreçler yürütülüyor.</p></div>';
-    return;
   }
 
-  items.forEach(item => {
-    const card = element("div", "approval-card");
-
-    const header = element("div", "approval-header");
-    const title = element("h4", "approval-title", `[${item.issueKey}] ${item.summary}`);
-    const badge = element("span", "state-pill blocked", `Aksiyon: ${item.action || 'implementation'}`);
-    header.append(title, badge);
-
-    const details = element("div", "approval-details-grid");
-    details.innerHTML = `
-      <div><strong>Task Agent:</strong> ${item.taskAgent || 'unassigned'} ${item.agentVersion != null ? `(v${item.agentVersion})` : '(version unknown)'}</div>
-      <div><strong>Orkestratör Persona:</strong> ${item.persona || 'unassigned'}</div>
-      <div><strong>Executor:</strong> ${item.executorProvider} (${item.executorModel || 'default'})</div>
-      <div><strong>Risk Seviyesi:</strong> ${item.risk}</div>
-      <div><strong>İzinli Yollar:</strong> ${(item.allowedPaths || []).join(", ") || "[]"}</div>
-      <div><strong>Deneme:</strong> ${item.reworkAttempt + 1}</div>
+  // Blocked / Hierarchy Drift notice
+  let blockedHtml = "";
+  if (Array.isArray(parent.blockedReasons) && parent.blockedReasons.length > 0) {
+    blockedHtml = `
+      <div class="blocked-reasons-panel">
+        <strong>⚠️ Parent Orkestrasyon Engelleri:</strong>
+        <ul style="margin: 4px 0 0 16px; padding: 0;">
+          ${parent.blockedReasons.map(r => `<li>${safeHtml(r)}</li>`).join("")}
+        </ul>
+      </div>
     `;
+  }
 
-    const fpBox = element("div", "approval-fingerprint-box");
-    fpBox.innerHTML = `<span><strong>Plan Parmak İzi:</strong> ${item.planFingerprint || '—'}</span>`;
+  cardEl.innerHTML = `
+    <div class="parent-summary-top">
+      <div>
+        <h3 class="parent-title">${safeHtml(p.parentKey || parent.parentKey)}: ${safeHtml(p.summary || parent.summary || '')}</h3>
+        <div style="font-size: 0.8rem; color: var(--muted); margin-top: 4px;">
+          Kaynak: <strong>${safeHtml(p.sourceProvider || 'jira').toUpperCase()}</strong> · Base: <code>${safeHtml(parent.baseRef || 'develop')}</code>
+          (${parent.baseSha ? `<code>${parent.baseSha.slice(0, 8)}</code>` : '—'})
+        </div>
+      </div>
+      <div>
+        <span class="badge status-${safeHtml(stateVal)}">${safeHtml(STATUS_LABELS[stateVal] || stateVal.toUpperCase())}</span>
+      </div>
+    </div>
 
-    const actionBar = element("div", "approval-action-bar");
-    const approveBtn = element("button", "btn-approve", "✓ Onayla (Approve)");
-    approveBtn.onclick = async () => {
-      try {
-        const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/approve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: item.action || "implementation",
-            planFingerprint: item.planFingerprint,
-            attempt: item.reworkAttempt || 0,
-            approver: "PM Operator",
-            reason: "Approved from PM Approvals workspace"
-          })
-        });
-        if (res.status === 409) {
-          const data = await res.json();
-          alert(`⚠️ Plan Parmak İzi Uyuşmazlığı (409 Conflict):\nPlan güncellendiği için eski durum onaylanamaz. Sayfa yenileniyor.\nBeklenen: ${data.expected}`);
-          refresh();
-          return;
-        }
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Onay başarısız");
-        }
-        refresh();
-      } catch (err) {
-        alert("Hata: " + err.message);
-      }
-    };
+    ${blockedHtml}
 
-    const rejectBtn = element("button", "btn-reject", "✕ Reddet (Reject)");
-    rejectBtn.onclick = async () => {
-      const reason = prompt("Reddetme gerekçesi girin (opsiyonel):", "Scope/Risk uygun görülmedi");
-      if (reason === null) return;
-      try {
-        const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/reject`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: item.action || "implementation",
-            planFingerprint: item.planFingerprint,
-            attempt: item.reworkAttempt || 0,
-            approver: "PM Operator",
-            reason: reason || "Rejected from PM Approvals workspace"
-          })
-        });
-        if (res.status === 409) {
-          alert("⚠️ Plan Parmak İzi Uyuşmazlığı (409 Conflict): Plan değişti; lütfen sayfayı yenileyin.");
-          refresh();
-          return;
-        }
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Reddetme başarısız");
-        }
-        refresh();
-      } catch (err) {
-        alert("Hata: " + err.message);
-      }
-    };
-
-    const traceBtn = element("button", "btn-trace", "Detay / Trace");
-    traceBtn.onclick = () => openDecisionTrace(item.issueKey);
-
-    actionBar.append(traceBtn, rejectBtn, approveBtn);
-    card.append(header, details, fpBox, actionBar);
-    container.append(card);
-  });
+    <div class="parent-meta-grid">
+      <div class="parent-meta-cell">
+        <span>Integration Branch</span>
+        <strong><code>${safeHtml(parent.integrationBranch || p.integrationBranch || '—')}</code></strong>
+      </div>
+      <div class="parent-meta-cell">
+        <span>Integration Head SHA</span>
+        <strong><code>${safeHtml(parent.integrationHeadSha?.slice(0, 10) || '—')}</code></strong>
+      </div>
+      <div class="parent-meta-cell">
+        <span>Graph Fingerprint</span>
+        <strong title="${safeHtml(parent.graphFingerprint || '')}"><code>${safeHtml(parent.graphFingerprint?.slice(0, 12) || '—')}</code></strong>
+      </div>
+      <div class="parent-meta-cell">
+        <span>Alt Görev Sayısı</span>
+        <strong>${parent.children?.length || 0} Child Tasks</strong>
+      </div>
+    </div>
+  `;
 }
 
-function renderPmAttention(items) {
-  const container = getElem("pm-attention-list");
-  if (!container) return;
-  container.innerHTML = "";
+function renderParentDag(parent, containerEl, textFallbackEl) {
+  if (!containerEl) return;
+  const children = parent.children || [];
 
-  if (items.length === 0) {
-    container.innerHTML = '<div class="empty-state"><h3>Müdahale gereken durum bulunmuyor</h3><p>Tüm akışlar normal parametrelerde çalışıyor.</p></div>';
+  if (children.length === 0) {
+    containerEl.innerHTML = `<div style="padding: 24px; color: var(--muted); font-size: 0.85rem;">Bu parent altında kayıtlı child task bulunmuyor.</div>`;
+    if (textFallbackEl) textFallbackEl.textContent = "Bağlı alt görev yok.";
     return;
   }
 
-  const grid = element("div", "pm-cards-grid");
-  items.forEach(item => grid.append(renderPmCard(item)));
-  container.append(grid);
+  // Render Accessible Text Fallback
+  if (textFallbackEl) {
+    const lines = children.map(c => {
+      const deps = c.dependencies?.length ? ` [Bağımlılıklar: ${c.dependencies.join(", ")}]` : " [Bağımsız]";
+      return `${c.issueKey}: ${c.summary} (${c.runtimeState || 'idle'}) - Entegrasyon: ${c.integrationState}${deps}`;
+    });
+    textFallbackEl.textContent = lines.join("\n");
+  }
+
+  // Partition Independent vs Dependent nodes
+  const independent = children.filter(c => !c.dependencies || c.dependencies.length === 0);
+  const dependent = children.filter(c => c.dependencies && c.dependencies.length > 0);
+
+  function renderDagNode(c) {
+    const stateClass = c.integrationState === "integrated"
+      ? "state-integrated"
+      : c.integrationState === "conflict" || c.runtimeState?.includes("conflict")
+        ? "state-conflict"
+        : c.runtimeState?.includes("blocked")
+          ? "state-blocked"
+          : c.runtimeState === "executing"
+            ? "state-executing"
+            : c.runtimeState === "reviewing" || c.runtimeState === "verifying"
+              ? "state-review"
+              : "state-idle";
+
+    const depsBadge = c.dependencies?.length
+      ? `<span class="dep-badge">Bağımlı: ${safeHtml(c.dependencies.join(", "))}</span>`
+      : `<span class="dep-badge" style="background: rgba(255,255,255,0.05);">Bağımsız</span>`;
+
+    const conflictMsg = c.blockedReasons?.length
+      ? `<div style="color: #f87171; font-size: 0.72rem; margin-top: 4px;">⚠️ ${safeHtml(c.blockedReasons[0])}</div>`
+      : "";
+
+    return `
+      <div class="dag-node-card ${stateClass}" onclick="openDecisionTrace('${safeHtml(c.issueKey)}')">
+        <div class="dag-node-header">
+          <span class="dag-node-key">${safeHtml(c.issueKey)}</span>
+          <span class="badge status-${safeHtml(c.runtimeState)}">${safeHtml(STATUS_LABELS[c.runtimeState] || c.runtimeState)}</span>
+        </div>
+        <div class="dag-node-summary">${safeHtml(c.summary || c.issueKey)}</div>
+        <div style="margin-top: 8px;">${depsBadge}</div>
+        <div class="dag-node-footer">
+          <span>Entegrasyon: <strong>${safeHtml(c.integrationState || 'not-queued')}</strong></span>
+          <button class="pm-btn pm-btn-view" style="font-size: 0.7rem; padding: 2px 6px;">İncele</button>
+        </div>
+        ${conflictMsg}
+      </div>
+    `;
+  }
+
+  containerEl.innerHTML = `
+    <div style="margin-bottom: 12px; font-weight: 600; font-size: 0.85rem; color: #94a3b8;">
+      PARALEL / BAĞIMSIZ GÖREVLER (${independent.length})
+    </div>
+    <div class="dag-stage">
+      ${independent.map(renderDagNode).join("")}
+    </div>
+
+    ${dependent.length > 0 ? `
+      <div style="margin: 20px 0 12px 0; font-weight: 600; font-size: 0.85rem; color: #94a3b8;">
+        BAĞIMLI / ARDIŞIK GÖREVLER (${dependent.length})
+      </div>
+      <div class="dag-stage">
+        ${dependent.map(renderDagNode).join("")}
+      </div>
+    ` : ''}
+  `;
 }
+
+function renderParentIntegrationLane(parent, containerEl) {
+  if (!containerEl) return;
+  const children = parent.children || [];
+
+  if (children.length === 0) {
+    containerEl.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem;">Entegrasyon kaydı bulunmuyor.</div>`;
+    return;
+  }
+
+  containerEl.innerHTML = `
+    <div class="integration-lane-grid">
+      ${children.map(c => `
+        <div class="integration-lane-card">
+          <div class="ilc-top">
+            <span class="badge badge-key">${safeHtml(c.issueKey)}</span>
+            <span class="badge status-${safeHtml(c.integrationState)}">${safeHtml(c.integrationState?.toUpperCase() || 'NOT QUEUED')}</span>
+          </div>
+          <div style="font-size: 0.8rem; font-weight: 500; color: #fff; margin: 4px 0 8px 0;">${safeHtml(c.summary || c.issueKey)}</div>
+          <div style="font-size: 0.72rem; color: var(--muted); line-height: 1.4;">
+            <div>Reviewed SHA: <code>${safeHtml(c.reviewedSha?.slice(0, 8) || '—')}</code></div>
+            <div>Integrated SHA: <code>${safeHtml(c.integratedSha?.slice(0, 8) || '—')}</code></div>
+            <div>Base SHA: <code>${safeHtml(c.childBaseSha?.slice(0, 8) || '—')}</code></div>
+          </div>
+          <div style="margin-top: 8px;">
+            <button class="pm-btn pm-btn-view" style="font-size: 0.72rem; width: 100%;" onclick="openDecisionTrace('${safeHtml(c.issueKey)}')">İş Karar İzini Aç</button>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+// ── Work Item Decision Trace Modal ──────────────────────────────────────────
 
 async function openDecisionTrace(issueKey) {
-  const modal = getElem("decision-trace-modal");
-  const body = getElem("trace-drawer-body");
-  const titlePill = getElem("trace-issue-pill");
-  const summaryText = getElem("trace-issue-summary");
-
+  const modal = document.querySelector("#decision-trace-modal");
+  const body = document.querySelector("#decision-trace-body");
+  const pill = document.querySelector("#trace-issue-pill");
+  const title = document.querySelector("#trace-issue-title");
   if (!modal || !body) return;
+
   modal.hidden = false;
-  body.innerHTML = '<div class="skeleton-card"></div><div class="skeleton-card"></div>';
+  body.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">İş kalemi detayları yükleniyor...</div>`;
 
   try {
-    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(issueKey)}`);
-    if (!res.ok) throw new Error(`Work item '${issueKey}' yüklenemedi`);
-    const detail = await res.json();
+    const res = await fetch(`/api/pm/work-items/${issueKey}`);
+    if (!res.ok) throw new Error("İş kalemi verisi alınamadı");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Bilinmeyen hata");
 
-    const wi = detail.workItem || {};
-    const orch = detail.orchestratorDecision || {};
-    const ag = detail.agentIdentity || {};
-    const exec = detail.execution || {};
-    const rev = detail.review || {};
-    const human = detail.humanControl || {};
-    const blocked = detail.blockedInfo || {};
-    const history = detail.history || [];
+    const item = data.workItem;
+    pill.textContent = item.issueKey;
+    title.textContent = `${item.issueKey}: ${item.summary || 'Detay Görünümü'}`;
 
-    if (titlePill) titlePill.textContent = wi.key;
-    if (summaryText) summaryText.textContent = wi.summary;
+    const decisions = item.decisions || [];
+    const runs = item.runs || [];
+    const parentInfo = item.parent || {};
 
-    body.innerHTML = "";
-
-    // 1. Orchestrator Decision Section
-    const orchSection = element("div", "trace-section");
-    orchSection.innerHTML = `
-      <h4>🎯 Orkestratör Karar İzi (Decision Trace)</h4>
-      <div class="trace-grid-two">
-        <div class="trace-info-cell"><span>Orkestratör Provider</span><strong>${orch.orchestratorProvider || 'builtin'}</strong></div>
-        <div class="trace-info-cell"><span>Atanan Persona</span><strong>${orch.persona}</strong></div>
-        <div class="trace-info-cell"><span>Atanan Task Agent</span><strong>${orch.taskAgent}</strong></div>
-        <div class="trace-info-cell"><span>Risk Seviyesi & Paralel</span><strong>Risk: ${orch.risk} | Paralel: ${orch.parallelSafe ? 'Evet' : 'Hayır'}</strong></div>
-      </div>
-      <div class="trace-info-cell" style="margin-top: 8px;">
-        <span>İzinli Dosya Yolları (Allowed Paths)</span>
-        <strong>${(orch.allowedPaths || []).join(", ") || "[]"}</strong>
-      </div>
-      <div class="trace-info-cell" style="margin-top: 8px;">
-        <span>Seçim Gerekçesi (Rationale)</span>
-        <p style="margin: 4px 0 0; color: #cbd5e1; font-size: 0.78rem;">${(orch.rationale || []).join(" ; ") || "Kanonik orkestrasyon kuralları uygulandı."}</p>
-      </div>
-      <div class="trace-info-cell" style="margin-top: 8px; font-family: var(--font-code); font-size: 0.72rem; word-break: break-all;">
-        <span>Plan Parmak İzi (Fingerprint)</span>
-        <strong style="color: #94a3b8;">${orch.planFingerprint || '—'}</strong>
-      </div>
-    `;
-    body.append(orchSection);
-
-    // 2. Agent Identity Context Section (Pinned vs Live Registry)
-    const agentSection = element("div", "trace-section");
-    const isVersionDiff = ag.liveRegistryVersion && ag.agentVersion && ag.agentVersion !== ag.liveRegistryVersion;
-    agentSection.innerHTML = `
-      <h4>🤖 Agent Registry Kimliği</h4>
-      <div class="trace-grid-two">
-        <div class="trace-info-cell"><span>Tarihsel Run Snaphot</span><strong>${ag.agentId || 'unassigned'} ${ag.agentVersion != null ? `v${ag.agentVersion}` : '(version unknown)'}</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.agentHash || '—').substring(0, 16)}...</small></div>
-        <div class="trace-info-cell"><span>Canlı Registry Durumu</span><strong style="color: ${ag.liveRegistryStatus === 'enabled' ? '#4ade80' : '#f87171'};">${ag.liveRegistryStatus?.toUpperCase()} (v${ag.liveRegistryVersion || '—'})</strong><small style="color:var(--muted); font-family:var(--font-code); font-size:0.65rem;">Hash: ${(ag.liveRegistryHash || '—').substring(0, 16)}...</small></div>
-      </div>
-      ${isVersionDiff ? `<div class="pm-card-notice notice-approval" style="margin-top: 8px;"><span>⚠️ Bu run <strong>v${ag.agentVersion}</strong> tanımıyla kilitlenmiştir. Canlı registry'deki <strong>v${ag.liveRegistryVersion}</strong> güncellemesi tarihsel snapshot'ı değiştirmez.</span></div>` : ''}
-    `;
-    body.append(agentSection);
-
-    // 3. Execution & Runtime Section
-    const execSection = element("div", "trace-section");
-    execSection.innerHTML = `
-      <h4>⚡ Yürütme & Model Bilgisi</h4>
-      <div class="trace-grid-two">
-        <div class="trace-info-cell"><span>Executor / Model</span><strong>${exec.provider} · ${exec.model || 'default'} (${exec.modelProfile || 'normal'})</strong></div>
-        <div class="trace-info-cell"><span>Mevcut Durum</span><strong>${exec.currentRunState} (Deneme ${exec.attempt}/${exec.maxAttempts})</strong></div>
-        <div class="trace-info-cell"><span>Kullanılan Token / Süre</span><strong>${exec.tokens} token | ${exec.durationSeconds} sn</strong></div>
-        <div class="trace-info-cell"><span>Git Branch & Commit</span><strong>${exec.branch || 'main'} ${exec.commit ? `(${exec.commit.substring(0, 7)})` : ''}</strong></div>
-      </div>
-    `;
-    body.append(execSection);
-
-    // 4. Structured Review Findings Section (Lossless display per attempt)
-    const reviewSection = element("div", "trace-section");
-    const cycles = rev.reviewCycles || [];
-    let findingsHtml = "";
-
-    if (cycles.length === 0) {
-      findingsHtml = `<p style="color: var(--muted); font-size: 0.8rem; margin: 4px 0;">Henüz review aşamasına geçilmedi veya kayıtlı bulgu yok.</p>`;
+    let decisionsHtml = "";
+    if (decisions.length === 0) {
+      decisionsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Henüz kayıtlı karar bulunmuyor.</p>`;
     } else {
-      cycles.forEach((c) => {
-        const verdictBadge = c.verdict === "clean"
-          ? `<span class="sev-badge" style="background: rgba(34,197,94,0.2); color:#4ade80; border:1px solid rgba(34,197,94,0.4);">✓ CLEAN</span>`
-          : `<span class="sev-badge" style="background: rgba(239,68,68,0.2); color:#f87171; border:1px solid rgba(239,68,68,0.4);">✕ CHANGES REQUESTED</span>`;
-
-        let tableRows = "";
-        if (c.findings.length === 0) {
-          tableRows = `<tr><td colspan="5" style="color: var(--muted); text-align: center;">Bulgu tespit edilmedi (Temiz review)</td></tr>`;
-        } else {
-          c.findings.forEach(f => {
-            tableRows += `
-              <tr>
-                <td><span class="sev-badge sev-${f.severity}">${f.severity}</span></td>
-                <td><code style="font-size:0.72rem; color:#a5f3fc;">${f.category}</code></td>
-                <td><code style="font-size:0.72rem;">${f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '—'}</code></td>
-                <td><strong style="color:#f1f5f9;">${f.problem}</strong>${f.expected ? `<br><small style="color:var(--muted);">Beklenen: ${f.expected}</small>` : ''}</td>
-                <td><small style="color:#94a3b8;">${f.verification || '—'}</small></td>
-              </tr>
-            `;
-          });
-        }
-
-        findingsHtml += `
-          <div style="background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px; margin-top:10px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-              <div><strong>Review Döngüsü #${c.attempt}</strong> · <small style="color:var(--muted);">${formatTime(c.reviewedAt, true)}</small> · <small style="color:#38bdf8;">Reviewer: ${c.reviewerId}</small></div>
-              ${verdictBadge}
-            </div>
-            <table class="findings-table">
-              <thead>
-                <tr><th>Önem</th><th>Kategori</th><th>Dosya / Satır</th><th>Problem & Beklenti</th><th>Doğrulama</th></tr>
-              </thead>
-              <tbody>${tableRows}</tbody>
-            </table>
+      decisionsHtml = decisions.map(d => `
+        <div class="timeline-item">
+          <div class="timeline-top">
+            <span class="actor-badge actor-${d.actor || 'system'}">${d.actor || 'SİSTEM'}</span>
+            <span class="timeline-time">${formatTime(d.createdAt, true)}</span>
           </div>
-        `;
-      });
-    }
-
-    reviewSection.innerHTML = `
-      <h4>🔍 Review Bulguları & Yaşam Döngüsü (Lossless Trace)</h4>
-      ${findingsHtml}
-    `;
-    body.append(reviewSection);
-
-    // 5. Human Control & Approvals Section
-    const humanSection = element("div", "trace-section");
-    const approvalState = human.approvalState;
-    humanSection.innerHTML = `
-      <h4>🛡 İnsan Kontrolü & Onay Durumu</h4>
-      <div class="trace-grid-two">
-        <div class="trace-info-cell"><span>İşletim Modu</span><strong>${human.operatingMode?.toUpperCase()}</strong></div>
-        <div class="trace-info-cell"><span>Onay Durumu</span><strong>${approvalState?.toUpperCase()}</strong></div>
-      </div>
-      ${human.humanActionRequired ? `
-        <div class="pm-card-notice notice-approval" style="margin-top: 8px;">
-          <span>⏳ <strong>Aksiyon Bekleniyor:</strong> ${human.currentRequiredHumanAction || 'PM onayı veya insan incelemesi gerekiyor.'}</span>
+          <div style="color: #fff; font-weight: 500; margin: 2px 0;">${safeHtml(d.action)}: ${d.approved !== false ? '✅ ONAYLANDI' : '❌ REDDEDİLDİ'}</div>
+          ${d.reason ? `<div style="font-size: 0.78rem; color: #94a3b8;">${safeHtml(d.reason)}</div>` : ''}
+          ${d.planFingerprint ? `<div style="font-size: 0.72rem; color: var(--muted); margin-top: 2px;">Plan FP: <code>${safeHtml(d.planFingerprint.slice(0, 12))}</code></div>` : ''}
         </div>
-      ` : ''}
-    `;
-    body.append(humanSection);
-
-    // 6. Chronological Audit Timeline Section
-    const timelineSection = element("div", "trace-section");
-    let timelineHtml = "";
-    if (history.length === 0) {
-      timelineHtml = '<p style="color: var(--muted); font-size: 0.8rem;">Henüz olay kaydı bulunmuyor.</p>';
-    } else {
-      history.forEach(item => {
-        const actor = item.actor || { type: "runtime", id: "system" };
-        timelineHtml += `
-          <div class="timeline-item">
-            <div class="timeline-top">
-              <span class="actor-badge actor-${actor.type}">${actor.type}: ${actor.id}</span>
-              <span class="timeline-time">${formatTime(item.timestamp, true)}</span>
-            </div>
-            <div style="color: #f1f5f9; font-weight: 500;">${item.label}</div>
-          </div>
-        `;
-      });
+      `).join("");
     }
 
-    timelineSection.innerHTML = `
-      <h4>📜 Denetim & Karar Zaman Çizelgesi (Audit Timeline)</h4>
-      <div class="timeline-list">${timelineHtml}</div>
+    let runsHtml = "";
+    if (runs.length === 0) {
+      runsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Henüz yürütme kaydı bulunmuyor.</p>`;
+    } else {
+      runsHtml = runs.map(r => `
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <strong style="color: #fff;">Run #${r.id} (${r.role || 'worker'})</strong>
+            <span class="badge status-${r.state}">${r.state}</span>
+          </div>
+          <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">
+            Agent: <strong>${r.taskAgent || r.persona}</strong> · Model: <strong>${r.model || 'default'}</strong> · Tokens: <strong>${r.tokens || 0}</strong>
+          </div>
+          <div style="margin-top: 6px;">
+            <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openTelemetryDetail('${r.id}')">📊 Telemetri ve Timeline İncele</button>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    body.innerHTML = `
+      <div class="trace-section">
+        <h4>📋 İş Kalemi Durumu</h4>
+        <div class="trace-grid-two">
+          <div class="trace-info-cell"><span>Statü / Aşama</span><strong>${safeHtml(item.state || 'idle')}</strong></div>
+          <div class="trace-info-cell"><span>Öncelik / Risk</span><strong>${safeHtml(item.risk || 'normal')}</strong></div>
+          <div class="trace-info-cell"><span>Parent / Epik</span><strong>${item.parentKey ? `<a href="javascript:void(0)" onclick="switchView('parents-view'); renderParentsView('${item.parentKey}');" style="color: #60a5fa;">${item.parentKey}</a>` : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Entegrasyon Durumu</span><strong>${safeHtml(item.integrationState || 'not-queued')}</strong></div>
+        </div>
+      </div>
+
+      <div class="trace-section">
+        <h4>⚖️ PM & Orkestrasyon Kararları</h4>
+        <div class="timeline-list">${decisionsHtml}</div>
+      </div>
+
+      <div class="trace-section">
+        <h4>🚀 İlgili Çalıştırmalar (Runs)</h4>
+        <div>${runsHtml}</div>
+      </div>
     `;
-    body.append(timelineSection);
+
+    updateUrlState({ issue: issueKey });
 
   } catch (err) {
-    body.innerHTML = `<div class="error-banner">Hata: ${err.message}</div>`;
+    body.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
   }
 }
 
-let currentObsWindow = "24h";
+const traceCloseBtn = document.querySelector("#trace-close-btn");
+if (traceCloseBtn) {
+  traceCloseBtn.addEventListener("click", () => {
+    const modal = document.querySelector("#decision-trace-modal");
+    if (modal) modal.hidden = true;
+    updateUrlState({ issue: null });
+  });
+}
+
+// ── In-Page Modals: Approvals & Rejections ───────────────────────────────────
+
+let currentApprovalContext = null;
+
+function openApprovalModal(issueKey, action, planFingerprint, attempt, summary = "", risk = "normal", agent = "backend-engineer") {
+  const modal = document.querySelector("#approval-modal");
+  const sub = document.querySelector("#approval-modal-sub");
+  const scopeEl = document.querySelector("#approval-plan-scope");
+  const fpEl = document.querySelector("#approval-plan-fingerprint");
+  const errEl = document.querySelector("#approval-modal-error");
+  if (!modal) return;
+
+  currentApprovalContext = { issueKey, action, planFingerprint, attempt };
+  if (sub) sub.textContent = `${issueKey}: ${summary} (Aksiyon: ${action}, Risk: ${risk})`;
+  if (scopeEl) scopeEl.textContent = `Aksiyon: ${action} | Hedef Agent: ${agent} | Risk Seviyesi: ${risk}`;
+  if (fpEl) fpEl.textContent = planFingerprint;
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+
+  modal.hidden = false;
+}
+
+function closeApprovalModal() {
+  const modal = document.querySelector("#approval-modal");
+  if (modal) modal.hidden = true;
+  currentApprovalContext = null;
+}
+
+const appCancelBtn = document.querySelector("#approval-cancel-btn");
+if (appCancelBtn) appCancelBtn.addEventListener("click", closeApprovalModal);
+
+const appConfirmBtn = document.querySelector("#approval-confirm-btn");
+if (appConfirmBtn) {
+  appConfirmBtn.addEventListener("click", async () => {
+    if (!currentApprovalContext) return;
+    const { issueKey, action, planFingerprint, attempt } = currentApprovalContext;
+    const errEl = document.querySelector("#approval-modal-error");
+    appConfirmBtn.disabled = true;
+    appConfirmBtn.textContent = "Onaylanıyor...";
+
+    try {
+      const res = await fetch(`/api/pm/work-items/${issueKey}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          planFingerprint,
+          attempt,
+          approver: "PM Operator",
+          reason: "Onay modalı üzerinden onaylandı"
+        })
+      });
+
+      if (res.status === 409) {
+        const data = await res.json();
+        throw new Error(data.error || "Plan parmak izi uyuşmazlığı (stale fingerprint). Çalışma alanı yenileniyor.");
+      }
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Onay başarısız (${res.status})`);
+      }
+
+      closeApprovalModal();
+      await refresh();
+
+    } catch (err) {
+      if (errEl) {
+        errEl.hidden = false;
+        errEl.textContent = err.message;
+      }
+      setTimeout(() => refresh(), 1500);
+    } finally {
+      appConfirmBtn.disabled = false;
+      appConfirmBtn.textContent = "Onayla ve Başlat";
+    }
+  });
+}
+
+function openRejectionModal(issueKey, action, planFingerprint, attempt, summary = "") {
+  const modal = document.querySelector("#rejection-modal");
+  const sub = document.querySelector("#rejection-modal-sub");
+  const reasonInput = document.querySelector("#rejection-reason-input");
+  const errEl = document.querySelector("#rejection-modal-error");
+  if (!modal) return;
+
+  currentApprovalContext = { issueKey, action, planFingerprint, attempt };
+  if (sub) sub.textContent = `${issueKey}: ${summary} (Aksiyon: ${action})`;
+  if (reasonInput) reasonInput.value = "";
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+
+  modal.hidden = false;
+}
+
+function closeRejectionModal() {
+  const modal = document.querySelector("#rejection-modal");
+  if (modal) modal.hidden = true;
+  currentApprovalContext = null;
+}
+
+const rejCancelBtn = document.querySelector("#rejection-cancel-btn");
+if (rejCancelBtn) rejCancelBtn.addEventListener("click", closeRejectionModal);
+
+const rejConfirmBtn = document.querySelector("#rejection-confirm-btn");
+if (rejConfirmBtn) {
+  rejConfirmBtn.addEventListener("click", async () => {
+    if (!currentApprovalContext) return;
+    const { issueKey, action, planFingerprint, attempt } = currentApprovalContext;
+    const reasonInput = document.querySelector("#rejection-reason-input");
+    const errEl = document.querySelector("#rejection-modal-error");
+    const reason = reasonInput ? reasonInput.value.trim() : "";
+
+    if (!reason) {
+      if (errEl) { errEl.hidden = false; errEl.textContent = "Lütfen bir ret gerekçesi giriniz."; }
+      return;
+    }
+
+    rejConfirmBtn.disabled = true;
+    rejConfirmBtn.textContent = "Reddediliyor...";
+
+    try {
+      const res = await fetch(`/api/pm/work-items/${issueKey}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          planFingerprint,
+          attempt,
+          approver: "PM Operator",
+          reason
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Ret işlemi başarısız (${res.status})`);
+      }
+
+      closeRejectionModal();
+      await refresh();
+
+    } catch (err) {
+      if (errEl) {
+        errEl.hidden = false;
+        errEl.textContent = err.message;
+      }
+    } finally {
+      rejConfirmBtn.disabled = false;
+      rejConfirmBtn.textContent = "Planı Reddet";
+    }
+  });
+}
+
+// ── PM Workspace View ───────────────────────────────────────────────────────
+
+function renderPmWorkspace() {
+  if (!state.snapshot?.pmWorkspace) return;
+  const ws = state.snapshot.pmWorkspace;
+  const groups = ws.groups || {};
+  const container = document.querySelector("#pm-workspace-list");
+  if (!container) return;
+
+  let items = [];
+  if (state.currentPmFilter === "inbox") {
+    items = [...(groups.executionApproval || []), ...(groups.humanApproval || []), ...(groups.blocked || [])];
+  } else if (state.currentPmFilter === "approvals") {
+    items = groups.executionApproval || [];
+  } else if (state.currentPmFilter === "blocked") {
+    items = groups.blocked || [];
+  } else if (state.currentPmFilter === "active") {
+    items = [...(groups.ready || []), ...(groups.executing || []), ...(groups.inReview || []), ...(groups.needsRework || [])];
+  } else if (state.currentPmFilter === "completed") {
+    items = groups.completed || [];
+  } else {
+    items = Object.values(groups).flat();
+  }
+
+  if (items.length === 0) {
+    container.innerHTML = `<div style="padding: 32px; text-align: center; color: var(--muted);">Bu filtrede iş kalemi bulunmuyor.</div>`;
+    return;
+  }
+
+  container.innerHTML = items.map(item => {
+    const isApprovalReq = item.status === "awaiting_approval" || item.group === "executionApproval";
+    const isHumanApproval = item.status === "waiting_human" || item.group === "humanApproval";
+    const isBlocked = item.status === "blocked" || item.group === "blocked";
+
+    let actionsHtml = "";
+    if (isApprovalReq && item.approvalRequest) {
+      const req = item.approvalRequest;
+      actionsHtml = `
+        <button class="pm-btn pm-btn-approve" onclick="openApprovalModal('${safeHtml(item.issueKey)}', '${safeHtml(req.action)}', '${safeHtml(req.planFingerprint)}', ${req.attempt || 0}, '${safeHtml(item.summary || '')}', '${safeHtml(item.risk || 'normal')}', '${safeHtml(item.taskAgent || 'backend-engineer')}')">Onayla</button>
+        <button class="pm-btn pm-btn-reject" onclick="openRejectionModal('${safeHtml(item.issueKey)}', '${safeHtml(req.action)}', '${safeHtml(req.planFingerprint)}', ${req.attempt || 0}, '${safeHtml(item.summary || '')}')">Reddet</button>
+      `;
+    } else if (isHumanApproval) {
+      actionsHtml = `
+        <span class="badge" style="background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.4);">İnsan Onayı Bekliyor</span>
+      `;
+    }
+
+    return `
+      <div class="pm-item-card">
+        <div class="pm-item-header">
+          <div>
+            <span class="badge badge-key">${safeHtml(item.issueKey)}</span>
+            <span class="pm-item-title">${safeHtml(item.summary || item.issueKey)}</span>
+          </div>
+          <div>
+            <span class="badge status-${safeHtml(item.status)}">${safeHtml(STATUS_LABELS[item.status] || item.status)}</span>
+          </div>
+        </div>
+
+        <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0;">
+          Agent: <strong>${safeHtml(item.taskAgent || item.persona || 'unassigned')}</strong> · Risk: <strong>${safeHtml(item.risk || 'normal')}</strong>
+          ${item.parentKey ? `· Parent: <a href="javascript:void(0)" onclick="switchView('parents-view'); renderParentsView('${safeHtml(item.parentKey)}');" style="color: #60a5fa;">${safeHtml(item.parentKey)}</a>` : ''}
+        </div>
+
+        ${item.blockedReasons?.length ? `
+          <div style="color: #f87171; font-size: 0.75rem; background: rgba(239, 68, 68, 0.1); border-left: 2px solid #ef4444; padding: 4px 8px; margin: 6px 0;">
+            ⚠️ ${safeHtml(item.blockedReasons[0])}
+          </div>
+        ` : ''}
+
+        <div class="pm-item-actions">
+          <button class="pm-btn pm-btn-view" onclick="openDecisionTrace('${safeHtml(item.issueKey)}')">İş Karar İzi</button>
+          ${actionsHtml}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function setupPmSubNav() {
+  document.querySelectorAll(".pm-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".pm-filter-btn").forEach(b => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      state.currentPmFilter = btn.dataset.filter || "inbox";
+      renderPmWorkspace();
+    });
+  });
+}
+
+// ── Observability View ──────────────────────────────────────────────────────
 
 async function renderObservability() {
-  const liveGrid = document.querySelector("#obs-live-grid");
+  const tableBody = document.querySelector("#obs-runs-table-body");
   const providersGrid = document.querySelector("#obs-providers-grid");
-  const runsTableBody = document.querySelector("#obs-runs-table-body");
-  if (!liveGrid || !providersGrid || !runsTableBody) return;
+  if (!tableBody) return;
 
   try {
-    const res = await fetch(`/api/observability/summary?window=${currentObsWindow}`);
-    if (!res.ok) return;
+    const res = await fetch(`/api/observability/summary?window=${state.currentObsWindow}`);
+    if (!res.ok) throw new Error("Observability verisi alınamadı");
     const data = await res.json();
-    if (!data.ok) return;
+    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
 
-    // 1. Live & Queued
-    const liveRuns = (data.runs || []).filter(r => ["queued", "started", "model_selected", "progress", "executing", "verifying"].includes(r.state));
-    if (liveRuns.length === 0) {
-      liveGrid.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem; grid-column: 1/-1;">Şu anda aktif çalışan veya kuyrukta bekleyen işlem yok.</div>`;
-    } else {
-      liveGrid.innerHTML = liveRuns.map(r => `
-        <div class="provider-health-card">
-          <div class="ph-top">
-            <span class="badge badge-key">${r.issueKey}</span>
-            <span class="badge status-${r.state}">${STATUS_LABELS[r.state] || r.state}</span>
+    // Render Provider Health
+    if (providersGrid) {
+      const pHealth = data.providerHealth || [];
+      if (pHealth.length === 0) {
+        providersGrid.innerHTML = '<div style="color: var(--muted); font-size: 0.8rem;">Kayıtlı sağlayıcı sağlık verisi bulunamadı.</div>';
+      } else {
+        providersGrid.innerHTML = pHealth.map(p => `
+          <div class="provider-health-card">
+            <div class="ph-top">
+              <span class="ph-provider-name">${safeHtml(p.provider.toUpperCase())}</span>
+              <span class="badge status-${safeHtml(p.status)}">${safeHtml(p.status.toUpperCase())}</span>
+            </div>
+            <div class="ph-stats-grid">
+              <div class="ph-stat-cell"><span>Başarı Oranı</span><strong>${p.successRate != null ? Math.round(p.successRate * 100) + '%' : '—'}</strong></div>
+              <div class="ph-stat-cell"><span>Ort. Süre</span><strong>${p.averageDurationMs != null ? Math.round(p.averageDurationMs / 1000) + 's' : '—'}</strong></div>
+              <div class="ph-stat-cell"><span>Başarı</span><strong>${p.recentSuccesses || 0}</strong></div>
+              <div class="ph-stat-cell"><span>Hata</span><strong>${p.recentFailures || 0}</strong></div>
+            </div>
           </div>
-          <div class="ph-stats-grid">
-            <div class="ph-stat-cell"><span>Rol / Agent</span><strong>${r.taskAgent}</strong></div>
-            <div class="ph-stat-cell"><span>Provider / Model</span><strong>${r.provider} / ${r.model || '—'}</strong></div>
-            <div class="ph-stat-cell"><span>Süre</span><strong>${r.durationSeconds}s</strong></div>
-            <div class="ph-stat-cell"><span>Token</span><strong>${r.usage?.available ? (r.usage.totalTokens || '—') : '—'}</strong></div>
-          </div>
-          <button class="pm-btn pm-btn-view" style="width: 100%; margin-top: 4px;" onclick="openTelemetryDetail('${r.runId}')">Detay ve Timeline</button>
-        </div>
-      `).join("");
+        `).join("");
+      }
     }
 
-    // 2. Providers
-    const providers = data.providers || [];
-    if (providers.length === 0) {
-      providersGrid.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem; grid-column: 1/-1;">Kayıtlı provider bulunamadı.</div>`;
-    } else {
-      providersGrid.innerHTML = providers.map(p => `
-        <div class="provider-health-card">
-          <div class="ph-top">
-            <span class="ph-provider-name">${p.provider.toUpperCase()}</span>
-            <span class="ph-status-badge status-${p.status}">${p.status.toUpperCase()}</span>
-          </div>
-          <div class="ph-stats-grid">
-            <div class="ph-stat-cell"><span>Başarı Oranı</span><strong>${p.successRate !== null ? Math.round(p.successRate * 100) + '%' : '—'}</strong></div>
-            <div class="ph-stat-cell"><span>Ort. Süre</span><strong>${p.averageDurationMs ? Math.round(p.averageDurationMs / 1000) + 's' : '—'}</strong></div>
-            <div class="ph-stat-cell"><span>Son Başarılar</span><strong>${p.recentSuccesses}</strong></div>
-            <div class="ph-stat-cell"><span>Son Hatalar</span><strong>${p.recentFailures}</strong></div>
-          </div>
-          ${p.cooldownUntil ? `<div style="color: #fb923c; font-size: 0.72rem; margin-top: 4px;">⏳ Cooldown: ${formatTime(p.cooldownUntil, true)}</div>` : ''}
-        </div>
-      `).join("");
-    }
-
-    // 3. Recent Runs Table
+    // Render Observability Runs Table
     const runs = data.runs || [];
     if (runs.length === 0) {
-      runsTableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 24px;">Bu zaman aralığında kaydedilmiş run bulunmuyor.</td></tr>`;
-    } else {
-      runsTableBody.innerHTML = runs.map(r => `
-        <tr>
-          <td><span class="badge badge-key">${r.issueKey}</span></td>
-          <td><strong>${r.taskAgent}</strong> <small style="color: var(--muted); display: block;">${r.role}</small></td>
-          <td>${r.provider} <small style="color: var(--muted); display: block;">${r.model || '—'}</small></td>
-          <td><span class="badge status-${r.state}">${STATUS_LABELS[r.state] || r.state}</span></td>
-          <td>${r.durationSeconds}s</td>
-          <td>${r.usage?.available ? `<strong>${r.usage.totalTokens || 0}</strong> tok` : '<span style="color: var(--muted);">—</span>'}</td>
-          <td>${formatTime(r.createdAt, true)}</td>
-          <td><button class="pm-btn pm-btn-view" onclick="openTelemetryDetail('${r.runId}')">Timeline</button></td>
-        </tr>
-      `).join("");
+      tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 24px;">Bu zaman penceresinde kayıtlı çalıştırma yok.</td></tr>`;
+      return;
     }
 
+    tableBody.innerHTML = runs.map(r => `
+      <tr>
+        <td><span class="badge badge-key">${safeHtml(r.issueKey)}</span></td>
+        <td><strong>${safeHtml(r.taskAgent || r.persona)}</strong> <small style="color: var(--muted); display: block;">${safeHtml(r.role)}</small></td>
+        <td>${safeHtml(r.provider)} <small style="color: var(--muted); display: block;">${safeHtml(r.model || '—')}</small></td>
+        <td><span class="badge status-${safeHtml(r.state)}">${safeHtml(STATUS_LABELS[r.state] || r.state)}</span></td>
+        <td>${r.durationSeconds != null ? `${r.durationSeconds}s` : '—'}</td>
+        <td>${r.usage?.available && r.usage?.totalTokens != null ? `<strong>${r.usage.totalTokens}</strong> tok` : '<span style="color: var(--muted);">—</span>'}</td>
+        <td>${formatTime(r.createdAt, true)}</td>
+        <td><button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openTelemetryDetail('${safeHtml(r.runId)}')">Timeline</button></td>
+      </tr>
+    `).join("");
+
   } catch (err) {
-    console.error("renderObservability error:", err);
+    tableBody.innerHTML = `<tr><td colspan="8" style="color: #f87171; padding: 16px;">Hata: ${safeHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -1493,9 +1542,9 @@ async function openTelemetryDetail(runId) {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Telemetri hatası");
 
-    pill.textContent = data.identity.issueKey;
-    title.textContent = `Run Telemetry: ${data.identity.issueKey}`;
-    summary.textContent = `Rol: ${data.identity.role} · Agent: ${data.agent.taskAgent} · Provider: ${data.execution.provider} (${data.execution.model || 'default'})`;
+    pill.textContent = data.identity?.issueKey || `Run #${runId}`;
+    title.textContent = `Run Telemetry: ${data.identity?.issueKey || runId}`;
+    summary.textContent = `Rol: ${data.identity?.role} · Agent: ${data.agent?.taskAgent} · Provider: ${data.execution?.provider} (${data.execution?.model || 'default'})`;
 
     const timings = data.timing || {};
     const usage = data.usage || {};
@@ -1508,14 +1557,14 @@ async function openTelemetryDetail(runId) {
       eventsHtml = events.map(ev => `
         <div class="timeline-item">
           <div class="timeline-top">
-            <span class="actor-badge actor-runtime">${ev.stage}</span>
+            <span class="actor-badge actor-runtime">${safeHtml(ev.stage)}</span>
             <span class="timeline-time">${formatTime(ev.timestamp, true)}</span>
           </div>
           <div style="color: #f1f5f9; font-weight: 500;">
-            ${ev.status.toUpperCase()} ${ev.model ? `· model: ${ev.model}` : ''}
-            ${ev.usage ? `· ${ev.usage.totalTokens || 0} tokens` : ''}
+            ${safeHtml(ev.status.toUpperCase())} ${ev.model ? `· model: ${safeHtml(ev.model)}` : ''}
+            ${ev.usage?.totalTokens != null ? `· ${ev.usage.totalTokens} tokens` : ''}
           </div>
-          ${ev.error ? `<div style="color: #f87171; font-size: 0.75rem; margin-top: 2px;">⚠️ ${ev.error.safeMessage || ev.error.category}</div>` : ''}
+          ${ev.error ? `<div style="color: #f87171; font-size: 0.75rem; margin-top: 2px;">⚠️ ${safeHtml(ev.error.safeMessage || ev.error.category)}</div>` : ''}
         </div>
       `).join("");
     }
@@ -1524,26 +1573,21 @@ async function openTelemetryDetail(runId) {
       <div class="trace-section">
         <h4>⚡ Yürütme ve Süre Bilgileri</h4>
         <div class="trace-grid-two">
-          <div class="trace-info-cell"><span>Kuyruk Bekleme</span><strong>${timings.queueWaitMs !== null ? timings.queueWaitMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Yürütme Süresi</span><strong>${timings.executionDurationMs !== null ? timings.executionDurationMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Uçtan Uca Süre</span><strong>${timings.endToEndDurationMs !== null ? timings.endToEndDurationMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Deneme / Attempt</span><strong>${timings.attempt + 1} / ${timings.totalAttempts}</strong></div>
+          <div class="trace-info-cell"><span>Kuyruk Bekleme</span><strong>${timings.queueWaitMs != null ? timings.queueWaitMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Yürütme Süresi</span><strong>${timings.executionDurationMs != null ? timings.executionDurationMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Uçtan Uca Süre</span><strong>${timings.endToEndDurationMs != null ? timings.endToEndDurationMs + 'ms' : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Deneme / Attempt</span><strong>${timings.attempt != null ? timings.attempt + 1 : 1} / ${timings.totalAttempts || 3}</strong></div>
         </div>
       </div>
 
       <div class="trace-section">
         <h4>◇ Normalized Token Usage Ledger</h4>
         <div class="trace-grid-two">
-          <div class="trace-info-cell"><span>Girdi Token</span><strong>${usage.inputTokens !== null ? usage.inputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Çıktı Token</span><strong>${usage.outputTokens !== null ? usage.outputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Cached Girdi</span><strong>${usage.cachedInputTokens !== null ? usage.cachedInputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Toplam Token</span><strong>${usage.totalTokens !== null ? usage.totalTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Girdi Token</span><strong>${usage.available && usage.inputTokens != null ? usage.inputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Çıktı Token</span><strong>${usage.available && usage.outputTokens != null ? usage.outputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Cached Girdi</span><strong>${usage.available && usage.cachedInputTokens != null ? usage.cachedInputTokens : '—'}</strong></div>
+          <div class="trace-info-cell"><span>Toplam Token</span><strong>${usage.available && usage.totalTokens != null ? usage.totalTokens : '—'}</strong></div>
         </div>
-        ${data.cost ? `
-          <div style="margin-top: 8px; font-size: 0.8rem; color: #4ade80;">
-            💰 <strong>Hesaplanan Maliyet:</strong> ${data.cost.amount} ${data.cost.currency} (v${data.cost.pricingVersion})
-          </div>
-        ` : ''}
       </div>
 
       <div class="trace-section">
@@ -1552,8 +1596,10 @@ async function openTelemetryDetail(runId) {
       </div>
     `;
 
+    updateUrlState({ run: runId });
+
   } catch (err) {
-    body.innerHTML = `<div class="error-banner">Hata: ${err.message}</div>`;
+    body.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
   }
 }
 
@@ -1562,6 +1608,7 @@ if (telemCloseBtn) {
   telemCloseBtn.addEventListener("click", () => {
     const modal = document.querySelector("#telemetry-drawer-modal");
     if (modal) modal.hidden = true;
+    updateUrlState({ run: null });
   });
 }
 
@@ -1569,38 +1616,297 @@ document.querySelectorAll(".window-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".window-btn").forEach(b => b.classList.remove("is-active"));
     btn.classList.add("is-active");
-    currentObsWindow = btn.dataset.window || "24h";
+    state.currentObsWindow = btn.dataset.window || "24h";
     renderObservability();
   });
 });
 
-function renderTabs() {
-  renderPmMessages();
-  renderPmDecisions();
-  renderPmWorkspace();
-  renderObservability();
-  renderAgentDefinitions();
-  renderUsageEvents();
+// ── Agent Management View ───────────────────────────────────────────────────
+
+async function renderAgentDefinitions() {
+  const container = document.querySelector("#agents-list");
+  if (!container) return;
+
+  try {
+    const res = await fetch("/api/agents?includeArchived=true");
+    if (!res.ok) throw new Error("Agent listesi alınamadı");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
+
+    const agents = data.agents || [];
+    if (agents.length === 0) {
+      container.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">Kayıtlı agent tanımı bulunamadı.</div>`;
+      return;
+    }
+
+    container.innerHTML = agents.map(agent => {
+      const isEnabled = agent.status === "enabled";
+      const isArchived = agent.status === "archived";
+
+      return `
+        <div class="agent-reg-card">
+          <div class="arc-header">
+            <div>
+              <span class="arc-id">${safeHtml(agent.id)}</span>
+              <span class="badge status-${safeHtml(agent.status)}">${safeHtml(agent.status.toUpperCase())}</span>
+              <span class="badge" style="background: rgba(255,255,255,0.05); color: #cbd5e1;">v${agent.version || 1}</span>
+            </div>
+            <div class="arc-actions">
+              <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openAgentVersionsDrawer('${safeHtml(agent.id)}')">Versiyonlar</button>
+              <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openAgentEditModal('${safeHtml(agent.id)}')">Yeni Versiyon Kaydet</button>
+              ${isEnabled
+                ? `<button class="pm-btn pm-btn-reject" style="font-size: 0.72rem;" onclick="toggleAgentStatus('${safeHtml(agent.id)}', 'disable')">Devre Dışı Bırak</button>`
+                : `<button class="pm-btn pm-btn-approve" style="font-size: 0.72rem;" onclick="toggleAgentStatus('${safeHtml(agent.id)}', 'enable')">Aktifleştir</button>`}
+            </div>
+          </div>
+
+          <div style="font-size: 0.85rem; color: #fff; font-weight: 500; margin: 6px 0;">${safeHtml(agent.displayName || agent.id)}</div>
+          <div style="font-size: 0.78rem; color: var(--muted);">
+            Rol: <strong>${safeHtml(agent.role || 'implementation')}</strong> · Model: <strong>${safeHtml(agent.preferredModel || 'default')}</strong> · Risk: <strong>${safeHtml(agent.risk || 'normal')}</strong>
+          </div>
+
+          ${agent.skills?.length ? `
+            <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
+              ${agent.skills.map(s => `<span class="skill-chip">${safeHtml(s)}</span>`).join("")}
+            </div>
+          ` : ''}
+
+          <div style="margin-top: 8px; font-size: 0.72rem; color: var(--muted);">
+            Tanım Özeti (SHA): <code>${safeHtml(agent.definitionHash?.slice(0, 12) || '—')}</code>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+  } catch (err) {
+    container.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+  }
 }
 
-setupPmSubNav();
-
-document.querySelectorAll('.tab-button').forEach(button => {
-  button.addEventListener('click', () => {
-    document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('is-active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.hidden = true);
-    
-    button.classList.add('is-active');
-    const target = document.getElementById(button.dataset.target);
-    if (target) {
-      target.classList.add('is-active');
-      target.hidden = false;
+async function toggleAgentStatus(agentId, action) {
+  try {
+    const res = await fetch(`/api/agents/${agentId}/${action}`, { method: "POST" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Agent durum güncelleme başarısız (${res.status})`);
     }
-  });
-});
+    await renderAgentDefinitions();
+  } catch (err) {
+    alert(`Hata: ${err.message}`);
+  }
+}
 
-refresh();
-setInterval(() => {
-  if (!document.hidden) refresh();
-}, 2500);
+async function openAgentVersionsDrawer(agentId) {
+  const drawer = document.querySelector("#agent-versions-drawer");
+  const listEl = document.querySelector("#agent-versions-list");
+  const subEl = document.querySelector("#agent-versions-sub");
+  if (!drawer || !listEl) return;
+
+  drawer.hidden = false;
+  if (subEl) subEl.textContent = `${agentId} için sabit versiyon geçmişi`;
+  listEl.innerHTML = `<div style="padding: 16px; color: var(--muted);">Versiyon geçmişi yükleniyor...</div>`;
+
+  try {
+    const res = await fetch(`/api/agents/${agentId}/versions`);
+    if (!res.ok) throw new Error("Versiyonlar alınamadı");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
+
+    const versions = data.versions || [];
+    listEl.innerHTML = versions.map(v => `
+      <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="color: #fff;">Versiyon v${v.version}</strong>
+          <small style="color: var(--muted);">${formatTime(v.createdAt, true)}</small>
+        </div>
+        <div style="font-size: 0.72rem; color: var(--muted); margin: 4px 0;">
+          Hash: <code>${safeHtml(v.definitionHash || '—')}</code>
+        </div>
+        <pre style="background: rgba(0,0,0,0.4); padding: 8px; border-radius: 4px; font-size: 0.72rem; color: #a5f3fc; overflow-x: auto; margin: 6px 0 0 0;">${safeHtml(JSON.stringify(v.definition, null, 2))}</pre>
+      </div>
+    `).join("");
+
+  } catch (err) {
+    listEl.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+  }
+}
+
+const verCloseBtn = document.querySelector("#agent-versions-close-btn");
+if (verCloseBtn) {
+  verCloseBtn.addEventListener("click", () => {
+    const drawer = document.querySelector("#agent-versions-drawer");
+    if (drawer) drawer.hidden = true;
+  });
+}
+
+// ── Provider / Configuration View ───────────────────────────────────────────
+
+async function renderConfigView() {
+  const container = document.querySelector("#config-providers-container");
+  const readOnlyNotice = document.querySelector("#config-readonly-notice");
+  if (!container) return;
+
+  try {
+    const res = await fetch("/api/snapshot");
+    if (!res.ok) throw new Error("Snapshot alınamadı");
+    const data = await res.json();
+
+    const meta = data.controlPlane || {};
+    const providers = meta.providers || {};
+    const selections = meta.config?.selections || {};
+    const mutationEnabled = Boolean(meta.config?.mutationEnabled);
+
+    if (readOnlyNotice) {
+      readOnlyNotice.hidden = mutationEnabled;
+    }
+
+    const sections = [
+      { key: "workSource", title: "Work Source", list: providers.workSources || [] },
+      { key: "orchestrator", title: "Orchestrator", list: providers.orchestrators || [] },
+      { key: "executor", title: "Executor", list: providers.executors || [] },
+      { key: "codeIntelligence", title: "Code Intelligence", list: providers.codeIntelligence || [] },
+      { key: "sourceControl", title: "Source Control", list: providers.sourceControl || [] }
+    ];
+
+    container.innerHTML = sections.map(sec => {
+      const selectedId = selections[sec.key] || "";
+      const isMutable = mutationEnabled && sec.key !== "sourceControl";
+
+      return `
+        <div class="config-provider-card">
+          <div class="cpc-header">
+            <h4>${safeHtml(sec.title)}</h4>
+            <span class="badge" style="background: rgba(255,255,255,0.05); color: #cbd5e1;">${safeHtml(selectedId || 'none')}</span>
+          </div>
+
+          <div style="margin: 12px 0;">
+            <label style="font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px;">Aktif Sağlayıcı Seçimi:</label>
+            <select class="form-select config-provider-select" data-section="${safeHtml(sec.key)}" ${!isMutable ? 'disabled' : ''}>
+              ${sec.list.map(p => `
+                <option value="${safeHtml(p.id || p.name)}" ${p.selected || p.id === selectedId || p.name === selectedId ? 'selected' : ''} ${p.enabled === false ? 'disabled' : ''}>
+                  ${safeHtml(p.displayName || p.name || p.id)} ${p.enabled === false ? '(Devre Dışı)' : ''}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div style="font-size: 0.72rem; color: var(--muted);">
+            ${isMutable ? 'Seçimi değiştirdiğinizde ayarlar diske atomik kaydedilir.' : 'Bu sağlayıcı seçimi çalışma zamanında salt-okunurdur.'}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    // Bind onChange handlers for mutable provider dropdowns
+    container.querySelectorAll(".config-provider-select").forEach(sel => {
+      sel.addEventListener("change", async () => {
+        const section = sel.dataset.section;
+        const newProvider = sel.value;
+        try {
+          const patchRes = await fetch("/api/config/providers", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ [section]: newProvider })
+          });
+          if (!patchRes.ok) {
+            const patchErr = await patchRes.json().catch(() => ({}));
+            throw new Error(patchErr.error || `Güncelleme başarısız (${patchRes.status})`);
+          }
+          await refresh();
+          await renderConfigView();
+        } catch (err) {
+          alert(`Hata: ${err.message}`);
+          await renderConfigView();
+        }
+      });
+    });
+
+  } catch (err) {
+    container.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+  }
+}
+
+// ── Refresh & Polling ───────────────────────────────────────────────────────
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/snapshot");
+    if (!res.ok) throw new Error("Snapshot alınamadı");
+    const snapshot = await res.json();
+    state.snapshot = snapshot;
+    state.connected = true;
+    state.loading = false;
+
+    if (elements.connectionDot) elements.connectionDot.className = "status-dot is-connected";
+    if (elements.connectionLabel) elements.connectionLabel.textContent = "Bağlı";
+    if (elements.syncTime) elements.syncTime.textContent = formatTime(snapshot.generatedAt || new Date().toISOString());
+    if (elements.error) elements.error.hidden = true;
+
+    renderOverview();
+
+    if (state.currentView === "parents-view") {
+      renderParentsView(state.selectedParentKey);
+    } else if (state.currentView === "pm-view") {
+      renderPmWorkspace();
+    } else if (state.currentView === "observability-view") {
+      renderObservability();
+    } else if (state.currentView === "config-view") {
+      renderConfigView();
+    } else if (state.currentView === "agents-view") {
+      renderAgentDefinitions();
+    }
+
+  } catch (err) {
+    state.connected = false;
+    if (elements.connectionDot) elements.connectionDot.className = "status-dot is-disconnected";
+    if (elements.connectionLabel) elements.connectionLabel.textContent = "Bağlantı kesildi";
+    if (elements.error) {
+      elements.error.hidden = false;
+      elements.error.textContent = `Kontrol paneli güncellenemedi: ${err.message}`;
+    }
+  }
+}
+
+// ── Event Handlers & Initialization ─────────────────────────────────────────
+
+if (typeof document !== "undefined") {
+  document.querySelectorAll(".tab-button").forEach(button => {
+    button.addEventListener("click", () => {
+      const target = button.dataset.target;
+      if (target) switchView(target);
+    });
+  });
+
+  const parentSel = document.querySelector("#parent-select");
+  if (parentSel) {
+    parentSel.addEventListener("change", () => {
+      state.selectedParentKey = parentSel.value;
+      renderParentsView(parentSel.value);
+    });
+  }
+
+  const searchInput = document.querySelector("#run-search");
+  if (searchInput) {
+    searchInput.addEventListener("input", (e) => {
+      state.query = e.target.value;
+      renderRuns();
+    });
+  }
+
+  document.querySelectorAll(".filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      state.filter = btn.dataset.filter || "all";
+      renderRuns();
+    });
+  });
+
+  setupPmSubNav();
+  restoreUrlState();
+  refresh();
+
+  setInterval(() => {
+    if (!document.hidden) refresh();
+  }, 2500);
+}
