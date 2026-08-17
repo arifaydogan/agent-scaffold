@@ -55,7 +55,7 @@ import {
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { tick, recordReviewerOutcome, reconcileStandaloneReviews } from "../lib/reconciler.js";
 import { prepareWorktree } from "../lib/worktree.js";
-import { handlePmApproval, handlePmRejection, getPmDetail } from "../lib/pm-workspace.js";
+import { handlePmApproval, handlePmRejection, getPmDetail, buildPmWorkspace } from "../lib/pm-workspace.js";
 
 function makeTestGitRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "phase-h-repo-"));
@@ -1708,72 +1708,73 @@ test("Scenario AF: True production lifecycle E2E driven strictly through dispatc
   workSource.setDependencies(childB, [childA]); // B depends on A
   workSource.setDependencies(childC, []);        // C independent
 
+  const injectedRunIssue = async (settings, issue, execute, runtime, options) => {
+    if (issue.key === parentKey) {
+      return { exitCode: 0, output: { runId: null } };
+    }
+    const task = store.getEpicTask(parentKey, issue.key);
+    assert.ok(task, `Task for ${issue.key} must be discovered`);
+
+    const wtPath = task.worktree || path.join(worktreeRoot, task.branch.replaceAll("/", "-"));
+    if (!fs.existsSync(wtPath)) {
+      const baseSha = task.childBaseSha;
+      assert.ok(baseSha, `childBaseSha must be pinned before worktree preparation for ${issue.key}`);
+      spawnSync("git", ["-C", repo, "worktree", "add", "-B", task.branch, wtPath, baseSha]);
+      store.upsertEpicTask({ ...task, worktree: wtPath });
+    }
+
+    const currentHead = String(spawnSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+    if (task.childBaseSha) {
+      assert.equal(currentHead, task.childBaseSha.toLowerCase());
+    }
+
+    const subDir = issue.key === childC ? "frontend" : "backend";
+    const fileName = issue.key === childA ? "a.js" : (issue.key === childB ? "b.js" : "c.js");
+    fs.mkdirSync(path.join(wtPath, subDir), { recursive: true });
+    fs.writeFileSync(path.join(wtPath, subDir, fileName), `// implementation for ${issue.key}\n`, "utf8");
+    spawnSync("git", ["-C", wtPath, "add", "."]);
+    spawnSync("git", ["-C", wtPath, "commit", "-qm", `feat: implement ${issue.key}`]);
+    const implSha = String(spawnSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+    const implRunId = store.createRun(issue.key, { role: "implementation", action: "implementation", summary: `Implement ${issue.key}`, childBaseSha: task.childBaseSha });
+    store.transition(implRunId, "queued");
+    store.transition(implRunId, "started");
+    store.transition(implRunId, "completed", { implementationSha: implSha });
+
+    const revRunId = store.createRun(issue.key, { role: "reviewer", action: "review", summary: `Review ${issue.key}`, implementationSha: implSha });
+    store.transition(revRunId, "queued");
+    store.transition(revRunId, "started");
+    store.transition(revRunId, "reviewed-clean", {
+      reviewOutcome: {
+        verdict: "clean",
+        implementationSha: implSha,
+        reviewerId: "correctness-reviewer",
+        evidence: [{ id: `clean-${issue.key}`, severity: "suggestion", category: "correctness", problem: `Clean implementation for ${issue.key}` }]
+      }
+    });
+
+    return { exitCode: 0, output: { runId: implRunId, implementationSha: implSha } };
+  };
+
   // ── Cycle 1: First dispatchOnce ──
-  // Discovers parent, pins DAG, dispatches A and C (B waits on A)
+  // Discovers parent, pins DAG, dispatches A and C through real runtime (B waits on A)
   const dispatchRes1 = await dispatchOnce(settings, {
     store,
     workSource,
     execute: true,
     maxConcurrency: 3,
-    limit: 10
+    limit: 10,
+    runIssue: injectedRunIssue
   });
   assert.equal(dispatchRes1.mode, "execute");
 
   const parentExec1 = store.getParentExecution(parentKey);
   assert.ok(parentExec1);
   assert.equal(parentExec1.state, "active");
-  const parentWt = parentExec1.integrationWorktree;
-  assert.ok(parentWt);
-
-  const taskA_c1 = store.getEpicTask(parentKey, childA);
-  const taskC_c1 = store.getEpicTask(parentKey, childC);
-  assert.equal(taskA_c1.orchestrationState, "dependency-ready");
-  assert.equal(taskC_c1.orchestrationState, "dependency-ready");
-
-  const wtA = taskA_c1.worktree || path.join(worktreeRoot, taskA_c1.branch.replaceAll("/", "-"));
-  fs.mkdirSync(path.join(wtA, "backend"), { recursive: true });
-  fs.writeFileSync(path.join(wtA, "backend", "a.js"), "module.exports = { a: 1 };\n", "utf8");
-  spawnSync("git", ["-C", wtA, "add", "."]);
-  spawnSync("git", ["-C", wtA, "commit", "-qm", "feat: implement A"]);
-  const shaA = String(spawnSync("git", ["-C", wtA, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-
-  const wtC = taskC_c1.worktree || path.join(worktreeRoot, taskC_c1.branch.replaceAll("/", "-"));
-  fs.mkdirSync(path.join(wtC, "frontend"), { recursive: true });
-  fs.writeFileSync(path.join(wtC, "frontend", "c.js"), "module.exports = { c: 1 };\n", "utf8");
-  spawnSync("git", ["-C", wtC, "add", "."]);
-  spawnSync("git", ["-C", wtC, "commit", "-qm", "feat: implement C"]);
-  const shaC = String(spawnSync("git", ["-C", wtC, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-
-  const runA = store.listRunsForIssue(childA)[0];
-  const runC = store.listRunsForIssue(childC)[0];
-  assert.ok(runA);
-  assert.ok(runC);
-  store.transition(runA.id, "completed", { implementationSha: shaA });
-  store.transition(runC.id, "completed", { implementationSha: shaC });
-
-  const revRunA = store.createRun(childA, { role: "reviewer", summary: "Review A", implementationSha: shaA });
-  store.transition(revRunA, "reviewed-clean", {
-    reviewOutcome: {
-      verdict: "clean",
-      implementationSha: shaA,
-      reviewerId: "correctness-reviewer",
-      evidence: [{ id: "rev-a", severity: "suggestion", category: "correctness", problem: "Clean A" }]
-    }
-  });
-
-  const revRunC = store.createRun(childC, { role: "reviewer", summary: "Review C", implementationSha: shaC });
-  store.transition(revRunC, "reviewed-clean", {
-    reviewOutcome: {
-      verdict: "clean",
-      implementationSha: shaC,
-      reviewerId: "correctness-reviewer",
-      evidence: [{ id: "rev-c", severity: "suggestion", category: "correctness", problem: "Clean C" }]
-    }
-  });
 
   // Tick integrates A and C into parent integration branch in serialized order
-  tick(settings, store, { execute: true });
-  tick(settings, store, { execute: true });
+  await tick(settings, store, { execute: true });
+  await tick(settings, store, { execute: true });
 
   const taskA_integrated = store.getEpicTask(parentKey, childA);
   const taskC_integrated = store.getEpicTask(parentKey, childC);
@@ -1787,34 +1788,12 @@ test("Scenario AF: True production lifecycle E2E driven strictly through dispatc
     workSource,
     execute: true,
     maxConcurrency: 3,
-    limit: 10
+    limit: 10,
+    runIssue: injectedRunIssue
   });
   assert.equal(dispatchRes2.mode, "execute");
 
-  const taskB_c2 = store.getEpicTask(parentKey, childB);
-  const wtB = taskB_c2.worktree || path.join(worktreeRoot, taskB_c2.branch.replaceAll("/", "-"));
-  assert.ok(fs.existsSync(path.join(wtB, "backend", "a.js")), "Child B worktree must contain integrated Child A changes");
-  fs.mkdirSync(path.join(wtB, "backend"), { recursive: true });
-  fs.writeFileSync(path.join(wtB, "backend", "b.js"), "module.exports = { b: 2 };\n", "utf8");
-  spawnSync("git", ["-C", wtB, "add", "."]);
-  spawnSync("git", ["-C", wtB, "commit", "-qm", "feat: implement B"]);
-  const shaB = String(spawnSync("git", ["-C", wtB, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-
-  const runB = store.listRunsForIssue(childB)[0];
-  assert.ok(runB);
-  store.transition(runB.id, "completed", { implementationSha: shaB });
-
-  const revRunB = store.createRun(childB, { role: "reviewer", summary: "Review B", implementationSha: shaB });
-  store.transition(revRunB, "reviewed-clean", {
-    reviewOutcome: {
-      verdict: "clean",
-      implementationSha: shaB,
-      reviewerId: "correctness-reviewer",
-      evidence: [{ id: "rev-b", severity: "suggestion", category: "correctness", problem: "Clean B" }]
-    }
-  });
-
-  // Tick integrates B and performs aggregate parent review
+  // ── Cycle 3: Final tick integrating B and running aggregate reviewer ──
   await tick(settings, store, {
     execute: true,
     injectedReviewOutcome: {
@@ -2152,4 +2131,442 @@ test("Scenario AI: Complete integration-worker telemetry queued->started->termin
   ).all(crashedIntRunId);
   assert.equal(recoveredTelem.length, 1);
   assert.equal(recoveredTelem[0].status, "completed");
+});
+
+// ── Scenario AJ: Production Aggregate Reviewer Prompt Verification ──────────
+test("Scenario AJ: runParentIntegrationReview passes the complete aggregate prompt to the executor boundary", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  settings.data.executor.providers.antigravity.command = [
+    "agy", "exec", "--prompt", "{{prompt}}", "--output-format", "stream-json"
+  ];
+  const sc = new LocalGitSourceControlProvider();
+
+  const parentKey = "PACE-600";
+  const epicBranch = "epic/pace-600";
+  const epicWt = path.join(worktreeRoot, "epic-pace-600");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", epicBranch, epicWt, "develop"]);
+
+  const parentBaseSha = sc.getHead({ repoPath: repo, ref: "develop" }).sha.toLowerCase();
+
+  // Child task A
+  const childKey = "PACE-601";
+  const childWt = path.join(worktreeRoot, "task-pace-601");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", "task/pace-601", childWt, epicBranch]);
+  fs.mkdirSync(path.join(childWt, "backend"), { recursive: true });
+  fs.writeFileSync(path.join(childWt, "backend", "feature.js"), "// aggregate feature\n");
+  spawnSync("git", ["-C", childWt, "add", "."]);
+  spawnSync("git", ["-C", childWt, "commit", "-qm", "feat: child feature"]);
+  const childReviewedSha = sc.getHead({ repoPath: childWt }).sha.toLowerCase();
+
+  // Integrate child into epic worktree
+  spawnSync("git", ["-C", epicWt, "merge", "--no-ff", "-qm", "merge child 601", childReviewedSha]);
+  const integrationHeadSha = sc.getHead({ repoPath: epicWt }).sha.toLowerCase();
+
+  store.upsertParentExecution({
+    parentKey,
+    sourceProvider: "jira",
+    summary: "Order Processing Engine",
+    description: "Must reliably process orders across payment and inventory subsystems.",
+    acceptanceCriteria: "[x] Validates payment\n[x] Updates inventory ledger",
+    baseRef: "develop",
+    baseSha: parentBaseSha,
+    integrationBranch: epicBranch,
+    integrationWorktree: epicWt,
+    integrationHeadSha,
+    graphFingerprint: "fp-600",
+    state: "active"
+  });
+
+  store.upsertEpicTask({
+    epicKey: parentKey,
+    parentKey,
+    issueKey: childKey,
+    summary: "Payment Integration",
+    branch: "task/pace-601",
+    worktree: childWt,
+    state: "integrated",
+    orchestrationState: "integrated",
+    reviewedSha: childReviewedSha,
+    integratedSha: integrationHeadSha
+  });
+
+  store.queueEpicIntegration({ epicKey: parentKey, issueKey: childKey, leafBranch: "task/pace-601" });
+  store.claimEpicIntegration({ epicKey: parentKey, issueKey: childKey });
+  store.finishEpicIntegration({ epicKey: parentKey, issueKey: childKey, commit: integrationHeadSha });
+
+  let capturedCommand = null;
+  const spyRuntime = {
+    spawnSync: (cmd, args, opts) => {
+      capturedCommand = { cmd, args, opts };
+      const finalLine = JSON.stringify({
+        status: "SUCCESS",
+        response: JSON.stringify({
+          verdict: "clean",
+          evidence: [
+            {
+              id: "rev-600-1",
+              severity: "suggestion",
+              category: "correctness",
+              file: "backend/feature.js",
+              line: 1,
+              problem: "Verified aggregate correctness across child changes",
+              expected: "No regressions",
+              verification: "All unit tests pass"
+            }
+          ]
+        }),
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 350
+        },
+        duration_seconds: 4.5
+      });
+      return {
+        status: 0,
+        stdout: `${finalLine}\n`,
+        stderr: ""
+      };
+    }
+  };
+
+  const reviewRes = await runParentIntegrationReview(settings, store, parentKey, {
+    runtime: spyRuntime,
+    codeIntelligence: {
+      provider: "mock-intel",
+      status: "ready",
+      summary: "High cohesion across backend/feature.js"
+    }
+  });
+
+  assert.equal(reviewRes.ok, true);
+  assert.equal(reviewRes.verdict, "clean");
+  assert.ok(capturedCommand, "Reviewer spawnSync must have been invoked");
+
+  const fullCommandArgs = capturedCommand.args.join(" ");
+  assert.ok(fullCommandArgs.includes("Order Processing Engine"), "Prompt must include parent summary");
+  assert.ok(fullCommandArgs.includes("Must reliably process orders across payment and inventory subsystems"), "Prompt must include parent description");
+  assert.ok(fullCommandArgs.includes("Validates payment"), "Prompt must include parent acceptance criteria");
+  assert.ok(fullCommandArgs.includes(parentBaseSha), "Prompt must include parentBaseSha");
+  assert.ok(fullCommandArgs.includes(integrationHeadSha), "Prompt must include integrationHeadSha");
+  assert.ok(fullCommandArgs.includes(childReviewedSha), "Prompt must include child reviewedSha");
+  assert.ok(fullCommandArgs.includes("backend/feature.js"), "Prompt must include aggregate changed files");
+  assert.ok(fullCommandArgs.includes("npm run check passed"), "Prompt must include repository verification");
+});
+
+// ── Scenario AK: Telemetry Contract Normalization Verification ─────────────
+test("Scenario AK: Reviewer and integration worker emit normalized Phase F telemetry schema", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const parentKey = "PACE-750";
+  const epicBranch = "epic/pace-750";
+  const epicWt = path.join(worktreeRoot, "epic-pace-750");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", epicBranch, epicWt, "develop"]);
+  const baseSha = sc.getHead({ repoPath: repo, ref: "develop" }).sha.toLowerCase();
+
+  // Task 751
+  const childKey = "PACE-751";
+  const childWt = path.join(worktreeRoot, "task-pace-751");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", "task/pace-751", childWt, epicBranch]);
+  fs.writeFileSync(path.join(childWt, "child751.txt"), "hello 751\n");
+  spawnSync("git", ["-C", childWt, "add", "."]);
+  spawnSync("git", ["-C", childWt, "commit", "-qm", "feat: 751"]);
+  const childSha = sc.getHead({ repoPath: childWt }).sha.toLowerCase();
+
+  spawnSync("git", ["-C", epicWt, "merge", "--no-ff", "-qm", "merge 751", childSha]);
+  const intHeadSha = sc.getHead({ repoPath: epicWt }).sha.toLowerCase();
+
+  store.upsertParentExecution({
+    parentKey,
+    sourceProvider: "jira",
+    summary: "Telemetry Epic",
+    baseRef: "develop",
+    baseSha,
+    integrationBranch: epicBranch,
+    integrationWorktree: epicWt,
+    integrationHeadSha: intHeadSha,
+    graphFingerprint: "fp-750",
+    state: "active"
+  });
+
+  store.upsertEpicTask({
+    epicKey: parentKey,
+    parentKey,
+    issueKey: childKey,
+    summary: "Telemetry Task",
+    branch: "task/pace-751",
+    worktree: childWt,
+    state: "integrated",
+    orchestrationState: "integrated",
+    reviewedSha: childSha,
+    integratedSha: intHeadSha
+  });
+  store.queueEpicIntegration({ epicKey: parentKey, issueKey: childKey, leafBranch: "task/pace-751" });
+  store.claimEpicIntegration({ epicKey: parentKey, issueKey: childKey });
+  store.finishEpicIntegration({ epicKey: parentKey, issueKey: childKey, commit: intHeadSha });
+
+  // 1. Reviewer execution failure telemetry
+  const failRuntime = {
+    spawnSync: () => ({
+      status: 1,
+      stdout: "",
+      stderr: "Process crashed unexpectedly"
+    })
+  };
+
+  const failRes = await runParentIntegrationReview(settings, store, parentKey, {
+    runtime: failRuntime
+  });
+  assert.equal(failRes.ok, false);
+
+  const failTelem = store.database.prepare(
+    "SELECT * FROM telemetry_events WHERE issue_key = ? AND role = 'reviewer' AND stage = 'terminal'"
+  ).get(parentKey);
+  assert.ok(failTelem);
+  assert.equal(failTelem.status, "failed");
+  assert.equal(failTelem.error_category, "reviewer_execution_error");
+  assert.ok(failTelem.error_message.includes("crashed") || failTelem.error_message.includes("return code 1"));
+  assert.equal(failTelem.usage_available, 0);
+  assert.equal(failTelem.input_tokens, null);
+  assert.equal(failTelem.output_tokens, null);
+
+  // 2. Reviewer success with token usage telemetry
+  store.updateParentExecutionState(parentKey, "active");
+  const successRuntime = {
+    spawnSync: () => {
+      const finalLine = JSON.stringify({
+        status: "SUCCESS",
+        response: JSON.stringify({
+          verdict: "clean",
+          evidence: [{ id: "rev-ok", severity: "suggestion", category: "correctness", problem: "Clean check" }]
+        }),
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 350
+        },
+        duration_seconds: 4.5
+      });
+      return {
+        status: 0,
+        stdout: `${finalLine}\n`,
+        stderr: ""
+      };
+    }
+  };
+
+  const okRes = await runParentIntegrationReview(settings, store, parentKey, {
+    runtime: successRuntime
+  });
+  assert.equal(okRes.ok, true);
+
+  const okTelem = store.database.prepare(
+    "SELECT * FROM telemetry_events WHERE issue_key = ? AND role = 'reviewer' AND stage = 'terminal' ORDER BY id DESC LIMIT 1"
+  ).get(parentKey);
+  assert.ok(okTelem);
+  assert.equal(okTelem.status, "completed");
+  assert.equal(okTelem.error_category, null);
+  assert.equal(okTelem.error_message, null);
+});
+
+// ── Scenario AL: PM Workspace Surface Parent Approvals & Stale Fingerprints ──
+test("Scenario AL: PM Workspace surfaces pending parent branchCreation and review approvals with exact fingerprints", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "manual" });
+  const workSource = new FakeWorkSourceProvider();
+
+  const parentKey = "PACE-850";
+  const childKey = "PACE-851";
+
+  const parent = {
+    key: parentKey,
+    id: parentKey,
+    summary: "Manual Mode Parent",
+    issueType: "Epic",
+    canonicalState: "ready"
+  };
+  const child = {
+    key: childKey,
+    id: childKey,
+    summary: "Manual Mode Child",
+    issueType: "Task",
+    canonicalState: "ready"
+  };
+
+  workSource.setWorkItem(parent);
+  workSource.setWorkItem(child);
+  workSource.setChildren(parentKey, [child]);
+  workSource.setDependencies(childKey, []);
+
+  // 1. In manual mode, discoverAndPinParent requests branchCreation approval
+  const pinRes = await discoverAndPinParent(settings, store, parent, { execute: true, workSource });
+  assert.equal(pinRes.ok, false);
+  assert.equal(pinRes.waitingApproval, true);
+
+  const pendingExec = store.getParentExecution(parentKey);
+  assert.equal(pendingExec.state, "waiting_approval");
+
+  // 2. Check PM Workspace read model
+  let ws = buildPmWorkspace(settings, { store });
+  assert.equal(ws.counts.awaitingApproval, 1);
+  const pendingItem = ws.groups.awaitingApproval[0];
+  assert.equal(pendingItem.issueKey, parentKey);
+  assert.equal(pendingItem.action, "branchCreation");
+  assert.ok(pendingItem.planFingerprint);
+
+  // 3. Stale fingerprint rejection
+  assert.throws(
+    () => handlePmApproval(settings, parentKey, { action: "branchCreation", planFingerprint: "stale-fp-123" }, { store }),
+    (err) => err.statusCode === 409
+  );
+
+  // 4. Exact approval succeeds and item leaves awaitingApproval
+  const approveRes = handlePmApproval(settings, parentKey, {
+    action: "branchCreation",
+    planFingerprint: pendingItem.planFingerprint
+  }, { store });
+  assert.equal(approveRes.ok, true);
+
+  ws = buildPmWorkspace(settings, { store });
+  assert.equal(ws.groups.awaitingApproval.length, 0);
+
+  // 5. Parent rejection moves parent to blocked
+  store.updateParentExecutionState(parentKey, "waiting_approval");
+  const reviewFingerprint = computeParentReviewFingerprint({
+    parentKey,
+    parentBaseSha: "base-sha-1",
+    integrationHeadSha: "head-sha-1",
+    graphFingerprint: "fp-850"
+  });
+
+  store.addPmDecision(parentKey, "approval_requested", {
+    action: "review",
+    planFingerprint: reviewFingerprint,
+    reason: "Aggregate integration review requires PM sign-off"
+  });
+
+  ws = buildPmWorkspace(settings, { store });
+  assert.equal(ws.groups.awaitingApproval.length, 1);
+  assert.equal(ws.groups.awaitingApproval[0].action, "review");
+  assert.equal(ws.groups.awaitingApproval[0].planFingerprint, reviewFingerprint);
+
+  handlePmRejection(settings, parentKey, {
+    action: "review",
+    planFingerprint: reviewFingerprint,
+    reason: "Integration review rejected by PM"
+  }, { store });
+
+  ws = buildPmWorkspace(settings, { store });
+  assert.equal(ws.groups.awaitingApproval.length, 0);
+  assert.equal(ws.groups.blocked.length, 1);
+  assert.equal(ws.groups.blocked[0].issueKey, parentKey);
+  assert.equal(ws.groups.blocked[0].blockedReason, "Integration review rejected by PM");
+});
+
+// ── Scenario AM: Crash Recovery Rejects Stale Unfinished Integration Runs ────
+test("Scenario AM: Unfinished integration-worker crash recovery tightens matching to exact reviewedSha", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const epicKey = "PACE-880";
+  const epicBranch = "epic/pace-880";
+  const epicWt = path.join(worktreeRoot, "epic-pace-880");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", epicBranch, epicWt, "develop"]);
+  const baseSha = sc.getHead({ repoPath: repo, ref: "develop" }).sha.toLowerCase();
+
+  const childKey = "PACE-881";
+  const childWt = path.join(worktreeRoot, "task-pace-881");
+  spawnSync("git", ["-C", repo, "worktree", "add", "-B", "task/pace-881", childWt, epicBranch]);
+
+  // Older reviewed SHA 1
+  fs.writeFileSync(path.join(childWt, "v1.txt"), "v1\n");
+  spawnSync("git", ["-C", childWt, "add", "."]);
+  spawnSync("git", ["-C", childWt, "commit", "-qm", "v1"]);
+  const oldSha = sc.getHead({ repoPath: childWt }).sha.toLowerCase();
+
+  // Newer reviewed SHA 2
+  fs.writeFileSync(path.join(childWt, "v2.txt"), "v2\n");
+  spawnSync("git", ["-C", childWt, "add", "."]);
+  spawnSync("git", ["-C", childWt, "commit", "-qm", "v2"]);
+  const newSha = sc.getHead({ repoPath: childWt }).sha.toLowerCase();
+
+  // Merge new SHA into epic worktree in Git
+  spawnSync("git", ["-C", epicWt, "merge", "--no-ff", "-qm", "merge v2", newSha]);
+
+  store.upsertParentExecution({
+    parentKey: epicKey,
+    sourceProvider: "jira",
+    summary: "Crash Recovery Epic",
+    baseRef: "develop",
+    baseSha,
+    integrationBranch: epicBranch,
+    integrationWorktree: epicWt,
+    graphFingerprint: "fp-880",
+    state: "active"
+  });
+
+  // Set up child clean review on newSha
+  const revRun = store.createRun(childKey, { role: "reviewer", summary: "Review 881 v2" });
+  store.transition(revRun, "review-queued", { implementationSha: newSha });
+  store.transition(revRun, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: newSha,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "c881", severity: "suggestion", category: "correctness", problem: "Clean v2" }]
+    }
+  });
+
+  store.upsertEpicTask({
+    epicKey,
+    parentKey: epicKey,
+    issueKey: childKey,
+    summary: "Task 881",
+    branch: "task/pace-881",
+    state: "planned",
+    orchestrationState: "planned",
+    reviewedSha: newSha
+  });
+
+  store.queueEpicIntegration({ epicKey, issueKey: childKey, leafBranch: "task/pace-881" });
+  store.claimEpicIntegration({ epicKey, issueKey: childKey });
+
+  // Create an older unfinished integration-worker run created for oldSha
+  const staleIntRunId = store.createRun(childKey, {
+    role: "integration-worker",
+    action: "childIntegration",
+    parentKey: epicKey,
+    reviewedSha: oldSha
+  });
+  store.transition(staleIntRunId, "queued");
+  store.transition(staleIntRunId, "started");
+
+  // Create the matching unfinished integration-worker run created for newSha
+  const matchingIntRunId = store.createRun(childKey, {
+    role: "integration-worker",
+    action: "childIntegration",
+    parentKey: epicKey,
+    reviewedSha: newSha
+  });
+  store.transition(matchingIntRunId, "queued");
+  store.transition(matchingIntRunId, "started");
+
+  // Run tick crash recovery
+  await tick(settings, store, { execute: true });
+
+  // Stale run created for oldSha must NOT have been completed
+  const staleRun = store.getRun(staleIntRunId);
+  assert.equal(staleRun.state, "started", "Older unfinished run for different reviewedSha must remain untouched");
+
+  // Matching run created for newSha MUST have been completed
+  const matchingRun = store.getRun(matchingIntRunId);
+  assert.equal(matchingRun.state, "completed", "Matching unfinished run for current reviewedSha must be completed");
+
+  const matchingTelem = store.database.prepare(
+    "SELECT event_id, stage, status FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'"
+  ).all(matchingIntRunId);
+  assert.equal(matchingTelem.length, 1);
+  assert.equal(matchingTelem[0].status, "completed");
 });
