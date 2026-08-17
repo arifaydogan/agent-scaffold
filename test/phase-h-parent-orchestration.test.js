@@ -46,6 +46,8 @@ import {
 } from "../lib/parent-orchestrator.js";
 import { selectDispatchBatch } from "../lib/scheduler.js";
 import { HUMAN_ONLY_ACTIONS, resolveAutonomyPolicy, authorizeRuntimeAction } from "../lib/policy.js";
+import { dispatchOnce } from "../lib/dispatcher.js";
+import { tick, recordReviewerOutcome } from "../lib/reconciler.js";
 
 function makeTestGitRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "phase-h-repo-"));
@@ -75,6 +77,25 @@ function makeTestGitRepo() {
   const worktreeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "phase-h-worktrees-"));
   const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "phase-h-store-"));
   const store = new RunStore(path.join(dbDir, "runs.sqlite3"));
+
+  if (typeof store.registerAgentDefinition === "function") {
+    try {
+      store.registerAgentDefinition({
+        id: "correctness-reviewer",
+        version: 1,
+        definitionHash: "hash-reviewer-1",
+        status: "enabled",
+        definition: { skills: ["test-review"], allowedPaths: ["**"] }
+      });
+      store.registerAgentDefinition({
+        id: "backend-engineer",
+        version: 1,
+        definitionHash: "hash-backend-1",
+        status: "enabled",
+        definition: { skills: ["backend-dev"], allowedPaths: ["**"] }
+      });
+    } catch {}
+  }
 
   return { repo, worktreeRoot, store };
 }
@@ -299,8 +320,18 @@ test("Scenario E & F: Dependent child worktree is created lazily after upstream 
   assert.equal(task302.orchestrationState, "pending-dependencies");
 
   // 3. Child 301 implements and gets reviewed in its worktree
-  const leafBranch301 = task301.branch;
-  const childDir = task301.worktree || repo;
+  const prep301 = sc.prepareChildWorktree({
+    repoPath: repo,
+    root: worktreeRoot,
+    parentKey: "PACE-300",
+    parentBranch: pinRes.integrationBranch,
+    issueKey: "PACE-301",
+    summary: "Core engine",
+    baseRef: task301.childBaseSha || pinRes.integrationBranch,
+    execute: true
+  });
+  const leafBranch301 = prep301.branch;
+  const childDir = prep301.worktree;
   fs.writeFileSync(path.join(childDir, "backend", "core.js"), "// core 301\n", "utf8");
   spawnSync("git", ["-C", childDir, "add", "."]);
   spawnSync("git", ["-C", childDir, "commit", "-qm", "feat(core): implementation 301"]);
@@ -721,3 +752,274 @@ test("Scenario S & T: Provider-neutral SourceControlProvider and CodeIntelligenc
   const resolved = sc.resolveBaseRevision({ repoPath: repo, requestedRef: "develop" });
   assert.equal(resolved.resolved, true);
 });
+
+// ── Scenario U: Real End-to-End Parent Control Loop ──────────────────────────
+test("Scenario U: End-to-end parent lifecycle through dispatchOnce, tick, auto-integration, and aggregate review", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const workSource = new FakeWorkSourceProvider();
+
+  // Define Parent P and children A (701), B (702 depends on 701), C (703 independent)
+  const parentEpic = {
+    key: "PACE-700",
+    id: "PACE-700",
+    issueType: "Epic",
+    summary: "Camera Streaming Overhaul",
+    description: "Build robust low-latency camera streaming architecture",
+    acceptanceCriteria: "[x] Stream core\n[x] Codec plugin\n[x] Frontend viewer",
+    canonicalState: "ready"
+  };
+
+  const child701 = {
+    key: "PACE-701",
+    id: "PACE-701",
+    issueType: "Task",
+    summary: "Streaming Core",
+    description: "Acceptance criteria:\n- [ ] implement streaming core",
+    canonicalState: "ready",
+    allowedPaths: ["backend/stream/**"]
+  };
+
+  const child702 = {
+    key: "PACE-702",
+    id: "PACE-702",
+    issueType: "Task",
+    summary: "Codec Plugin",
+    description: "Acceptance criteria:\n- [ ] implement codec plugin",
+    canonicalState: "ready",
+    allowedPaths: ["backend/codec/**"]
+  };
+
+  const child703 = {
+    key: "PACE-703",
+    id: "PACE-703",
+    issueType: "Task",
+    summary: "Frontend Viewer",
+    description: "Acceptance criteria:\n- [ ] implement frontend viewer",
+    canonicalState: "ready",
+    allowedPaths: ["frontend/**"]
+  };
+
+  workSource.setWorkItem(parentEpic);
+  workSource.setWorkItem(child701);
+  workSource.setWorkItem(child702);
+  workSource.setWorkItem(child703);
+
+  workSource.setChildren("PACE-700", [child701, child702, child703]);
+  workSource.setDependencies("PACE-701", []);
+  workSource.setDependencies("PACE-702", ["PACE-701"]);
+  workSource.setDependencies("PACE-703", []);
+
+  // ── Cycle 1: First dispatch ──
+  // Discovers parent PACE-700, pins DAG; 701 & 703 are eligible, 702 is blocked waiting for 701
+  const dispatchRes1 = await dispatchOnce(settings, {
+    store,
+    workSource,
+    execute: true,
+    maxConcurrency: 3,
+    limit: 10
+  });
+
+  const parentExec = store.getParentExecution("PACE-700");
+  assert.ok(parentExec);
+  assert.equal(parentExec.state, "active");
+
+  const task701_c1 = store.getEpicTask("PACE-700", "PACE-701");
+  const task702_c1 = store.getEpicTask("PACE-700", "PACE-702");
+  const task703_c1 = store.getEpicTask("PACE-700", "PACE-703");
+
+  assert.equal(task701_c1.orchestrationState, "dependency-ready");
+  assert.equal(task702_c1.orchestrationState, "pending-dependencies");
+  assert.equal(task703_c1.orchestrationState, "dependency-ready");
+
+  // Verify child 701 was dispatched and has a worktree
+  const run701 = store.listRunsForIssue("PACE-701")[0];
+  const run703 = store.listRunsForIssue("PACE-703")[0];
+  assert.ok(run701);
+  assert.ok(run703);
+
+  // Implement in 701 worktree & commit
+  const wt701 = task701_c1.worktree || path.join(worktreeRoot, task701_c1.branch.replaceAll("/", "-"));
+  fs.mkdirSync(path.join(wt701, "backend", "stream"), { recursive: true });
+  fs.writeFileSync(path.join(wt701, "backend", "stream", "core.js"), "// stream core implementation\n", "utf8");
+  spawnSync("git", ["-C", wt701, "add", "."]);
+  spawnSync("git", ["-C", wt701, "commit", "-qm", "feat(stream): implement streaming core"]);
+  const sha701 = String(spawnSync("git", ["-C", wt701, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  // Implement in 703 worktree & commit
+  const wt703 = task703_c1.worktree || path.join(worktreeRoot, task703_c1.branch.replaceAll("/", "-"));
+  fs.mkdirSync(path.join(wt703, "frontend"), { recursive: true });
+  fs.writeFileSync(path.join(wt703, "frontend", "viewer.js"), "// viewer ui implementation\n", "utf8");
+  spawnSync("git", ["-C", wt703, "add", "."]);
+  spawnSync("git", ["-C", wt703, "commit", "-qm", "feat(ui): implement viewer ui"]);
+  const sha703 = String(spawnSync("git", ["-C", wt703, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  // Complete worker runs and record clean reviews
+  store.transition(run701.id, "completed", { implementationSha: sha701 });
+  const revRun701 = store.createRun("PACE-701", { role: "reviewer", summary: "Review 701", implementationSha: sha701 });
+  store.transition(revRun701, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: sha701,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "rev-701-clean", severity: "suggestion", category: "correctness", problem: "Clean implementation" }]
+    }
+  });
+
+  store.transition(run703.id, "completed", { implementationSha: sha703 });
+  const revRun703 = store.createRun("PACE-703", { role: "reviewer", summary: "Review 703", implementationSha: sha703 });
+  store.transition(revRun703, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: sha703,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "rev-703-clean", severity: "suggestion", category: "correctness", problem: "Clean implementation" }]
+    }
+  });
+
+  // ── Reconciliation Step: tick() ──
+  // Automatically queues reviewed children, integrates 701 first (serialized queue), and unlocks child 702
+  tick(settings, store);
+
+  const task701_afterInt = store.getEpicTask("PACE-700", "PACE-701");
+  const task702_afterInt = store.getEpicTask("PACE-700", "PACE-702");
+  const task703_afterInt = store.getEpicTask("PACE-700", "PACE-703");
+
+  assert.equal(task701_afterInt.state, "integrated");
+  assert.equal(task703_afterInt.orchestrationState, "reviewed-clean");
+  assert.equal(task702_afterInt.orchestrationState, "dependency-ready");
+  assert.ok(task702_afterInt.childBaseSha);
+
+  // Assert real Git ancestry: 701 integrated commit is ancestor of 702 childBaseSha
+  const isAnc = sc.isAncestor(task701_afterInt.integratedSha, task702_afterInt.childBaseSha, { repoPath: repo });
+  assert.equal(isAnc, true, "701 integrated revision must be in 702 base ancestry");
+
+  // Tick again to integrate 703 through the serialized integration queue
+  tick(settings, store);
+  const task703_tick2 = store.getEpicTask("PACE-700", "PACE-703");
+  assert.equal(task703_tick2.state, "integrated");
+
+  // ── Cycle 2: Dispatch child 702 ──
+  const dispatchRes2 = await dispatchOnce(settings, {
+    store,
+    workSource,
+    execute: true,
+    maxConcurrency: 3,
+    limit: 10
+  });
+
+  const task702_c2 = store.getEpicTask("PACE-700", "PACE-702");
+  const wt702 = task702_c2.worktree || path.join(worktreeRoot, task702_c2.branch.replaceAll("/", "-"));
+
+  // Verify 702 worktree HEAD matches pinned childBaseSha
+  const wt702Head = sc.getHead({ repoPath: wt702 });
+  assert.equal(wt702Head.sha.toLowerCase(), task702_afterInt.childBaseSha.toLowerCase());
+
+  // Implement in 702 worktree & commit
+  fs.mkdirSync(path.join(wt702, "backend", "codec"), { recursive: true });
+  fs.writeFileSync(path.join(wt702, "backend", "codec", "plugin.js"), "// codec plugin\n", "utf8");
+  spawnSync("git", ["-C", wt702, "add", "."]);
+  spawnSync("git", ["-C", wt702, "commit", "-qm", "feat(codec): implement codec plugin"]);
+  const sha702 = String(spawnSync("git", ["-C", wt702, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  const run702 = store.listRunsForIssue("PACE-702")[0];
+  store.transition(run702.id, "completed", { implementationSha: sha702 });
+  const revRun702 = store.createRun("PACE-702", { role: "reviewer", summary: "Review 702", implementationSha: sha702 });
+  store.transition(revRun702, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: sha702,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "rev-702-clean", severity: "suggestion", category: "correctness", problem: "Clean implementation" }]
+    }
+  });
+
+  // ── Final Reconciliation: tick() ──
+  // Automatically integrates 702, detects all children integrated, and runs aggregate integration review
+  await tick(settings, store, {
+    injectedReviewOutcome: {
+      verdict: "clean",
+      evidence: [{ id: "clean-agg", severity: "suggestion", category: "correctness", problem: "Aggregate review clean" }]
+    }
+  });
+
+  const finalParent = store.getParentExecution("PACE-700");
+  assert.equal(finalParent.state, "waiting_human");
+  assert.ok(finalParent.completionPacket);
+  assert.equal(finalParent.completionPacket.parentKey, "PACE-700");
+  assert.equal(finalParent.completionPacket.children.length, 3);
+  assert.equal(finalParent.completionPacket.integrationReview.verdict, "clean");
+
+  // Verify parent telemetry events were persisted with valid run & stages
+  const telemEvents = store.database.prepare(
+    "SELECT event_id, stage, status, sequence FROM telemetry_events WHERE issue_key = 'PACE-700' ORDER BY sequence ASC"
+  ).all();
+  assert.ok(telemEvents.length >= 3);
+  assert.equal(telemEvents[0].stage, "queued");
+  assert.equal(telemEvents[1].stage, "started");
+  assert.equal(telemEvents.at(-1).stage, "terminal");
+  assert.equal(telemEvents.at(-1).status, "completed");
+});
+
+// ── Scenario V: Regressions & Edge Cases ─────────────────────────────────────
+test("Scenario V: Hierarchy discovery errors fail closed, same-fingerprint preserves state, and baseRef resolves correctly", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store);
+  const sc = new LocalGitSourceControlProvider();
+
+  // V1. getChildren error fails closed -> state is "blocked"
+  const badSource = new FakeWorkSourceProvider();
+  badSource.getChildren = async () => { throw new Error("Jira API connection reset"); };
+
+  const badParent = { key: "PACE-800", summary: "Bad Parent", issueType: "Epic" };
+  const res1 = await discoverAndPinParent(settings, store, badParent, { workSource: badSource });
+  assert.equal(res1.ok, false);
+  assert.equal(res1.blocked, true);
+
+  const badExec = store.getParentExecution("PACE-800");
+  assert.equal(badExec.state, "blocked");
+
+  // V2. Same fingerprint rediscovery preserves waiting_human and blocked states
+  const goodSource = new FakeWorkSourceProvider();
+  const parent850 = { key: "PACE-850", summary: "Preserve State Parent", issueType: "Epic" };
+  goodSource.setChildren("PACE-850", []);
+  const res2 = await discoverAndPinParent(settings, store, parent850, { workSource: goodSource });
+  assert.equal(res2.ok, true);
+
+  // Transition parent to waiting_human
+  store.updateParentExecutionState("PACE-850", "waiting_human");
+
+  // Re-run discovery for the same parent with same fingerprint
+  const res2_again = await discoverAndPinParent(settings, store, parent850, { workSource: goodSource });
+  assert.equal(res2_again.execution.state, "waiting_human", "Rediscovery must preserve waiting_human state");
+
+  // V3. resolveRevision returns correct commit for develop even when checked out on another branch
+  spawnSync("git", ["-C", repo, "checkout", "-b", "feature/unrelated"]);
+  fs.writeFileSync(path.join(repo, "unrelated.txt"), "unrelated\n", "utf8");
+  spawnSync("git", ["-C", repo, "add", "."]);
+  spawnSync("git", ["-C", repo, "commit", "-qm", "feat: unrelated branch commit"]);
+  const unrelatedSha = String(spawnSync("git", ["-C", repo, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  const developSha = String(spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout).trim().toLowerCase();
+  assert.notEqual(unrelatedSha, developSha);
+
+  const resolvedRev = sc.resolveRevision({ repoPath: repo, requestedRef: "develop" });
+  assert.equal(resolvedRev.ok, true);
+  assert.equal(resolvedRev.sha.toLowerCase(), developSha);
+  assert.notEqual(resolvedRev.sha.toLowerCase(), unrelatedSha);
+
+  // V4. Reviewer with invalid output fails closed
+  const parent860 = { key: "PACE-860", summary: "Invalid Review Test", issueType: "Epic" };
+  const res3 = await discoverAndPinParent(settings, store, parent860, { workSource: goodSource, execute: true });
+
+  const invalidRevRes = await runParentIntegrationReview(settings, store, "PACE-860", {
+    sourceControl: sc,
+    injectedReviewOutcome: { verdict: "invalid-verdict", evidence: [] }
+  });
+  assert.equal(invalidRevRes.ok, false);
+  assert.equal(invalidRevRes.blocked, true);
+  assert.equal(invalidRevRes.parentState, "blocked");
+});
+
