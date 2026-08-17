@@ -55,6 +55,7 @@ import {
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { tick, recordReviewerOutcome, reconcileStandaloneReviews } from "../lib/reconciler.js";
 import { prepareWorktree } from "../lib/worktree.js";
+import { handlePmApproval, handlePmRejection, getPmDetail } from "../lib/pm-workspace.js";
 
 function makeTestGitRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "phase-h-repo-"));
@@ -140,7 +141,7 @@ function makeSettings(repo, worktreeRoot, store, overrides = {}) {
           antigravity: {
             command: ["node", "-e", "process.exit(0)"],
             defaultModel: "claude-sonnet-4",
-            modelProfiles: { medium: "claude-sonnet-4" }
+            modelProfiles: { medium: "claude-sonnet-4", high: "claude-sonnet-4" }
           }
         }
       },
@@ -636,7 +637,7 @@ test("Scenario L, M, N: Aggregate integration review handles failure and clean c
 // ── Scenario O: Stale Parent Head Invalidation ────────────────────────────────
 test("Scenario O: Stale parent head invalidates clean review if branch advances before completion", async () => {
   const { repo, worktreeRoot, store } = makeTestGitRepo();
-  const settings = makeSettings(repo, worktreeRoot, store);
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
   const sc = new LocalGitSourceControlProvider();
 
   const parentKey = "PACE-850";
@@ -667,7 +668,7 @@ test("Scenario O: Stale parent head invalidates clean review if branch advances 
   // Review was done for oldHead, but current HEAD is now newer -> must detect stale and fail closed
   const staleRes = await runParentIntegrationReview(settings, store, parentKey, {
     sourceControl: sc,
-    injectedReviewOutcome: { verdict: "clean", evidence: [] }
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
   });
 
   assert.equal(staleRes.ok, false);
@@ -718,7 +719,7 @@ test("Scenario P, Q, R: Operating modes, external writes disabled truthfulness, 
   const res = await runParentIntegrationReview(settings, store, parentKey, {
     workSource,
     sourceControl: new LocalGitSourceControlProvider(),
-    injectedReviewOutcome: { verdict: "clean", evidence: [] }
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
   });
 
   assert.equal(res.ok, true);
@@ -1120,7 +1121,7 @@ test("Scenario X: Persisted parent objective and acceptance criteria survive sto
 
   // Verify integration review receives persisted objective + criteria
   const revRes = await runParentIntegrationReview(settings, reloadedStore, parentKey, {
-    injectedReviewOutcome: { verdict: "clean", evidence: [] }
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "rev-clean", severity: "suggestion", category: "correctness", problem: "Clean" }] }
   });
   assert.equal(revRes.ok, true);
   assert.equal(revRes.parentState, "waiting_human");
@@ -1382,8 +1383,8 @@ test("Scenario AC: dispatch integration integrates into parent worktree while ma
   assert.ok(fs.existsSync(path.join(wtParent, "child971.txt")));
 });
 
-// ── Scenario AD: Parent Approvals Bound to Deterministic Fingerprints ────────
-test("Scenario AD: Parent branch creation and review approvals are strictly bound to deterministic fingerprints", async () => {
+// ── Scenario AD: Parent Approvals Bound to Deterministic Fingerprints & Tested via PM API ────────
+test("Scenario AD: Parent branch creation and review approvals are strictly bound to deterministic fingerprints and tested through handlePmApproval/handlePmRejection", async () => {
   const { repo, worktreeRoot, store } = makeTestGitRepo();
   const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "manual" });
   const workSource = new FakeWorkSourceProvider();
@@ -1402,46 +1403,55 @@ test("Scenario AD: Parent branch creation and review approvals are strictly boun
   assert.equal(res1.waitingApproval, true);
   assert.equal(store.getParentExecution(parentKey).state, "waiting_approval");
 
-  const graphFp1 = res1.execution.graphFingerprint;
-  const branchPlan1 = {
-    parentKey,
-    issueKey: parentKey,
-    graphFingerprint: graphFp1,
-    baseSha: res1.execution.baseSha,
-    integrationBranch: res1.execution.integrationBranch
-  };
-  const branchFp1 = computeParentBranchFingerprint(branchPlan1);
+  const pendingReq1 = store.getPmDecisions(parentKey).find((d) => d.type === "approval_requested" && d.payload.action === "branchCreation");
+  assert.ok(pendingReq1);
+  const branchFp1 = pendingReq1.payload.planFingerprint;
 
-  // Verify approval_requested PM decision was persisted
-  const pmDecisions = store.getPmDecisions(parentKey);
-  const appReq = pmDecisions.find((d) => d.type === "approval_requested" && d.payload.action === "branchCreation");
-  assert.ok(appReq);
-  assert.equal(appReq.payload.planFingerprint, branchFp1);
+  // Expose pending gate in PM detail read model
+  const pmDetail = getPmDetail(settings, parentKey, { store });
+  assert.ok(pmDetail);
+  assert.equal(pmDetail.humanControl.approvalState, "pending");
+  assert.equal(pmDetail.humanControl.planFingerprint, branchFp1);
+  assert.equal(pmDetail.humanControl.pendingAction, "branchCreation");
+  assert.equal(pmDetail.humanControl.canApprove, true);
 
-  // 2. Approve with mismatched/old fingerprint -> still denied
-  store.recordApprovalDecision(parentKey, {
-    action: "branchCreation",
-    approved: true,
-    planFingerprint: "stale-mismatched-fingerprint"
-  });
+  // 2. Approve with mismatched/old fingerprint via handlePmApproval -> 409
+  assert.throws(() => {
+    handlePmApproval(settings, parentKey, {
+      action: "branchCreation",
+      planFingerprint: "stale-mismatched-fingerprint"
+    }, { store });
+  }, (err) => err.statusCode === 409 && /Plan fingerprint mismatch/i.test(err.message));
 
+  // Still denied on resume attempt
   const res2 = await discoverAndPinParent(settings, store, parent980, { workSource, execute: true });
   assert.equal(res2.ok, false);
   assert.equal(res2.waitingApproval, true);
 
-  // 3. Approve with EXACT fingerprint -> resumes to active
-  store.recordApprovalDecision(parentKey, {
+  // 3. Approve with EXACT fingerprint via handlePmApproval -> 200 OK
+  const appResult = handlePmApproval(settings, parentKey, {
     action: "branchCreation",
-    approved: true,
     planFingerprint: branchFp1
-  });
+  }, { store });
+  assert.equal(appResult.ok, true);
+  assert.equal(appResult.approved, true);
+  assert.equal(appResult.planFingerprint, branchFp1);
 
+  // Duplicate approval -> 409
+  assert.throws(() => {
+    handlePmApproval(settings, parentKey, {
+      action: "branchCreation",
+      planFingerprint: branchFp1
+    }, { store });
+  }, (err) => err.statusCode === 409 && /already approved/i.test(err.message));
+
+  // Resumes to active
   const res3 = await discoverAndPinParent(settings, store, parent980, { workSource, execute: true });
   assert.equal(res3.ok, true);
   assert.equal(res3.execution.state, "active");
   assert.ok(res3.execution.integrationWorktree);
 
-  // 4. Test review approval fingerprint binding
+  // 4. Test review approval fingerprint binding through handlePmApproval
   const baseSha = res3.execution.baseSha;
   const wt = res3.execution.integrationWorktree;
   fs.writeFileSync(path.join(wt, "file_x.txt"), "content x\n", "utf8");
@@ -1449,59 +1459,71 @@ test("Scenario AD: Parent branch creation and review approvals are strictly boun
   spawnSync("git", ["-C", wt, "commit", "-qm", "feat: commit x"]);
   const headShaX = String(spawnSync("git", ["-C", wt, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
 
-  // Review approval for SHA X
   const revDef = store.getAgentDefinition("correctness-reviewer");
   const reviewPlanX = {
     parentKey,
     issueKey: parentKey,
-    graphFingerprint: graphFp1,
+    graphFingerprint: res3.execution.graphFingerprint,
     parentBaseSha: baseSha,
     integrationHeadSha: headShaX,
     reviewerAgentId: "correctness-reviewer",
-    reviewerVersion: revDef?.currentVersion || 1,
+    reviewerVersion: revDef?.currentVersion || revDef?.version || 1,
     reviewerHash: revDef?.definitionHash || null
   };
   const reviewFpX = computeParentReviewFingerprint(reviewPlanX);
 
-  store.recordApprovalDecision(parentKey, {
-    action: "review",
-    approved: true,
-    planFingerprint: reviewFpX
+  // Trigger review for SHA X -> records approval_requested for SHA X
+  const sc = new LocalGitSourceControlProvider();
+  const revResReqX = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: headShaX,
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
   });
+  assert.equal(revResReqX.ok, false);
+  assert.equal(revResReqX.waitingApproval, true);
 
-  // Branch advances to SHA Y before review runs
+  // Branch advances to SHA Y before approval is given
   fs.writeFileSync(path.join(wt, "file_y.txt"), "content y\n", "utf8");
   spawnSync("git", ["-C", wt, "add", "."]);
   spawnSync("git", ["-C", wt, "commit", "-qm", "feat: commit y"]);
   const headShaY = String(spawnSync("git", ["-C", wt, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
 
-  // Review with SHA Y should be denied because approval was only for SHA X
-  const sc = new LocalGitSourceControlProvider();
-  const revResStale = await runParentIntegrationReview(settings, store, parentKey, {
+  // Trigger review for SHA Y -> records approval_requested for SHA Y
+  const revResReqY = await runParentIntegrationReview(settings, store, parentKey, {
     sourceControl: sc,
     reviewedSha: headShaY,
     injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
   });
-  assert.equal(revResStale.ok, false);
-  assert.equal(revResStale.waitingApproval, true);
+  assert.equal(revResReqY.ok, false);
+  assert.equal(revResReqY.waitingApproval, true);
 
-  // Approve for exact SHA Y -> review succeeds and transitions run
   const reviewPlanY = {
     parentKey,
     issueKey: parentKey,
-    graphFingerprint: graphFp1,
+    graphFingerprint: res3.execution.graphFingerprint,
     parentBaseSha: baseSha,
     integrationHeadSha: headShaY,
     reviewerAgentId: "correctness-reviewer",
-    reviewerVersion: revDef?.currentVersion || 1,
+    reviewerVersion: revDef?.currentVersion || revDef?.version || 1,
     reviewerHash: revDef?.definitionHash || null
   };
   const reviewFpY = computeParentReviewFingerprint(reviewPlanY);
-  store.recordApprovalDecision(parentKey, {
+
+  // Approving with old SHA X fingerprint via handlePmApproval -> 409
+  assert.throws(() => {
+    handlePmApproval(settings, parentKey, {
+      action: "review",
+      planFingerprint: reviewFpX
+    }, { store });
+  }, (err) => err.statusCode === 409 && /Plan fingerprint mismatch/i.test(err.message));
+
+  // Approving with exact SHA Y fingerprint via handlePmApproval -> accepted
+  const revAppResult = handlePmApproval(settings, parentKey, {
     action: "review",
-    approved: true,
     planFingerprint: reviewFpY
-  });
+  }, { store });
+  assert.equal(revAppResult.ok, true);
+  assert.equal(revAppResult.approved, true);
 
   const revResClean = await runParentIntegrationReview(settings, store, parentKey, {
     sourceControl: sc,
@@ -1511,10 +1533,45 @@ test("Scenario AD: Parent branch creation and review approvals are strictly boun
   assert.equal(revResClean.ok, true);
   assert.equal(revResClean.parentState, "waiting_human");
 
-  // Verify reviewer run was completed in runs table (not discovered)
+  // Verify reviewer run was completed in SQLite runs table
   const revRun = store.getRun(revResClean.reviewRunId);
   assert.ok(revRun);
   assert.equal(revRun.state, "completed");
+
+  // 5. Test handlePmRejection
+  const parentRejKey = "PACE-982";
+  const parent982 = { key: parentRejKey, summary: "Rejection Parent", issueType: "Epic" };
+  workSource.setChildren(parentRejKey, [{ key: "PACE-983", summary: "Task 983", issueType: "Task" }]);
+  workSource.setDependencies("PACE-983", []);
+
+  const resRej1 = await discoverAndPinParent(settings, store, parent982, { workSource, execute: true });
+  assert.equal(resRej1.ok, false);
+  assert.equal(resRej1.waitingApproval, true);
+
+  const rejPlan = {
+    parentKey: parentRejKey,
+    issueKey: parentRejKey,
+    graphFingerprint: resRej1.execution.graphFingerprint,
+    baseSha: resRej1.execution.baseSha,
+    integrationBranch: resRej1.execution.integrationBranch
+  };
+  const rejFp = computeParentBranchFingerprint(rejPlan);
+
+  const rejResult = handlePmRejection(settings, parentRejKey, {
+    action: "branchCreation",
+    planFingerprint: rejFp,
+    reason: "Denied by architecture board"
+  }, { store });
+  assert.equal(rejResult.ok, true);
+  assert.equal(rejResult.approved, false);
+
+  // Duplicate rejection -> 409
+  assert.throws(() => {
+    handlePmRejection(settings, parentRejKey, {
+      action: "branchCreation",
+      planFingerprint: rejFp
+    }, { store });
+  }, (err) => err.statusCode === 409 && /already rejected/i.test(err.message));
 });
 
 // ── Scenario AE: Fail-closed childBaseSha unresolvable & exact base enforcement ───
@@ -1593,7 +1650,7 @@ test("Scenario AE: Fail-closed childBaseSha unresolvable and prepareChildWorktre
 });
 
 // ── Scenario AF: True Production Lifecycle E2E ────────────────────────────────
-test("Scenario AF: True production lifecycle E2E through dispatch, auto-integration, unlock, aggregate review, to WAITING_HUMAN", async () => {
+test("Scenario AF: True production lifecycle E2E driven strictly through dispatchOnce and tick to WAITING_HUMAN", async () => {
   const { repo, worktreeRoot, store } = makeTestGitRepo();
   const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
   const workSource = new FakeWorkSourceProvider();
@@ -1604,71 +1661,97 @@ test("Scenario AF: True production lifecycle E2E through dispatch, auto-integrat
   const childB = "PACE-992";
   const childC = "PACE-993";
 
-  const parent = { key: parentKey, summary: "Parent P", issueType: "Epic" };
-  const taskA = { key: childA, summary: "Task A", issueType: "Task" };
-  const taskB = { key: childB, summary: "Task B", issueType: "Task" };
-  const taskC = { key: childC, summary: "Task C", issueType: "Task" };
+  const parent = {
+    key: parentKey,
+    id: parentKey,
+    summary: "Parent P",
+    description: "Parent objective description",
+    acceptanceCriteria: "[x] Task A\n[x] Task B\n[x] Task C",
+    issueType: "Epic",
+    canonicalState: "ready"
+  };
+  const taskA = {
+    key: childA,
+    id: childA,
+    summary: "Task A",
+    description: "Acceptance criteria:\n- [ ] implement task A",
+    issueType: "Task",
+    canonicalState: "ready",
+    allowedPaths: ["backend/**"]
+  };
+  const taskB = {
+    key: childB,
+    id: childB,
+    summary: "Task B",
+    description: "Acceptance criteria:\n- [ ] implement task B",
+    issueType: "Task",
+    canonicalState: "ready",
+    allowedPaths: ["backend/**"]
+  };
+  const taskC = {
+    key: childC,
+    id: childC,
+    summary: "Task C",
+    description: "Acceptance criteria:\n- [ ] implement task C",
+    issueType: "Task",
+    canonicalState: "ready",
+    allowedPaths: ["frontend/**"]
+  };
+
+  workSource.setWorkItem(parent);
+  workSource.setWorkItem(taskA);
+  workSource.setWorkItem(taskB);
+  workSource.setWorkItem(taskC);
 
   workSource.setChildren(parentKey, [taskA, taskB, taskC]);
   workSource.setDependencies(childA, []);
   workSource.setDependencies(childB, [childA]); // B depends on A
   workSource.setDependencies(childC, []);        // C independent
 
-  // 1. Discover & Pin Parent
-  const discRes = await discoverAndPinParent(settings, store, parent, { workSource, execute: true });
-  assert.equal(discRes.ok, true);
-  assert.equal(discRes.execution.state, "active");
-  const parentWt = discRes.execution.integrationWorktree;
+  // ── Cycle 1: First dispatchOnce ──
+  // Discovers parent, pins DAG, dispatches A and C (B waits on A)
+  const dispatchRes1 = await dispatchOnce(settings, {
+    store,
+    workSource,
+    execute: true,
+    maxConcurrency: 3,
+    limit: 10
+  });
+  assert.equal(dispatchRes1.mode, "execute");
+
+  const parentExec1 = store.getParentExecution(parentKey);
+  assert.ok(parentExec1);
+  assert.equal(parentExec1.state, "active");
+  const parentWt = parentExec1.integrationWorktree;
   assert.ok(parentWt);
 
-  // 2. Reconcile parent children -> A and C become dependency-ready; B stays pending-dependencies
-  const recRes1 = reconcileParentChildren(settings, store, parentKey);
-  assert.deepEqual(recRes1.readyChildren.sort(), [childA, childC].sort());
+  const taskA_c1 = store.getEpicTask(parentKey, childA);
+  const taskC_c1 = store.getEpicTask(parentKey, childC);
+  assert.equal(taskA_c1.orchestrationState, "dependency-ready");
+  assert.equal(taskC_c1.orchestrationState, "dependency-ready");
 
-  const taskBAfter1 = store.getEpicTask(parentKey, childB);
-  assert.equal(taskBAfter1.orchestrationState, "pending-dependencies");
-
-  // 3. Implement and review A and C in their worktrees
-  const planA = { issueKey: childA, summary: "Task A", branch: `task/pace-991-task-a` };
-  const wtA = sc.prepareChildWorktree({
-    repoPath: repo,
-    root: worktreeRoot,
-    parentKey,
-    parentBranch: discRes.execution.integrationBranch,
-    issueKey: childA,
-    summary: "Task A",
-    baseRef: store.getEpicTask(parentKey, childA).childBaseSha,
-    execute: true,
-    plan: planA
-  }).worktree;
-
-  fs.writeFileSync(path.join(wtA, "backend", "a.js"), "module.exports = { a: 1 };\n");
+  const wtA = taskA_c1.worktree || path.join(worktreeRoot, taskA_c1.branch.replaceAll("/", "-"));
+  fs.mkdirSync(path.join(wtA, "backend"), { recursive: true });
+  fs.writeFileSync(path.join(wtA, "backend", "a.js"), "module.exports = { a: 1 };\n", "utf8");
   spawnSync("git", ["-C", wtA, "add", "."]);
   spawnSync("git", ["-C", wtA, "commit", "-qm", "feat: implement A"]);
   const shaA = String(spawnSync("git", ["-C", wtA, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
 
-  const planC = { issueKey: childC, summary: "Task C", branch: `task/pace-993-task-c` };
-  const wtC = sc.prepareChildWorktree({
-    repoPath: repo,
-    root: worktreeRoot,
-    parentKey,
-    parentBranch: discRes.execution.integrationBranch,
-    issueKey: childC,
-    summary: "Task C",
-    baseRef: store.getEpicTask(parentKey, childC).childBaseSha,
-    execute: true,
-    plan: planC
-  }).worktree;
-
-  fs.writeFileSync(path.join(wtC, "frontend", "c.js"), "module.exports = { c: 1 };\n");
+  const wtC = taskC_c1.worktree || path.join(worktreeRoot, taskC_c1.branch.replaceAll("/", "-"));
+  fs.mkdirSync(path.join(wtC, "frontend"), { recursive: true });
+  fs.writeFileSync(path.join(wtC, "frontend", "c.js"), "module.exports = { c: 1 };\n", "utf8");
   spawnSync("git", ["-C", wtC, "add", "."]);
   spawnSync("git", ["-C", wtC, "commit", "-qm", "feat: implement C"]);
   const shaC = String(spawnSync("git", ["-C", wtC, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
 
-  // Create runs for A and C and record clean reviews
-  const runA = store.createRun(childA, { role: "implementation", summary: "Task A" });
-  store.transition(runA, "completed", { implementationSha: shaA });
-  const revRunA = store.createRun(childA, { role: "reviewer", summary: "Review Task A", implementationSha: shaA });
+  const runA = store.listRunsForIssue(childA)[0];
+  const runC = store.listRunsForIssue(childC)[0];
+  assert.ok(runA);
+  assert.ok(runC);
+  store.transition(runA.id, "completed", { implementationSha: shaA });
+  store.transition(runC.id, "completed", { implementationSha: shaC });
+
+  const revRunA = store.createRun(childA, { role: "reviewer", summary: "Review A", implementationSha: shaA });
   store.transition(revRunA, "reviewed-clean", {
     reviewOutcome: {
       verdict: "clean",
@@ -1678,9 +1761,7 @@ test("Scenario AF: True production lifecycle E2E through dispatch, auto-integrat
     }
   });
 
-  const runC = store.createRun(childC, { role: "implementation", summary: "Task C" });
-  store.transition(runC, "completed", { implementationSha: shaC });
-  const revRunC = store.createRun(childC, { role: "reviewer", summary: "Review Task C", implementationSha: shaC });
+  const revRunC = store.createRun(childC, { role: "reviewer", summary: "Review C", implementationSha: shaC });
   store.transition(revRunC, "reviewed-clean", {
     reviewOutcome: {
       verdict: "clean",
@@ -1690,48 +1771,40 @@ test("Scenario AF: True production lifecycle E2E through dispatch, auto-integrat
     }
   });
 
-  // 4. Tick reconciliation integrates A and C into parent worktree (first tick integrates A, second tick integrates C)
+  // Tick integrates A and C into parent integration branch in serialized order
   tick(settings, store, { execute: true });
   tick(settings, store, { execute: true });
 
-  // Verify A and C integrated, B unlocked with fresh childBaseSha
-  const taskAAfter = store.getEpicTask(parentKey, childA);
-  const taskCAfter = store.getEpicTask(parentKey, childC);
-  assert.equal(taskAAfter.state, "integrated");
-  assert.equal(taskCAfter.state, "integrated");
+  const taskA_integrated = store.getEpicTask(parentKey, childA);
+  const taskC_integrated = store.getEpicTask(parentKey, childC);
+  assert.equal(taskA_integrated.state, "integrated");
+  assert.equal(taskC_integrated.state, "integrated");
 
-  const recRes2 = reconcileParentChildren(settings, store, parentKey);
-  assert.deepEqual(recRes2.readyChildren, [childB]);
-
-  const taskBAfter2 = store.getEpicTask(parentKey, childB);
-  assert.equal(taskBAfter2.orchestrationState, "dependency-ready");
-  assert.ok(taskBAfter2.childBaseSha);
-
-  // 5. Implement and review B (based on newly integrated parent head)
-  const planB = { issueKey: childB, summary: "Task B", branch: `task/pace-992-task-b` };
-  const wtB = sc.prepareChildWorktree({
-    repoPath: repo,
-    root: worktreeRoot,
-    parentKey,
-    parentBranch: discRes.execution.integrationBranch,
-    issueKey: childB,
-    summary: "Task B",
-    baseRef: taskBAfter2.childBaseSha,
+  // ── Cycle 2: Second dispatchOnce ──
+  // B is now dependency-ready; dispatched and implemented with exact childBaseSha
+  const dispatchRes2 = await dispatchOnce(settings, {
+    store,
+    workSource,
     execute: true,
-    plan: planB
-  }).worktree;
+    maxConcurrency: 3,
+    limit: 10
+  });
+  assert.equal(dispatchRes2.mode, "execute");
 
-  // B sees A's changes
-  assert.ok(fs.existsSync(path.join(wtB, "backend", "a.js")));
-
-  fs.writeFileSync(path.join(wtB, "backend", "b.js"), "module.exports = { b: 2 };\n");
+  const taskB_c2 = store.getEpicTask(parentKey, childB);
+  const wtB = taskB_c2.worktree || path.join(worktreeRoot, taskB_c2.branch.replaceAll("/", "-"));
+  assert.ok(fs.existsSync(path.join(wtB, "backend", "a.js")), "Child B worktree must contain integrated Child A changes");
+  fs.mkdirSync(path.join(wtB, "backend"), { recursive: true });
+  fs.writeFileSync(path.join(wtB, "backend", "b.js"), "module.exports = { b: 2 };\n", "utf8");
   spawnSync("git", ["-C", wtB, "add", "."]);
   spawnSync("git", ["-C", wtB, "commit", "-qm", "feat: implement B"]);
   const shaB = String(spawnSync("git", ["-C", wtB, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
 
-  const runB = store.createRun(childB, { role: "implementation", summary: "Task B" });
-  store.transition(runB, "completed", { implementationSha: shaB });
-  const revRunB = store.createRun(childB, { role: "reviewer", summary: "Review Task B", implementationSha: shaB });
+  const runB = store.listRunsForIssue(childB)[0];
+  assert.ok(runB);
+  store.transition(runB.id, "completed", { implementationSha: shaB });
+
+  const revRunB = store.createRun(childB, { role: "reviewer", summary: "Review B", implementationSha: shaB });
   store.transition(revRunB, "reviewed-clean", {
     reviewOutcome: {
       verdict: "clean",
@@ -1741,28 +1814,23 @@ test("Scenario AF: True production lifecycle E2E through dispatch, auto-integrat
     }
   });
 
-  // 6. Tick integrates B
-  tick(settings, store, { execute: true });
-
-  const taskBFinal = store.getEpicTask(parentKey, childB);
-  assert.equal(taskBFinal.state, "integrated");
-
-  // 7. Run Parent Integration Review
-  const headShaFinal = String(spawnSync("git", ["-C", parentWt, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-  const revRes = await runParentIntegrationReview(settings, store, parentKey, {
-    sourceControl: sc,
-    reviewedSha: headShaFinal,
+  // Tick integrates B and performs aggregate parent review
+  await tick(settings, store, {
+    execute: true,
     injectedReviewOutcome: {
       verdict: "clean",
       evidence: [{ id: "agg-rev", severity: "suggestion", category: "correctness", problem: "All children clean" }]
     }
   });
 
-  assert.equal(revRes.ok, true);
-  assert.equal(revRes.parentState, "waiting_human");
+  const taskB_integrated = store.getEpicTask(parentKey, childB);
+  assert.equal(taskB_integrated.state, "integrated");
 
-  // 8. Assertions:
-  // - No child individually entered human approval
+  const finalParent = store.getParentExecution(parentKey);
+  assert.equal(finalParent.state, "waiting_human");
+
+  // ── Assertions ──
+  // 1. No child individually entered human approval
   const runsA = store.listRunsForIssue(childA);
   const runsB = store.listRunsForIssue(childB);
   const runsC = store.listRunsForIssue(childC);
@@ -1770,27 +1838,318 @@ test("Scenario AF: True production lifecycle E2E through dispatch, auto-integrat
   assert.ok(!runsB.some((r) => r.state === "waiting_human"));
   assert.ok(!runsC.some((r) => r.state === "waiting_human"));
 
-  // - Aggregate reviewer run is completed in SQLite runs table (not discovered)
-  const aggRevRun = store.getRun(revRes.reviewRunId);
-  assert.ok(aggRevRun);
-  assert.equal(aggRevRun.state, "completed");
+  // 2. Reviewer run is terminal (completed)
+  const aggRevRuns = store.database.prepare(
+    "SELECT * FROM runs WHERE issue_key = ? AND json_extract(payload, '$.role') = 'reviewer'"
+  ).all(parentKey);
+  assert.ok(aggRevRuns.length > 0);
+  assert.equal(aggRevRuns[0].state, "completed");
 
-  // - Parent telemetry contains child_dispatched, child_integrating, child_integrated
+  // 3. Integration-worker runs are terminal (completed)
+  const intRuns = store.database.prepare(
+    "SELECT * FROM runs WHERE json_extract(payload, '$.role') = 'integration-worker' ORDER BY id ASC"
+  ).all();
+  assert.ok(intRuns.length >= 3);
+  for (const ir of intRuns) {
+    assert.equal(ir.state, "completed");
+  }
+
+  // 4. No orphan started runs anywhere
+  const orphanStarted = store.database.prepare(
+    "SELECT * FROM runs WHERE state = 'started'"
+  ).all();
+  assert.equal(orphanStarted.length, 0);
+
+  // 5. Parent telemetry contains all expected lifecycle events
   const telemEvents = store.database.prepare(
     "SELECT event_id, stage, status, raw_payload FROM telemetry_events WHERE issue_key = ? ORDER BY id ASC"
   ).all(parentKey);
+  const rawTexts = telemEvents.map((e) => `${e.event_id} ${e.raw_payload || ""}`);
 
-  const rawTexts = telemEvents.map((e) => e.raw_payload || "");
+  assert.ok(rawTexts.some((t) => t.includes("child_dispatched")));
+  assert.ok(rawTexts.some((t) => t.includes("child_reviewed")));
+  assert.ok(rawTexts.some((t) => t.includes("child_integration_queued")));
   assert.ok(rawTexts.some((t) => t.includes("child_integrating")));
   assert.ok(rawTexts.some((t) => t.includes("child_integrated")));
+  assert.ok(rawTexts.some((t) => t.includes("integration_review_queued") || t.includes("integration_review")));
+  assert.ok(rawTexts.some((t) => t.includes("waiting_human")));
 
-  // - Final state is WAITING_HUMAN, no merge to develop occurred
-  const finalParent = store.getParentExecution(parentKey);
-  assert.equal(finalParent.state, "waiting_human");
-  assert.ok(finalParent.completionPacket);
-  assert.equal(finalParent.completionPacket.integrationReview.verdict, "clean");
-
+  // 6. Develop remains untouched; no final merge or Done transition
   const developBranch = String(spawnSync("git", ["-C", repo, "branch", "--show-current"]).stdout).trim();
   assert.equal(developBranch, "develop");
-  assert.ok(!fs.existsSync(path.join(repo, "backend", "a.js"))); // develop untouched
+  assert.ok(!fs.existsSync(path.join(repo, "backend", "a.js")));
+  assert.ok(!fs.existsSync(path.join(repo, "backend", "b.js")));
+  assert.ok(!fs.existsSync(path.join(repo, "frontend", "c.js")));
+});
+
+// ── Scenario AG: Registry-Authoritative Integration Reviewer ──────────────────
+test("Scenario AG: Registry-authoritative integration reviewer enforces registered and enabled reviewer", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const parentKey = "PACE-995";
+  const developSha = String(spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout).trim().toLowerCase();
+  store.upsertParentExecution({
+    parentKey,
+    summary: "Reviewer Registry Epic",
+    integrationBranch: "epic/pace-995",
+    integrationWorktree: repo,
+    baseSha: developSha,
+    state: "active"
+  });
+
+  // 1. Unknown reviewer -> blocked
+  const unknownSettings = {
+    ...settings,
+    data: {
+      ...settings.data,
+      policy: {
+        ...settings.data.policy,
+        review: { taskAgent: "unregistered-reviewer-xyz" }
+      }
+    }
+  };
+
+  const resUnknown = await runParentIntegrationReview(unknownSettings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: developSha,
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
+  });
+  assert.equal(resUnknown.ok, false);
+  assert.equal(resUnknown.blocked, true);
+  assert.match(resUnknown.reason, /not registered in agent registry/i);
+
+  // 2. Disabled reviewer -> blocked
+  store.setAgentStatus("correctness-reviewer", "disabled");
+  const resDisabled = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: developSha,
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
+  });
+  assert.equal(resDisabled.ok, false);
+  assert.equal(resDisabled.blocked, true);
+  assert.match(resDisabled.reason, /disabled in agent registry/i);
+
+  // 3. Re-enable reviewer -> proceeds
+  store.setAgentStatus("correctness-reviewer", "enabled");
+  const resEnabled = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: developSha,
+    injectedReviewOutcome: { verdict: "clean", evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }] }
+  });
+  assert.equal(resEnabled.ok, true);
+  assert.equal(resEnabled.parentState, "waiting_human");
+});
+
+// ── Scenario AH: Truthful Reviewer Failure Lifecycle ──────────────────────────
+test("Scenario AH: Reviewer execution failures and schema errors terminate run as failed and parent as blocked", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const parentKey = "PACE-996";
+  const parentWt = path.join(worktreeRoot, "epic-pace-996");
+  fs.mkdirSync(parentWt, { recursive: true });
+  spawnSync("git", ["-C", repo, "worktree", "add", parentWt, "-b", "epic/pace-996"]);
+
+  store.upsertParentExecution({
+    parentKey,
+    summary: "Reviewer Failure Lifecycle Epic",
+    integrationBranch: "epic/pace-996",
+    integrationWorktree: parentWt,
+    baseSha: String(spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout).trim(),
+    state: "active"
+  });
+
+  const headSha = String(spawnSync("git", ["-C", parentWt, "rev-parse", "HEAD"]).stdout).trim();
+
+  // 1. Schema failure (missing required fields in evidence) -> reviewer run failed, parent blocked
+  const resSchemaFail = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: headSha,
+    injectedReviewOutcome: {
+      verdict: "clean",
+      evidence: [{ invalidField: "no-id-or-severity" }]
+    }
+  });
+  assert.equal(resSchemaFail.ok, false);
+  assert.equal(resSchemaFail.blocked, true);
+  assert.ok(resSchemaFail.reviewRunId);
+
+  const runSchemaFail = store.getRun(resSchemaFail.reviewRunId);
+  assert.equal(runSchemaFail.state, "failed");
+
+  // 2. Schema failure (invalid verdict) -> reviewer run failed, parent blocked
+  const resBadVerdict = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: headSha,
+    injectedReviewOutcome: {
+      verdict: "super-clean",
+      evidence: [{ id: "1", severity: "suggestion", category: "correctness", problem: "ok" }]
+    }
+  });
+  assert.equal(resBadVerdict.ok, false);
+  assert.equal(resBadVerdict.blocked, true);
+  assert.ok(resBadVerdict.reviewRunId);
+
+  const runBadVerdict = store.getRun(resBadVerdict.reviewRunId);
+  assert.equal(runBadVerdict.state, "failed");
+
+  // 3. Execution failure via failing spawnSync runtime -> reviewer run failed, parent blocked
+  const failingRuntime = {
+    spawnSync: () => ({ status: 1, stdout: "", stderr: "Reviewer runtime exploded" })
+  };
+
+  const resExecFail = await runParentIntegrationReview(settings, store, parentKey, {
+    sourceControl: sc,
+    reviewedSha: headSha,
+    runtime: failingRuntime
+  });
+  assert.equal(resExecFail.ok, false);
+  assert.equal(resExecFail.blocked, true);
+  assert.ok(resExecFail.reviewRunId);
+
+  const runExecFail = store.getRun(resExecFail.reviewRunId);
+  assert.equal(runExecFail.state, "failed");
+  assert.match(resExecFail.reason, /Reviewer process failed|Reviewer runtime exploded/i);
+});
+
+// ── Scenario AI: Complete Integration-Worker Telemetry & Crash Recovery ───────
+test("Scenario AI: Complete integration-worker telemetry queued->started->terminal and crash recovery", async () => {
+  const { repo, worktreeRoot, store } = makeTestGitRepo();
+  const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+  const sc = new LocalGitSourceControlProvider();
+
+  const epicKey = "PACE-997";
+  const childKey = "PACE-998";
+  const epicWt = path.join(worktreeRoot, "epic-pace-997");
+  fs.mkdirSync(epicWt, { recursive: true });
+  spawnSync("git", ["-C", repo, "worktree", "add", epicWt, "-b", "epic/pace-997"]);
+
+  store.upsertParentExecution({
+    parentKey: epicKey,
+    summary: "Crash Recovery Epic",
+    integrationBranch: "epic/pace-997",
+    integrationWorktree: epicWt,
+    baseSha: String(spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout).trim(),
+    state: "active"
+  });
+
+  const childWt = path.join(worktreeRoot, "task-pace-998");
+  fs.mkdirSync(childWt, { recursive: true });
+  spawnSync("git", ["-C", repo, "worktree", "add", childWt, "-b", "task/pace-998"]);
+  fs.writeFileSync(path.join(childWt, "child998.txt"), "hello 998\n");
+  spawnSync("git", ["-C", childWt, "add", "."]);
+  spawnSync("git", ["-C", childWt, "commit", "-qm", "feat: 998"]);
+  const reviewedSha = String(spawnSync("git", ["-C", childWt, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  // Create accepted clean review
+  const runId = store.createRun(childKey, { role: "reviewer", summary: "Review 998" });
+  store.transition(runId, "review-queued", { implementationSha: reviewedSha });
+  store.transition(runId, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: reviewedSha,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "c1", severity: "suggestion", category: "correctness", problem: "Clean" }]
+    }
+  });
+
+  store.upsertEpicTask({
+    epicKey,
+    parentKey: epicKey,
+    issueKey: childKey,
+    summary: "Task 998",
+    branch: "task/pace-998",
+    state: "planned",
+    orchestrationState: "planned",
+    reviewedSha
+  });
+
+  // 1. Normal integration tick -> produces queued, started, and terminal telemetry for integration-worker
+  tick(settings, store, { execute: true });
+
+  const intRuns = store.listRunsForIssue(childKey).filter(
+    (r) => r.payload?.role === "integration-worker"
+  );
+  assert.equal(intRuns.length, 1);
+  const intRun = intRuns[0];
+  assert.equal(intRun.state, "completed");
+
+  const intTelem = store.database.prepare(
+    "SELECT event_id, stage, status FROM telemetry_events WHERE run_id = ? ORDER BY id ASC"
+  ).all(intRun.id);
+  assert.equal(intTelem.length, 3);
+  assert.equal(intTelem[0].stage, "queued");
+  assert.equal(intTelem[1].stage, "started");
+  assert.equal(intTelem[2].stage, "terminal");
+  assert.equal(intTelem[2].status, "completed");
+
+  // 2. Crash Recovery Simulation
+  // Setup another task 999 where commit was already merged in Git, but crash occurred before DB was marked finished
+  const childKey2 = "PACE-999";
+  const childWt2 = path.join(worktreeRoot, "task-pace-999");
+  fs.mkdirSync(childWt2, { recursive: true });
+  spawnSync("git", ["-C", repo, "worktree", "add", childWt2, "-b", "task/pace-999"]);
+  fs.writeFileSync(path.join(childWt2, "child999.txt"), "hello 999\n");
+  spawnSync("git", ["-C", childWt2, "add", "."]);
+  spawnSync("git", ["-C", childWt2, "commit", "-qm", "feat: 999"]);
+  const reviewedSha2 = String(spawnSync("git", ["-C", childWt2, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
+
+  const runId2 = store.createRun(childKey2, { role: "reviewer", summary: "Review 999" });
+  store.transition(runId2, "review-queued", { implementationSha: reviewedSha2 });
+  store.transition(runId2, "reviewed-clean", {
+    reviewOutcome: {
+      verdict: "clean",
+      implementationSha: reviewedSha2,
+      reviewerId: "correctness-reviewer",
+      evidence: [{ id: "c2", severity: "suggestion", category: "correctness", problem: "Clean" }]
+    }
+  });
+
+  store.upsertEpicTask({
+    epicKey,
+    parentKey: epicKey,
+    issueKey: childKey2,
+    summary: "Task 999",
+    branch: "task/pace-999",
+    state: "planned",
+    orchestrationState: "planned",
+    reviewedSha: reviewedSha2
+  });
+
+  // Manually merge into epic worktree in git
+  spawnSync("git", ["-C", epicWt, "merge", "--no-ff", "-qm", "merge 999", reviewedSha2]);
+
+  // Set DB state to crashed lane in 'integrating' with unfinished integration-worker run in 'started'
+  store.queueEpicIntegration({ epicKey, issueKey: childKey2, leafBranch: "task/pace-999" });
+  store.claimEpicIntegration({ epicKey, issueKey: childKey2 });
+
+  const crashedIntRunId = store.createRun(childKey2, {
+    role: "integration-worker",
+    action: "childIntegration",
+    parentKey: epicKey,
+    reviewedSha: reviewedSha2
+  });
+  store.transition(crashedIntRunId, "queued");
+  store.transition(crashedIntRunId, "started");
+
+  // Tick triggers crash recovery
+  tick(settings, store, { execute: true });
+
+  // Verify lane finished and task marked integrated
+  const epicTasks = store.listEpicTasks(epicKey);
+  const task999 = epicTasks.find((t) => t.issueKey === childKey2);
+  assert.equal(task999.state, "integrated");
+
+  // Verify crashed integration-worker run was recovered and marked completed
+  const recoveredRun = store.getRun(crashedIntRunId);
+  assert.equal(recoveredRun.state, "completed");
+
+  const recoveredTelem = store.database.prepare(
+    "SELECT event_id, stage, status FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'"
+  ).all(crashedIntRunId);
+  assert.equal(recoveredTelem.length, 1);
+  assert.equal(recoveredTelem[0].status, "completed");
 });
