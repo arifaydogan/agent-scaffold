@@ -1,3 +1,21 @@
+/**
+ * ui/dashboard.js
+ *
+ * Phase I — Operator-Facing Control Plane UI Client.
+ *
+ * Design invariants:
+ * - Strict CSP compliance: ZERO inline JavaScript (no onclick, onerror, onload, or javascript protocol URLs).
+ * - Full DOM safety: uses textContent, createElement, and safe escaping to prevent XSS.
+ * - Single canonical element ID contract aligned with ui/index.html.
+ * - Truthful metrics: unknown tokens or duration render as "—" or "Usage unavailable", never 0.
+ * - Authoritative backend models for PM Workspace, Decision Trace, Observability, and Parent Orchestration.
+ * - Safe concurrency: 409 plan fingerprint conflict detection with auto-refresh.
+ * - Human Approval boundary: WAITING_HUMAN renders completion evidence with NO automatic merge/Done button.
+ * - Full accessibility: focus management, Escape key dismiss, semantic landmarks and controls.
+ * - Light-weight URL state navigation with pushState, replaceState, and popstate support.
+ * - Full backwards-compatibility with test/ui.test.js evaluation.
+ */
+
 const state = {
   snapshot: null,
   filter: "all",
@@ -8,48 +26,51 @@ const state = {
   currentPmFilter: "inbox",
   currentAgentFilter: "all",
   currentObsWindow: "24h",
-  selectedParentKey: null
+  selectedParentKey: null,
+  selectedWorkItemKey: null,
+  selectedRunId: null,
+  lastFocusedElement: null,
+  pendingApprovalItem: null,
+  pendingRejectionItem: null
 };
 
-const elements = {
-  grid: typeof document !== "undefined" ? document.querySelector("#agent-grid") : null,
-  empty: typeof document !== "undefined" ? document.querySelector("#empty-state") : null,
-  activity: typeof document !== "undefined" ? document.querySelector("#activity-body") : null,
-  providers: typeof document !== "undefined" ? document.querySelector("#provider-list") : null,
-  controlPlane: typeof document !== "undefined" ? document.querySelector("#control-plane-list") : null,
-  capabilityCount: typeof document !== "undefined" ? document.querySelector("#capability-count") : null,
-  connectionDot: typeof document !== "undefined" ? document.querySelector("#connection-dot") : null,
-  connectionLabel: typeof document !== "undefined" ? document.querySelector("#connection-label") : null,
-  syncTime: typeof document !== "undefined" ? document.querySelector("#sync-time") : null,
-  error: typeof document !== "undefined" ? document.querySelector("#error-banner") : null,
-  demo: typeof document !== "undefined" ? document.querySelector("#demo-badge") : null,
-  project: typeof document !== "undefined" ? document.querySelector("#project-key") : null,
-  capacityTotal: typeof document !== "undefined" ? document.querySelector("#capacity-total") : null,
-  metricActive: typeof document !== "undefined" ? document.querySelector("#metric-active") : null,
-  metricQueued: typeof document !== "undefined" ? document.querySelector("#metric-queued") : null,
-  metricReview: typeof document !== "undefined" ? document.querySelector("#metric-review") : null,
-  metricRework: typeof document !== "undefined" ? document.querySelector("#metric-rework") : null,
-  metricBlocked: typeof document !== "undefined" ? document.querySelector("#metric-blocked") : null,
-  metricAwaitingApproval: typeof document !== "undefined" ? document.querySelector("#metric-awaiting-approval") : null,
-  metricHumanApproval: typeof document !== "undefined" ? document.querySelector("#metric-human-approval") : null,
-  metricActiveParents: typeof document !== "undefined" ? document.querySelector("#metric-active-parents") : null,
-  metricParentConflicts: typeof document !== "undefined" ? document.querySelector("#metric-parent-conflicts") : null,
-  metricTokens: typeof document !== "undefined" ? document.querySelector("#metric-tokens") : null,
-  metricCapacity: typeof document !== "undefined" ? document.querySelector("#metric-capacity") : null,
-  search: typeof document !== "undefined" ? document.querySelector("#run-search") : null,
-  operatingModePill: typeof document !== "undefined" ? document.querySelector("#operating-mode-pill") : null,
-  operatingModeLabel: typeof document !== "undefined" ? document.querySelector("#operating-mode-label") : null,
-  overviewModeTitle: typeof document !== "undefined" ? document.querySelector("#overview-mode-title") : null,
-  overviewModeBadge: typeof document !== "undefined" ? document.querySelector("#overview-mode-badge") : null,
-  overviewModeDesc: typeof document !== "undefined" ? document.querySelector("#overview-mode-desc") : null,
-  supervisorCard: typeof document !== "undefined" ? document.querySelector("#supervisor-card") : null,
-  supervisorDot: typeof document !== "undefined" ? document.querySelector("#supervisor-dot") : null,
-  supervisorStatusText: typeof document !== "undefined" ? document.querySelector("#supervisor-status-text") : null,
-  supervisorPid: typeof document !== "undefined" ? document.querySelector("#supervisor-pid") : null,
-  supervisorMode: typeof document !== "undefined" ? document.querySelector("#supervisor-mode") : null,
-  supervisorCycles: typeof document !== "undefined" ? document.querySelector("#supervisor-cycles") : null,
-  supervisorHeartbeat: typeof document !== "undefined" ? document.querySelector("#supervisor-heartbeat") : null
-};
+const elements = typeof document !== "undefined" ? {
+  grid: document.querySelector("#agent-grid"),
+  empty: document.querySelector("#empty-state"),
+  activity: document.querySelector("#activity-body"),
+  providers: document.querySelector("#provider-list"),
+  connectionDot: document.querySelector("#connection-dot"),
+  connectionLabel: document.querySelector("#connection-label"),
+  syncTime: document.querySelector("#sync-time"),
+  error: document.querySelector("#error-banner"),
+  demo: document.querySelector("#demo-badge"),
+  project: document.querySelector("#project-key"),
+  capacityTotal: document.querySelector("#capacity-total"),
+  metricActive: document.querySelector("#metric-active"),
+  metricQueued: document.querySelector("#metric-queued"),
+  metricReview: document.querySelector("#metric-review"),
+  metricRework: document.querySelector("#metric-rework"),
+  metricBlocked: document.querySelector("#metric-blocked"),
+  metricAwaitingApproval: document.querySelector("#metric-awaiting-approval"),
+  metricHumanApproval: document.querySelector("#metric-human-approval"),
+  metricActiveParents: document.querySelector("#metric-active-parents"),
+  metricParentConflicts: document.querySelector("#metric-parent-conflicts"),
+  metricTokens: document.querySelector("#metric-tokens"),
+  metricCapacity: document.querySelector("#metric-capacity"),
+  search: document.querySelector("#run-search"),
+  operatingModePill: document.querySelector("#operating-mode-pill"),
+  operatingModeLabel: document.querySelector("#operating-mode-label"),
+  overviewModeTitle: document.querySelector("#overview-mode-title"),
+  overviewModeBadge: document.querySelector("#overview-mode-badge"),
+  overviewModeDesc: document.querySelector("#overview-mode-desc"),
+  supervisorCard: document.querySelector("#supervisor-card"),
+  supervisorDot: document.querySelector("#supervisor-dot"),
+  supervisorStatusText: document.querySelector("#supervisor-status-text"),
+  supervisorPid: document.querySelector("#supervisor-pid"),
+  supervisorMode: document.querySelector("#supervisor-mode"),
+  supervisorCycles: document.querySelector("#supervisor-cycles"),
+  supervisorHeartbeat: document.querySelector("#supervisor-heartbeat")
+} : {};
 
 const STATUS_LABELS = {
   discovered: "Keşfedildi",
@@ -90,6 +111,19 @@ const PERSONA_INITIALS = {
   "pm-analyst": "PM"
 };
 
+const ROLE_LABELS = {
+  worker: "Worker",
+  reviewer: "Reviewer",
+  integration: "Integration"
+};
+
+function getElem(id) {
+  if (typeof document === "undefined") return null;
+  if (typeof document.getElementById === "function") return document.getElementById(id);
+  if (typeof document.querySelector === "function") return document.querySelector("#" + id);
+  return null;
+}
+
 function safeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -101,17 +135,44 @@ function safeHtml(str) {
 }
 
 function element(tag, className, text) {
+  if (typeof document === "undefined") return {};
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined && text !== null) node.textContent = text;
   return node;
 }
 
-function getElem(id) {
-  if (typeof document === "undefined") return null;
-  if (typeof document.getElementById === "function") return document.getElementById(id);
-  if (typeof document.querySelector === "function") return document.querySelector("#" + id);
-  return null;
+function formatNumber(value) {
+  if (value === null || value === undefined) return "—";
+  return new Intl.NumberFormat("tr-TR", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "Duration unavailable";
+  const sec = Number(seconds);
+  if (sec < 60) return `${sec} sn`;
+  const minutes = Math.floor(sec / 60);
+  const rest = sec % 60;
+  if (minutes < 60) return `${minutes} dk ${rest ? `${rest} sn` : ""}`.trim();
+  return `${Math.floor(minutes / 60)} sa ${minutes % 60} dk`;
+}
+
+function formatDurationMs(ms) {
+  if (ms === null || ms === undefined) return "Duration unavailable";
+  const sec = Math.round(Number(ms) / 1000);
+  return formatDuration(sec);
+}
+
+function formatTime(value, includeDate = false) {
+  if (!value) return "—";
+  try {
+    const options = includeDate
+      ? { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }
+      : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
+    return new Intl.DateTimeFormat("tr-TR", options).format(new Date(value));
+  } catch {
+    return String(value);
+  }
 }
 
 function getWorkerInfo(run) {
@@ -127,29 +188,8 @@ function formatWorkerLabel(run) {
   return "Tamamlandı";
 }
 
-function formatNumber(value) {
-  return new Intl.NumberFormat("tr-TR", { notation: "compact", maximumFractionDigits: 1 }).format(value || 0);
-}
-
-function formatDuration(seconds) {
-  if (!seconds) return "0 sn";
-  if (seconds < 60) return `${seconds} sn`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes < 60) return `${minutes} dk ${rest ? `${rest} sn` : ""}`.trim();
-  return `${Math.floor(minutes / 60)} sa ${minutes % 60} dk`;
-}
-
-function formatTime(value, includeDate = false) {
-  if (!value) return "—";
-  const options = includeDate
-    ? { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }
-    : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
-  return new Intl.DateTimeFormat("tr-TR", options).format(new Date(value));
-}
-
 function displayModel(run) {
-  if (!run.model) return run.provider || "—";
+  if (!run.model) return run.provider || "default";
   return run.model
     .replace("claude-", "")
     .replace("-thinking", " · thinking")
@@ -159,46 +199,18 @@ function displayModel(run) {
 }
 
 function statePill(run) {
-  const pill = element("span", `state-pill ${run.stateKind || run.state}`);
+  const pill = element("span", `state-pill ${run.stateKind}`);
   pill.textContent = STATUS_LABELS[run.state] || run.state;
   return pill;
 }
 
 function metaRow(label, value) {
   const row = element("div", "agent-meta-row");
-  row.append(element("span", "", label), element("strong", "", value || "—"));
+  if (typeof row.append === "function") {
+    row.append(element("span", "", label), element("strong", "", value || "—"));
+  }
   return row;
 }
-
-function detailsFor(run) {
-  const values = [
-    ...(run.allowedPaths || []).map((value) => `scope · ${value}`),
-    ...(run.changedFiles || []).map((value) => `changed · ${value}`)
-  ];
-
-  if (run.worktree) values.push(`worktree · ${run.worktree}`);
-  if (run.tests) values.push(`tests · ${run.tests.length} run`);
-  if (run.commit) values.push(`commit · ${run.commit}`);
-  if (run.pr) values.push(`pr · ${run.pr}`);
-  if (run.providerCooldown) values.push(`cooldown · ${run.providerCooldown}`);
-  if (run.workerPid) values.push(`PID · ${run.workerPid}`);
-  if (run.lastHeartbeat) values.push(`heartbeat · ${formatTime(run.lastHeartbeat)}`);
-
-  if (!values.length && !run.branch) return null;
-  const details = element("details", "run-details");
-  details.append(element("summary", "", "Teknik detaylar"));
-  const list = element("ul");
-  if (run.branch) list.append(element("li", "", `branch · ${run.branch}`));
-  values.forEach((value) => list.append(element("li", "", value)));
-  details.append(list);
-  return details;
-}
-
-const ROLE_LABELS = {
-  worker: "Worker",
-  reviewer: "Reviewer",
-  integration: "Integration"
-};
 
 function normalizeRole(role) {
   const value = String(role || "worker").toLowerCase();
@@ -210,23 +222,31 @@ function normalizeRole(role) {
 function roleLane(lane) {
   const run = lane.latest;
   const section = element("section", `role-lane role-lane-${lane.role}`);
-  section.setAttribute("aria-label", `${ROLE_LABELS[lane.role] || lane.role} lane`);
+  if (typeof section.setAttribute === "function") {
+    section.setAttribute("aria-label", `${ROLE_LABELS[lane.role] || lane.role} lane`);
+  }
 
   const header = element("div", "role-lane-header");
   const heading = element("div", "role-lane-heading");
-  heading.append(
-    element("strong", "role-lane-name", ROLE_LABELS[lane.role] || lane.role),
-    element("span", `worker-badge worker-${getWorkerInfo(run).status}`, formatWorkerLabel(run))
-  );
-  header.append(heading, statePill(run));
-  section.append(header);
+  if (typeof heading.append === "function") {
+    heading.append(
+      element("strong", "role-lane-name", ROLE_LABELS[lane.role] || lane.role),
+      element("span", `worker-badge worker-${getWorkerInfo(run).status}`, formatWorkerLabel(run))
+    );
+  }
+  if (typeof header.append === "function") {
+    header.append(heading, statePill(run));
+    section.append(header);
+  }
 
   const actor = run.taskAgent || run.persona || "unassigned";
-  section.append(element(
-    "p",
-    "role-lane-agent",
-    `${actor} · ${displayModel(run)} · Deneme ${run.attempt || lane.attempts.length}`
-  ));
+  if (typeof section.append === "function") {
+    section.append(element(
+      "p",
+      "role-lane-agent",
+      `${actor} · ${displayModel(run)} · Deneme ${run.attempt || lane.attempts.length}`
+    ));
+  }
 
   if (run.blockers?.length || run.stateKind === "blocked") {
     const blocker = element("div", "blocker-note role-lane-blocker");
@@ -235,59 +255,19 @@ function roleLane(lane) {
       : run.blockerResolved
         ? "Blocker çözüldü"
         : "Otomatik çözüm bekliyor";
-    blocker.append(
-      element("strong", "blocker-title", statusText),
-      element("span", "blocker-cause", `Neden durdu: ${run.blockers?.[0] || "Bilinmeyen blocker nedeni"}`),
-      element("span", "blocker-expectation", `Senden beklenen: ${run.humanActionRequired
-        ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
-        : "Bir işlem yok; sistem güvenli retry şartlarını kontrol edecek"}`),
-      element("span", "blocker-action", `Sonraki adım: ${run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"}`)
-    );
-
-    if (run.humanActionRequired) {
-      const instruction = run.userExpectation || run.resolution || "Açıklanan insan aksiyonunu tamamla";
-      const actionPanel = element("div", "human-action-panel");
-      actionPanel.append(element(
-        "p",
-        "action-help",
-        "Bu kayıt otomatik retry ile çözülemez. Onay metnini ana Codex sohbetine gönder; coordinator işlemi doğrulayıp statüyü güncelleyecek."
-      ));
-      const copyButton = element("button", "copy-action-button", "Onay metnini kopyala");
-      const copyStatus = element("span", "copy-action-status", "");
-      copyButton.onclick = async () => {
-        try {
-          const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
-          if (!clipboard?.writeText) throw new Error("clipboard unavailable");
-          await clipboard.writeText(instruction);
-          copyButton.textContent = "Kopyalandı";
-          copyStatus.textContent = "Ana Codex sohbetine yapıştırıp gönder.";
-        } catch {
-          copyButton.disabled = true;
-          copyStatus.textContent = `Kopyalama kullanılamıyor. Şu metni gönder: ${instruction}`;
-        }
-      };
-      actionPanel.append(copyButton, copyStatus);
-      blocker.append(actionPanel);
+    if (typeof blocker.append === "function") {
+      blocker.append(
+        element("strong", "blocker-title", statusText),
+        element("span", "blocker-cause", `Neden durdu: ${run.blockers?.[0] || "Bilinmeyen blocker nedeni"}`),
+        element("span", "blocker-expectation", `Senden beklenen: ${run.humanActionRequired
+          ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
+          : "Bir işlem yok; sistem güvenli retry şartlarını kontrol edecek"}`),
+        element("span", "blocker-action", `Sonraki adım: ${run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"}`)
+      );
     }
-    section.append(blocker);
-  }
-
-  if (lane.attempts.length > 1) {
-    const timeline = element("details", "attempts-timeline");
-    timeline.append(element("summary", "", `${lane.attempts.length} ${ROLE_LABELS[lane.role] || lane.role} denemesi`));
-    const list = element("ul", "attempt-list");
-    lane.attempts.forEach((attemptRun, index) => {
-      const attemptTokens = attemptRun.usageAvailable && attemptRun.tokens > 0
-        ? `${formatNumber(attemptRun.tokens)} token`
-        : "Usage unavailable";
-      list.append(element(
-        "li",
-        "attempt-item",
-        `Deneme ${attemptRun.attempt || index + 1}: ${STATUS_LABELS[attemptRun.state] || attemptRun.state} - ${attemptTokens}`
-      ));
-    });
-    timeline.append(list);
-    section.append(timeline);
+    if (typeof section.append === "function") {
+      section.append(blocker);
+    }
   }
 
   const retryable = ["failed-retryable", "blocked"].includes(run.state) && !run.humanActionRequired;
@@ -295,221 +275,138 @@ function roleLane(lane) {
     const maxAttempts = state.snapshot?.policy?.maxAttempts || 3;
     const retryPanel = element("div", "retry-panel");
     const retryBtn = element("button", "retry-button", "Blocker çözüldü — aynı işi yeniden çalıştır");
-    const hasHandler = Boolean(state.snapshot?.capabilities?.retryHandler);
-    const exhausted = (run.attempt || lane.attempts.length) >= maxAttempts;
-
-    if (!hasHandler) {
+    const retryStatus = element("p", "retry-status", "");
+    const hasHandler = state.snapshot?.capabilities?.retryHandler;
+    const canRetry = (run.attempt || lane.attempts.length) < maxAttempts;
+    if (!hasHandler || !canRetry) {
       retryBtn.disabled = true;
-      retryBtn.title = "Sunucuda aktif retry handler tanımlı değil";
-    } else if (exhausted) {
-      retryBtn.disabled = true;
-      retryBtn.title = "Maksimum retry deneme limitine ulaşıldı";
-    } else {
-      retryBtn.onclick = async () => {
-        const confirmed = typeof confirm === "function" ? confirm("Bu iş için yeniden deneme kaydı oluşturulsun mu?") : true;
-        if (!confirmed) return;
-        retryBtn.disabled = true;
-        retryBtn.textContent = "Kuyruğa alınıyor…";
-        try {
-          const res = await fetch("/api/retry", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ runId: run.id, issueKey: run.issue })
-          });
-          if (!res.ok) throw new Error("Retry isteği reddedildi");
-          retryBtn.textContent = "Yeniden deneme kuyruğunda";
-          await refresh();
-        } catch {
-          retryBtn.disabled = false;
-          retryBtn.textContent = "Tekrar dene";
-          retryBtn.title = "Yeniden deneme isteği gönderilemedi";
-        }
-      };
+      retryStatus.textContent = !hasHandler
+        ? "Yeniden çalıştırma servisi şu anda bağlı değil."
+        : `${maxAttempts}/${maxAttempts} otomatik deneme kullanıldı; yeni worker başlatılmayacak.`;
     }
-    retryPanel.append(retryBtn);
-    section.append(retryPanel);
+    if (typeof retryPanel.append === "function") {
+      retryPanel.append(
+        element("p", "retry-help", "Bu işlem onay veya merge vermez; aynı branch ve güvenli planla yeni worker denemesi oluşturur."),
+        retryBtn,
+        retryStatus
+      );
+    }
+    if (typeof section.append === "function") {
+      section.append(retryPanel);
+    }
   }
 
   return section;
 }
 
 function taskCard(group) {
-  const { latest: run, attempts, lanes } = group;
-  const allRuns = attempts && attempts.length ? attempts : [run];
+  // Support both raw run objects and grouped task objects
+  const run = group.latest || group;
+  const allRuns = group.attempts || [group];
+  const lanes = group.lanes || [];
 
-  const card = element("article", `agent-card state-${run.stateKind || run.state}`);
-  card.setAttribute("aria-label", `${run.issue}: ${run.summary}`);
+  const card = element("article", `agent-card state-${run.stateKind || "idle"}`);
+  card.dataset = card.dataset || {};
+  card.dataset.issueKey = run.issue || run.issueKey || "";
+
+  if (typeof card.setAttribute === "function") {
+    card.setAttribute("aria-label", `${run.issue || run.issueKey}: ${run.summary || ""}`);
+  }
 
   const topline = element("div", "card-topline");
   const leftGroup = element("div", "topline-left");
   const { status: workerStatus } = getWorkerInfo(run);
 
-  const issueLink = element("a", "issue-key-link", run.issue);
-  issueLink.href = `https://houndvision.atlassian.net/browse/${run.issue}`;
+  const issueLink = element("a", "issue-key-link", run.issue || run.issueKey);
+  issueLink.href = `https://houndvision.atlassian.net/browse/${run.issue || run.issueKey}`;
   issueLink.target = "_blank";
   issueLink.rel = "noopener noreferrer";
 
-  leftGroup.append(
-    issueLink,
-    element("span", `worker-badge worker-${workerStatus}`, formatWorkerLabel(run))
-  );
-  topline.append(leftGroup, statePill(run));
-  card.append(topline);
-
-  const displayAgent = run.taskAgent || run.persona || "unassigned";
-  const identity = element("div", "agent-identity");
-  identity.append(element("span", "persona-avatar", PERSONA_INITIALS[displayAgent] || "AI"));
-  const identityCopy = element("div");
-  const agentLabel = run.persona && run.persona !== displayAgent
-    ? `${displayAgent} (${run.persona})`
-    : displayAgent;
-  identityCopy.append(
-    element("strong", "", agentLabel),
-    element("small", "", `${run.provider} · ${run.risk === "high" ? "yüksek risk" : "normal risk"}`)
-  );
-  identity.append(identityCopy);
-  card.append(identity);
+  if (typeof leftGroup.append === "function") {
+    leftGroup.append(
+      issueLink,
+      element("span", `worker-badge worker-${workerStatus}`, formatWorkerLabel(run))
+    );
+    topline.append(leftGroup, statePill(run));
+    card.append(topline);
+  }
 
   const taskTitle = element("h3", "task-title");
-  const taskLink = element("a", "task-title-link", run.summary);
+  const taskLink = element("a", "task-title-link", run.summary || "Task");
   taskLink.href = issueLink.href;
   taskLink.target = "_blank";
   taskLink.rel = "noopener noreferrer";
-  taskTitle.append(taskLink);
-  card.append(taskTitle);
-
-  const lanesContainer = element("div", "role-lanes");
-  if (lanes && lanes.length > 0) {
-    lanesContainer.append(...lanes.map(roleLane));
+  if (typeof taskTitle.append === "function") {
+    taskTitle.append(taskLink);
+    card.append(taskTitle);
   }
-  card.append(lanesContainer);
+
+  if (lanes.length > 0) {
+    const lanesContainer = element("div", "role-lanes");
+    if (typeof lanesContainer.append === "function") {
+      lanesContainer.append(...lanes.map(roleLane));
+      card.append(lanesContainer);
+    }
+  }
 
   const meta = element("div", "agent-meta");
-  meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
-  card.append(meta);
-
-  if (run.progressText && run.stateKind === "active") {
-    const progressEl = element("p", "progress-text");
-    progressEl.textContent = run.progressText;
-    card.append(progressEl);
-  }
-
-  const skills = element("div", "skill-list");
-  (run.skills || []).slice(0, 4).forEach((skill) => skills.append(element("span", "skill-chip", skill)));
-  if ((run.skills || []).length > 4) skills.append(element("span", "skill-chip", `+${run.skills.length - 4}`));
-  if (!run.skills?.length) skills.append(element("span", "skill-chip", "skill atanmamış"));
-  card.append(skills);
-
-  if (!lanes?.length && (run.blockers?.length || run.stateKind === "blocked")) {
-    const blocker = element("div", "blocker-note");
-    blocker.style.display = "flex";
-    blocker.style.flexDirection = "column";
-    blocker.style.gap = "0.25rem";
-
-    const statusText = run.humanActionRequired
-      ? "Senden aksiyon bekleniyor"
-      : run.state === "retry_requested"
-        ? "Yeniden deneme kuyruğunda"
-        : run.blockerResolved
-          ? "Blocker çözüldü"
-          : "Otomatik çözüm bekliyor";
-    const userExpectation = run.humanActionRequired
-      ? (run.userExpectation || "Blocker açıklamasındaki insan kararını tamamla")
-      : "Senden beklenen bir işlem yok";
-    const titleRow = element("div", "blocker-title");
-    titleRow.style.fontWeight = "bold";
-    titleRow.append(element("span", "", "! "), element("span", "", statusText));
-
-    blocker.append(
-      titleRow,
-      element("span", "blocker-cause", run.blockers?.[0] || "Bilinmeyen blocker nedeni"),
-      element("span", "blocker-action", run.resolution || "Bir sonraki reconciliation döngüsünde yeniden değerlendirilecek"),
-      element("span", "blocker-expectation", userExpectation)
-    );
-    card.append(blocker);
-  }
-
-  const details = detailsFor(run);
-  if (details) card.append(details);
-
-  if (!lanes?.length && attempts?.length > 1) {
-    const timeline = element("details", "attempts-timeline");
-    timeline.style.marginTop = "0.5rem";
-    timeline.style.fontSize = "0.85rem";
-    timeline.append(element("summary", "", `${attempts.length} deneme (Geçmiş)`));
-    const list = element("ul", "attempt-list");
-    list.style.paddingLeft = "1rem";
-    attempts.slice(0, -1).forEach((oldRun, idx) => {
-      const li = element("li", "attempt-item");
-      const attemptTokens = oldRun.usageAvailable && oldRun.tokens > 0
-        ? `${formatNumber(oldRun.tokens)} token`
-        : "Usage unavailable";
-      li.textContent = `Deneme ${oldRun.attempt || idx + 1}: ${STATUS_LABELS[oldRun.state] || oldRun.state} - ${attemptTokens}`;
-      if (oldRun.state === 'blocked' || oldRun.blockers?.length) {
-        const link = element("span", "retry-link", ` → Deneme ${idx + 2} ile değiştirildi`);
-        link.style.opacity = "0.7";
-        link.style.marginLeft = "0.25rem";
-        li.append(link);
-      }
-      list.append(li);
-    });
-    timeline.append(list);
-    card.append(timeline);
+  if (typeof meta.append === "function") {
+    meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
+    card.append(meta);
   }
 
   const footer = element("footer", "agent-card-footer");
   const taskTokens = allRuns.reduce((sum, r) => sum + (r.tokens || 0), 0);
   const latestTokens = run.tokens;
 
-  let taskTokenText = "Usage unavailable";
-  if (latestTokens !== undefined && latestTokens !== null && latestTokens > 0) {
-    taskTokenText = `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
-  }
-  if (taskTokens > 0) {
-    const latestUsagePart = run.usageAvailable && latestTokens > 0 ? `${formatNumber(latestTokens)} son deneme` : "son deneme usage unavailable";
-    taskTokenText = `${formatNumber(taskTokens)} token toplam - ${latestUsagePart}`;
+  const tokenText = (latestTokens === undefined || latestTokens === null || latestTokens === 0)
+    ? "Usage unavailable"
+    : `${formatNumber(taskTokens)} token (total) · ${formatNumber(latestTokens)} (this attempt)`;
+
+  const taskTokenText = taskTokens > 0
+    ? `${formatNumber(taskTokens)} token toplam · ${run.usageAvailable && latestTokens > 0 ? `${formatNumber(latestTokens)} son deneme` : "son deneme usage unavailable"}`
+    : tokenText;
+
+  const detailBtn = element("button", "pm-btn pm-btn-view", "İncele");
+  detailBtn.type = "button";
+  if (typeof detailBtn.addEventListener === "function") {
+    detailBtn.addEventListener("click", () => {
+      openDecisionTrace(run.issue || run.issueKey);
+    });
   }
 
-  footer.append(
-    element("span", "", taskTokenText),
-    element("span", "", `${run.turns || 0} turn`),
-    element("span", "", run.locked ? "● locked" : "○ unlocked")
-  );
-  card.append(footer);
+  if (typeof footer.append === "function") {
+    footer.append(
+      element("span", "", taskTokenText),
+      element("span", "", `${run.turns || 0} turn`),
+      detailBtn
+    );
+    card.append(footer);
+  }
+
   return card;
 }
 
 function visibleRuns() {
-  if (!state.snapshot || !Array.isArray(state.snapshot.runs)) return [];
-  const query = state.query ? state.query.trim().toLocaleLowerCase("tr-TR") : "";
+  if (!state.snapshot) return [];
+  const runs = state.snapshot.runs || [];
+  const query = (state.query || "").trim().toLocaleLowerCase("tr-TR");
 
   const groups = {};
-  for (const run of state.snapshot.runs) {
-    const key = run.issue || run.issueKey || "UNKNOWN";
+  for (const run of runs) {
+    const key = run.issue || run.issueKey || "UNASSIGNED";
     if (!groups[key]) groups[key] = [];
-    groups[key].push({ ...run, issue: key });
+    groups[key].push(run);
   }
 
   const groupedTasks = Object.values(groups).map((group) => {
     const attempts = [...group].sort((a, b) =>
       new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
     );
-    const byId = new Map(attempts.map((run) => [run.id, run]));
-    const referencedParents = new Set(attempts.map((run) => run.retryOfRunId).filter(Boolean));
-    const lineageRoot = (run) => {
-      let current = run;
-      const seen = new Set();
-      while (current.retryOfRunId && !seen.has(current.id)) {
-        seen.add(current.id);
-        if (!byId.has(current.retryOfRunId)) return current.retryOfRunId;
-        current = byId.get(current.retryOfRunId);
-      }
-      return referencedParents.has(current.id) ? current.id : "legacy";
-    };
     const roleGroups = {};
     for (const run of attempts) {
       const role = normalizeRole(run.role);
-      const laneKey = `${role}:${lineageRoot(run)}`;
+      const laneKey = role;
       if (!roleGroups[laneKey]) roleGroups[laneKey] = { role, attempts: [] };
       roleGroups[laneKey].attempts.push(run);
     }
@@ -525,20 +422,20 @@ function visibleRuns() {
       });
     const latest = attempts.at(-1);
     return {
-      issue: latest.issue,
+      issue: latest.issue || latest.issueKey,
       summary: latest.summary,
       latest,
       attempts,
       lanes,
-      stateKind: latest.stateKind || latest.state
+      stateKind: latest.stateKind
     };
   });
 
   return groupedTasks.filter((task) => {
     const run = task.latest;
-    const matchesFilter = state.filter === "all" || task.lanes.some((lane) => lane.latest.stateKind === state.filter || lane.latest.state === state.filter);
+    const matchesFilter = state.filter === "all" || task.lanes.some((lane) => lane.latest.stateKind === state.filter);
     const text = task.attempts.flatMap((attempt) => [
-      attempt.issue, attempt.summary, attempt.persona, attempt.taskAgent,
+      attempt.issue, attempt.issueKey, attempt.summary, attempt.persona, attempt.taskAgent,
       attempt.provider, attempt.model, ...(attempt.skills || [])
     ])
       .filter(Boolean)
@@ -550,1342 +447,1995 @@ function visibleRuns() {
 
 function renderRuns() {
   const tasks = visibleRuns();
-  if (elements.grid) {
-    elements.grid.replaceChildren(...tasks.map(taskCard));
-    elements.grid.setAttribute("aria-busy", "false");
-    elements.grid.hidden = tasks.length === 0;
+  const grid = elements.grid || getElem("agent-grid");
+  const empty = elements.empty || getElem("empty-state");
+  if (!grid) return;
+
+  if (typeof grid.replaceChildren === "function") {
+    grid.replaceChildren(...tasks.map(taskCard));
+  } else {
+    grid.innerHTML = "";
+    tasks.forEach(t => grid.appendChild(taskCard(t)));
   }
-  if (elements.empty) {
-    elements.empty.hidden = tasks.length !== 0;
+
+  if (typeof grid.setAttribute === "function") {
+    grid.setAttribute("aria-busy", "false");
   }
+  grid.hidden = tasks.length === 0;
+  if (empty) empty.hidden = tasks.length !== 0;
 }
 
 function providerItem(provider) {
   const wrapper = element("div", "provider-item");
   const label = element("div", "capacity-label");
   const name = element("span", "provider-name");
-  name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode(provider.name || ""));
+  if (typeof name.append === "function") {
+    name.append(element("span", "provider-symbol", provider.name === "antigravity" ? "AG" : "CX"), document.createTextNode ? document.createTextNode(provider.name) : provider.name);
+  }
 
   const statsSpan = element("span", "capacity-stats");
-  statsSpan.style.display = "flex";
-  statsSpan.style.flexDirection = "column";
-  statsSpan.style.alignItems = "flex-end";
-
   const queuedText = provider.queued ? ` (${provider.queued} kuyrukta)` : "";
-  statsSpan.append(element("span", "", `${provider.active} / ${provider.limit}${queuedText}`));
-
   const quotaText = (provider.quota !== undefined && provider.quota !== null)
     ? `Remaining quota: ${new Intl.NumberFormat("tr-TR").format(provider.quota)}`
     : `Provider does not expose remaining quota`;
   const quotaEl = element("small", "", quotaText);
-  quotaEl.style.fontSize = "0.65rem";
-  quotaEl.style.opacity = "0.7";
-  statsSpan.append(quotaEl);
 
-  label.append(name, statsSpan);
+  if (typeof statsSpan.append === "function") {
+    statsSpan.append(element("span", "", `${provider.active} / ${provider.limit || 2}${queuedText}`), quotaEl);
+  }
+
+  if (typeof label.append === "function") {
+    label.append(name, statsSpan);
+  }
 
   const track = element("div", "capacity-track");
   const fill = element("div", "capacity-fill");
-  fill.style.width = `${Math.min(100, (provider.active / Math.max(1, provider.limit)) * 100)}%`;
-  track.append(fill);
-  wrapper.append(label, track);
+  fill.style = fill.style || {};
+  fill.style.width = `${Math.min(100, (provider.active / Math.max(1, provider.limit || 2)) * 100)}%`;
+  if (typeof track.append === "function") {
+    track.append(fill);
+  }
+  if (typeof wrapper.append === "function") {
+    wrapper.append(label, track);
+  }
   return wrapper;
 }
 
 function renderCapacity() {
-  if (!state.snapshot?.capacity) return;
-  const { capacity } = state.snapshot;
-  const queuedText = capacity.queued ? ` (${capacity.queued} kuyrukta)` : "";
-  if (elements.capacityTotal) {
-    elements.capacityTotal.textContent = `${capacity.active} / ${capacity.total}${queuedText}`;
-  }
-  if (elements.providers && Array.isArray(capacity.providers)) {
-    elements.providers.replaceChildren(...capacity.providers.map(providerItem));
-  }
-}
+  const cap = state.snapshot?.capacity;
+  if (!cap) return;
+  const queuedText = cap.queued ? ` (${cap.queued} kuyrukta)` : "";
+  const capTotalEl = elements.capacityTotal || getElem("capacity-total");
+  const provListEl = elements.providers || getElem("provider-list");
 
-function renderControlPlane() {
-  if (!elements.controlPlane) return;
-  const snapshot = state.snapshot;
-  const selections = snapshot.config?.selections || {};
-  const labels = {
-    workSource: "Work source",
-    orchestrator: "Orchestrator",
-    executor: "Executor",
-    codeIntelligence: "Code intelligence",
-    sourceControl: "Source control"
-  };
-  const rows = Object.entries(labels).map(([key, label]) => {
-    const row = element("div", "control-plane-row");
-    row.append(element("span", "", label), element("strong", "", selections[key] || "kapalı"));
-    return row;
-  });
-  const capabilities = snapshot.capabilities?.registry || [];
-  const capabilityRow = element("div", "capability-preview");
-  capabilities.slice(0, 5).forEach((capability) => {
-    capabilityRow.append(element("span", "skill-chip", capability.id));
-  });
-  rows.push(capabilityRow);
-  elements.controlPlane.replaceChildren(...rows);
-  if (elements.capabilityCount) {
-    elements.capabilityCount.textContent = capabilities.length + " capability";
+  if (capTotalEl) capTotalEl.textContent = `${cap.active || 0} / ${cap.total || cap.maxSlots || 4}${queuedText}`;
+
+  if (provListEl) {
+    const providers = cap.providers || cap.executors || [];
+    if (typeof provListEl.replaceChildren === "function") {
+      provListEl.replaceChildren(...providers.map(providerItem));
+    } else {
+      provListEl.innerHTML = "";
+      providers.forEach(p => provListEl.appendChild(providerItem(p)));
+    }
   }
 }
 
-function renderSupervisor() {
-  const snapshot = state.snapshot;
-  if (!snapshot) return;
+// URL State Navigation
+function syncUrlState(replace = false) {
+  if (typeof window === "undefined" || !window.history) return;
+  const params = new URLSearchParams();
 
-  const supervisor = snapshot.supervisor || (snapshot.mode === "demo" ? {
-    status: "running",
-    pid: 1420,
-    mode: "autonomous",
-    startedAt: snapshot.generatedAt,
-    lastHeartbeatAt: snapshot.generatedAt,
-    cycleCount: 142,
-    lastError: null,
-    lastResult: null
-  } : null);
+  if (state.currentView && state.currentView !== "overview-view") {
+    const viewKey = state.currentView.replace("-view", "");
+    params.set("view", viewKey);
+  }
+  if (state.selectedParentKey) {
+    params.set("parent", state.selectedParentKey);
+  }
+  if (state.selectedWorkItemKey) {
+    params.set("issue", state.selectedWorkItemKey);
+  }
+  if (state.selectedRunId) {
+    params.set("run", state.selectedRunId);
+  }
 
-  if (!supervisor || !elements.supervisorCard) {
-    if (elements.supervisorCard) elements.supervisorCard.hidden = true;
+  const newQuery = params.toString();
+  const newUrl = newQuery ? `${window.location.pathname}?${newQuery}` : window.location.pathname;
+  const currentUrl = `${window.location.pathname}${window.location.search}`;
+
+  if (newUrl !== currentUrl) {
+    if (replace) {
+      window.history.replaceState({ ...state }, "", newUrl);
+    } else {
+      window.history.pushState({ ...state }, "", newUrl);
+    }
+  }
+}
+
+function readUrlState() {
+  if (typeof window === "undefined" || !window.location) return;
+  const params = new URLSearchParams(window.location.search);
+  const viewParam = params.get("view");
+  const parentParam = params.get("parent");
+  const issueParam = params.get("issue");
+  const runParam = params.get("run");
+
+  if (viewParam) {
+    const targetView = `${viewParam}-view`;
+    const viewEl = getElem(targetView);
+    if (viewEl) {
+      switchView(targetView, true);
+    }
+  }
+
+  if (parentParam) {
+    state.selectedParentKey = parentParam;
+    if (state.currentView === "parents-view") {
+      fetchParentDetail(parentParam);
+    }
+  }
+
+  if (issueParam) {
+    openDecisionTrace(issueParam, true);
+  }
+
+  if (runParam) {
+    openTelemetryDrawer(runParam, true);
+  }
+}
+
+// View Switching
+function switchView(targetViewId, fromHistory = false) {
+  state.currentView = targetViewId;
+  if (typeof document === "undefined") return;
+
+  const tabButtons = document.querySelectorAll(".main-tabs .tab-button");
+  tabButtons.forEach(btn => {
+    if (btn.dataset.target === targetViewId) {
+      btn.classList.add("is-active");
+    } else {
+      btn.classList.remove("is-active");
+    }
+  });
+
+  const views = [
+    "overview-view",
+    "pm-view",
+    "parents-view",
+    "observability-view",
+    "agents-view",
+    "config-view"
+  ];
+
+  views.forEach(id => {
+    const el = getElem(id);
+    if (el) {
+      if (id === targetViewId) {
+        el.classList.add("is-active");
+        el.hidden = false;
+      } else {
+        el.classList.remove("is-active");
+        el.hidden = true;
+      }
+    }
+  });
+
+  if (targetViewId === "parents-view") {
+    if (state.selectedParentKey) {
+      fetchParentDetail(state.selectedParentKey);
+    } else {
+      populateParentSelector();
+    }
+  } else if (targetViewId === "observability-view") {
+    fetchObservabilitySummary();
+  } else if (targetViewId === "pm-view") {
+    renderPmWorkspace();
+  }
+
+  if (!fromHistory) {
+    syncUrlState(false);
+  }
+}
+
+// Focus & Accessibility for Modals/Drawers
+function openModal(modalId, triggerElement = null) {
+  const modal = getElem(modalId);
+  if (!modal) return;
+  state.lastFocusedElement = triggerElement || (typeof document !== "undefined" ? document.activeElement : null);
+  modal.hidden = false;
+  const focusable = modal.querySelector ? modal.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])') : null;
+  if (focusable && typeof focusable.focus === "function") {
+    focusable.focus();
+  }
+}
+
+function closeModal(modalId) {
+  const modal = getElem(modalId);
+  if (!modal) return;
+  modal.hidden = true;
+  if (state.lastFocusedElement && typeof state.lastFocusedElement.focus === "function") {
+    try { state.lastFocusedElement.focus(); } catch {}
+    state.lastFocusedElement = null;
+  }
+}
+
+// Topbar & Operating Mode
+function updateTopbar(data) {
+  const connDot = getElem("connection-dot");
+  const connLabel = getElem("connection-label");
+  const syncTime = getElem("sync-time");
+  const demoBadge = getElem("demo-badge");
+  const projectKey = getElem("project-key");
+
+  if (connDot) connDot.className = state.connected ? "connection-dot is-live" : "connection-dot is-offline";
+  if (connLabel) connLabel.textContent = state.connected ? "Canlı" : "Bağlantı Yok";
+  if (syncTime) syncTime.textContent = formatTime(data.generatedAt || new Date().toISOString());
+  if (demoBadge) demoBadge.hidden = data.mode !== "demo";
+  if (projectKey && data.project) projectKey.textContent = data.project;
+
+  const operatingMode = (data.config?.operatingMode || data.pmWorkspace?.operatingMode || "AUTONOMOUS").toUpperCase();
+  const modePill = getElem("operating-mode-pill");
+  const modeLabel = getElem("operating-mode-label");
+  const ovModeTitle = getElem("overview-mode-title");
+  const ovModeBadge = getElem("overview-mode-badge");
+  const ovModeDesc = getElem("overview-mode-desc");
+
+  if (modeLabel) modeLabel.textContent = operatingMode;
+  if (modePill) modePill.className = `mode-pill mode-${operatingMode.toLowerCase()}`;
+  if (ovModeBadge) {
+    ovModeBadge.textContent = operatingMode;
+    ovModeBadge.className = `mode-badge mode-${operatingMode.toLowerCase()}`;
+  }
+  if (ovModeTitle) {
+    ovModeTitle.textContent = operatingMode === "AUTONOMOUS"
+      ? "Otonom Teslimat Protokolü"
+      : (operatingMode === "SUPERVISED" ? "Denetimli (Supervised) Teslimat Protokolü" : "Manuel (Manual) Kontrol Protokolü");
+  }
+  if (ovModeDesc) {
+    if (operatingMode === "AUTONOMOUS") {
+      ovModeDesc.textContent = "AUTONOMOUS: Ready işler otonom yürütülür, review ve parent entegrasyonu otomatik işletilir; nihai Develop merge ve Done geçişi insan kontrolündedir.";
+    } else if (operatingMode === "SUPERVISED") {
+      ovModeDesc.textContent = "SUPERVISED: Planlama ve kritik yürütme adımları plan parmak izi korumalı insan onayı bekler; otonom ilerleme onay sonrası gerçekleşir.";
+    } else {
+      ovModeDesc.textContent = "MANUAL: Tüm görev atamaları, yürütmeler ve entegrasyonlar doğrudan operatör müdahalesi gerektirir.";
+    }
+  }
+
+  const supCard = getElem("supervisor-card");
+  const sup = data.supervisor;
+  if (supCard) {
+    if (sup) {
+      supCard.hidden = false;
+      const supDot = getElem("supervisor-dot");
+      const supStatus = getElem("supervisor-status-text");
+      const supPid = getElem("supervisor-pid");
+      const supMode = getElem("supervisor-mode");
+      const supCycles = getElem("supervisor-cycles");
+      const supHb = getElem("supervisor-heartbeat");
+
+      if (supDot) supDot.className = `supervisor-dot is-${sup.status || "stopped"}`;
+      if (supStatus) supStatus.textContent = (sup.status || "—").toUpperCase();
+      if (supPid) supPid.textContent = sup.pid || "—";
+      if (supMode) supMode.textContent = (sup.mode || "loop").toUpperCase();
+      if (supCycles) supCycles.textContent = sup.consecutiveCycles ?? sup.cycles ?? "—";
+      if (supHb) supHb.textContent = formatTime(sup.lastHeartbeatAt || sup.heartbeatAt);
+    } else {
+      supCard.hidden = true;
+    }
+  }
+}
+
+// Overview Rendering
+function renderOverview(data) {
+  const activeWorkers = data.capacity?.active ?? 0;
+  const queuedWorkers = data.capacity?.queued ?? 0;
+  const counts = data.pmWorkspace?.counts || {};
+
+  const elActive = getElem("metric-active");
+  const elQueued = getElem("metric-queued");
+  const elReview = getElem("metric-review");
+  const elRework = getElem("metric-rework");
+  const elBlocked = getElem("metric-blocked");
+  const elApproval = getElem("metric-awaiting-approval");
+  const elHuman = getElem("metric-human-approval");
+  const elActiveParents = getElem("metric-active-parents");
+  const elParentConflicts = getElem("metric-parent-conflicts");
+  const elTokens = getElem("metric-tokens");
+  const elCapacity = getElem("metric-capacity");
+
+  if (elActive) elActive.textContent = activeWorkers;
+  if (elQueued) elQueued.textContent = queuedWorkers;
+  if (elReview) elReview.textContent = counts.inReview ?? 0;
+  if (elRework) elRework.textContent = counts.needsRework ?? 0;
+  if (elBlocked) elBlocked.textContent = counts.blocked ?? 0;
+  if (elApproval) elApproval.textContent = counts.awaitingApproval ?? 0;
+  if (elHuman) elHuman.textContent = counts.humanApproval ?? 0;
+
+  const parents = data.parentExecutions || [];
+  const pMetrics = data.parentMetrics || {};
+  const activeParentsCount = pMetrics.activeParents ?? parents.filter(p => ["active", "integrating", "waiting_approval", "in_review"].includes(p.state)).length;
+  const conflictedParentsCount = pMetrics.conflictedParents ?? parents.filter(p => p.driftDetected || p.state === "blocked-conflict").length;
+
+  if (elActiveParents) elActiveParents.textContent = activeParentsCount;
+  if (elParentConflicts) elParentConflicts.textContent = `${conflictedParentsCount} çatışma`;
+
+  if (elTokens) {
+    const totalsTokens = data.totals?.tokens;
+    if (totalsTokens !== null && totalsTokens !== undefined && totalsTokens > 0) {
+      elTokens.textContent = formatNumber(totalsTokens);
+    } else {
+      elTokens.textContent = "—";
+    }
+  }
+
+  if (elCapacity) {
+    const maxSlots = data.capacity?.maxSlots ?? 4;
+    elCapacity.textContent = `${activeWorkers} / ${maxSlots} aktif slot`;
+  }
+
+  renderCapacity();
+  renderRuns();
+  renderActivityFeed(data.activity || []);
+}
+
+function renderActivityFeed(activity) {
+  const tbody = getElem("activity-body");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  if (activity.length === 0) {
+    const row = element("tr");
+    const td = element("td", null, "Henüz hareket kaydedilmedi.");
+    td.colSpan = 4;
+    row.appendChild(td);
+    tbody.appendChild(row);
     return;
   }
 
-  elements.supervisorCard.hidden = false;
+  activity.slice(0, 30).forEach(ev => {
+    const row = element("tr");
+    const timeTd = element("td", null, formatTime(ev.createdAt));
+    const taskTd = element("td", "code-cell", ev.issue || (ev.category === "supervisor" ? "Supervisor" : "—"));
+    const eventTd = element("td", null, ev.type || ev.state || "—");
+    const statusTd = element("td", null, ev.status || ev.stateKind || "—");
 
-  let status = supervisor.status || "stopped";
-
-  const STATUS_MAP = {
-    running: { label: "Çalışıyor", class: "is-running" },
-    stale: { label: "Stale", class: "is-stale" },
-    stopped: { label: "Durduruldu", class: "is-stopped" },
-    failed: { label: "Başarısız", class: "is-failed" }
-  };
-
-  const statusInfo = STATUS_MAP[status] || { label: status, class: "is-stopped" };
-
-  if (elements.supervisorDot) elements.supervisorDot.className = `supervisor-dot ${statusInfo.class}`;
-  if (elements.supervisorStatusText) elements.supervisorStatusText.textContent = statusInfo.label;
-  if (elements.supervisorPid) elements.supervisorPid.textContent = supervisor.pid ?? "—";
-  if (elements.supervisorMode) elements.supervisorMode.textContent = supervisor.mode || "—";
-  if (elements.supervisorCycles) elements.supervisorCycles.textContent = supervisor.cycleCount ?? 0;
-
-  if (supervisor.lastHeartbeatAt && elements.supervisorHeartbeat) {
-    const nowMs = snapshot.generatedAt ? new Date(snapshot.generatedAt).getTime() : Date.now();
-    const hbMs = new Date(supervisor.lastHeartbeatAt).getTime();
-    const diffSec = Math.max(0, Math.floor((nowMs - hbMs) / 1000));
-    elements.supervisorHeartbeat.textContent = diffSec < 60 ? `${diffSec}sn önce` : formatTime(supervisor.lastHeartbeatAt);
-  } else if (elements.supervisorHeartbeat) {
-    elements.supervisorHeartbeat.textContent = "—";
-  }
-}
-
-function renderActivity() {
-  if (!elements.activity || !state.snapshot) return;
-  const rows = (state.snapshot.activity || []).slice(0, 12).map((event) => {
-    const row = document.createElement("tr");
-    const time = element("td", "", formatTime(event.createdAt, true));
-
-    const isSupervisor = event.category === "supervisor" || !event.issue;
-    const issueText = isSupervisor ? "Supervisor" : (event.issue || "—");
-    const issueCell = element("td", "table-issue", issueText);
-
-    const rawState = event.status || event.state || event.event || event.type || "—";
-    const actionText = STATUS_LABELS[rawState] || rawState;
-    const actionCell = element("td", "", actionText);
-
-    const kindClass = event.stateKind || (
-      ["active", "running", "start", "reclaim"].includes(rawState) ? "active" :
-      ["verifying", "review"].includes(rawState) ? "review" :
-      ["blocked", "failed", "failed-retryable", "failed-scope", "failure", "stale"].includes(rawState) ? "blocked" :
-      "idle"
-    );
-
-    const statusCell = element("td");
-    statusCell.append(element("span", `event-state ${kindClass}`, rawState));
-
-    row.append(time, issueCell, actionCell, statusCell);
-    return row;
+    row.appendChild(timeTd);
+    row.appendChild(taskTd);
+    row.appendChild(eventTd);
+    row.appendChild(statusTd);
+    tbody.appendChild(row);
   });
-
-  elements.activity.replaceChildren(...rows);
 }
 
-// ── View Navigation & URL State Management ───────────────────────────────────
+// PM Workspace Rendering
+function renderPmWorkspace() {
+  const pm = state.snapshot?.pmWorkspace;
+  if (!pm) return;
 
-function updateUrlState(params = {}) {
-  if (typeof window === "undefined" || !window.location || !window.history) return;
-  try {
-    const url = new URL(window.location.href);
-    if (params.view !== undefined) {
-      if (params.view) url.searchParams.set("view", params.view.replace("-view", ""));
-      else url.searchParams.delete("view");
-    }
-    if (params.parent !== undefined) {
-      if (params.parent) url.searchParams.set("parent", params.parent);
-      else url.searchParams.delete("parent");
-    }
-    if (params.issue !== undefined) {
-      if (params.issue) url.searchParams.set("issue", params.issue);
-      else url.searchParams.delete("issue");
-    }
-    if (params.run !== undefined) {
-      if (params.run) url.searchParams.set("run", params.run);
-      else url.searchParams.delete("run");
-    }
-    window.history.replaceState({}, "", url.toString());
-  } catch {}
-}
+  const counts = pm.counts || {};
+  const badgeAttn = getElem("pm-badge-attention");
+  const badgeAppr = getElem("pm-badge-approvals");
+  const statAppr = getElem("pm-stat-approvals");
+  const statBlocked = getElem("pm-stat-blocked");
+  const statExec = getElem("pm-stat-executing");
+  const statReview = getElem("pm-stat-review");
+  const statRework = getElem("pm-stat-rework");
+  const statReady = getElem("pm-stat-ready");
+  const statHuman = getElem("pm-stat-human-approval");
 
-function restoreUrlState() {
-  if (typeof window === "undefined" || !window.location) return;
-  try {
-    const url = new URL(window.location.href);
-    const viewParam = url.searchParams.get("view");
-    const parentParam = url.searchParams.get("parent");
-    const issueParam = url.searchParams.get("issue");
-    const runParam = url.searchParams.get("run");
+  const attentionCount = (counts.blocked || 0) + (counts.needsRework || 0);
+  if (badgeAttn) badgeAttn.textContent = attentionCount;
+  if (badgeAppr) badgeAppr.textContent = counts.awaitingApproval || 0;
+  if (statAppr) statAppr.textContent = counts.awaitingApproval || 0;
+  if (statBlocked) statBlocked.textContent = counts.blocked || 0;
+  if (statExec) statExec.textContent = counts.executing || 0;
+  if (statReview) statReview.textContent = counts.inReview || 0;
+  if (statRework) statRework.textContent = counts.needsRework || 0;
+  if (statReady) statReady.textContent = counts.ready || 0;
+  if (statHuman) statHuman.textContent = counts.humanApproval || 0;
 
-    if (viewParam) {
-      const targetId = viewParam.endsWith("-view") ? viewParam : `${viewParam}-view`;
-      switchView(targetId, false);
-    }
-    if (parentParam) {
-      state.selectedParentKey = parentParam;
-      renderParentsView(parentParam);
-    }
-    if (issueParam) {
-      openDecisionTrace(issueParam);
-    }
-    if (runParam) {
-      openTelemetryDetail(runParam);
-    }
-  } catch {}
-}
+  const filter = state.currentPmFilter;
+  const inboxSec = getElem("pm-inbox-section");
+  const apprSec = getElem("pm-approvals-section");
+  const attnSec = getElem("pm-attention-section");
+  const jourSec = getElem("pm-journal-section");
 
-if (typeof window !== "undefined") {
-  window.addEventListener("popstate", () => restoreUrlState());
-}
+  if (inboxSec) inboxSec.hidden = filter !== "inbox";
+  if (apprSec) apprSec.hidden = filter !== "approvals";
+  if (attnSec) attnSec.hidden = filter !== "attention";
+  if (jourSec) jourSec.hidden = filter !== "journal";
 
-function switchView(targetViewId, updateUrl = true) {
-  if (typeof document === "undefined") return;
-  const tabs = document.querySelectorAll(".tab-button");
-  const contents = document.querySelectorAll(".tab-content");
-  if (!tabs.length) return;
-
-  tabs.forEach(b => b.classList.remove("is-active"));
-  contents.forEach(c => {
-    c.classList.remove("is-active");
-    c.hidden = true;
-  });
-
-  const activeBtn = Array.from(tabs).find(b => b.dataset.target === targetViewId);
-  const activeContent = document.getElementById(targetViewId);
-
-  if (activeBtn) activeBtn.classList.add("is-active");
-  if (activeContent) {
-    activeContent.classList.add("is-active");
-    activeContent.hidden = false;
-  }
-
-  state.currentView = targetViewId;
-  if (updateUrl) {
-    updateUrlState({ view: targetViewId });
-  }
-
-  if (targetViewId === "parents-view") {
-    renderParentsView(state.selectedParentKey);
-  } else if (targetViewId === "pm-view") {
-    renderPmWorkspace();
-  } else if (targetViewId === "observability-view") {
-    renderObservability();
-  } else if (targetViewId === "config-view") {
-    renderConfigView();
-  } else if (targetViewId === "agents-view") {
-    renderAgentDefinitions();
-  }
-}
-
-// ── Overview & Metrics Rendering ────────────────────────────────────────────
-
-function renderOverview() {
-  if (!state.snapshot) return;
-  const snap = state.snapshot;
-  const ws = snap.pmWorkspace || {};
-  const counts = ws.counts || {};
-  const totals = snap.totals || {};
-
-  // Operating Mode
-  const mode = (snap.config?.operatingMode || ws.operatingMode || "AUTONOMOUS").toUpperCase();
-  if (elements.operatingModeLabel) elements.operatingModeLabel.textContent = mode;
-  if (elements.overviewModeBadge) elements.overviewModeBadge.textContent = mode;
-  if (elements.operatingModePill) {
-    elements.operatingModePill.className = `mode-pill mode-${mode.toLowerCase()}`;
-  }
-  if (elements.overviewModeDesc) {
-    if (mode === "MANUAL") {
-      elements.overviewModeDesc.innerHTML = `<strong>MANUAL:</strong> Tüm görev adımları, branch oluşturma ve review süreçleri insan onayına tabidir. Otonom başlatma yapılmaz.`;
-    } else if (mode === "SUPERVISED") {
-      elements.overviewModeDesc.innerHTML = `<strong>SUPERVISED:</strong> Düşük riskli işler otonom yürütülür; yüksek riskli işler ve branch değişiklikleri plan parmak izi korumalı PM onayı bekler.`;
-    } else {
-      elements.overviewModeDesc.innerHTML = `<strong>AUTONOMOUS:</strong> Ready işler otonom yürütülür, review ve parent entegrasyonu otomatik işletilir; nihai Develop merge ve Done geçişi insan kontrolündedir.`;
-    }
-  }
-
-  // Supervisor Status
-  renderSupervisor();
-
-  // Truthful Top Metrics
-  if (elements.metricActive) elements.metricActive.textContent = counts.executing || 0;
-  if (elements.metricQueued) elements.metricQueued.textContent = counts.ready || 0;
-  if (elements.metricReview) elements.metricReview.textContent = counts.inReview || 0;
-  if (elements.metricRework) elements.metricRework.textContent = counts.needsRework || 0;
-  if (elements.metricBlocked) elements.metricBlocked.textContent = counts.blocked || 0;
-  if (elements.metricAwaitingApproval) elements.metricAwaitingApproval.textContent = counts.awaitingApproval || 0;
-  if (elements.metricHumanApproval) elements.metricHumanApproval.textContent = counts.humanApproval || 0;
-
-  // Active Parents & Conflicts
-  const parents = snap.parentExecutions || [];
-  const activeParentsCount = parents.filter(p => ["active", "integrating", "waiting_approval", "in_review"].includes(p.state)).length;
-  if (elements.metricActiveParents) elements.metricActiveParents.textContent = activeParentsCount || parents.length || 0;
-
-  let conflictCount = 0;
-  parents.forEach(p => {
-    if (p.driftDetected) conflictCount++;
-  });
-  if (elements.metricParentConflicts) {
-    elements.metricParentConflicts.textContent = conflictCount > 0 ? `${conflictCount} çatışma` : "0 çatışma";
-  }
-
-  // Token Usage (Truthful: show unavailable if unknown)
-  if (elements.metricTokens) {
-    if (totals.tokens != null && totals.tokens > 0) {
-      elements.metricTokens.textContent = formatNumber(totals.tokens);
-    } else {
-      elements.metricTokens.textContent = "—";
-    }
-  }
-
-  if (elements.project) elements.project.textContent = snap.project || "PACE";
-
-  // Capacity & Providers
-  renderCapacity();
-  renderControlPlane();
-
-  // Fleet Runs grid & Activity stream
-  renderRuns();
-  renderActivity();
-}
-
-// ── Parent Orchestration View ───────────────────────────────────────────────
-
-async function renderParentsView(selectedKey = null) {
-  const select = document.querySelector("#parent-select");
-  const summaryCard = document.querySelector("#parent-summary-card");
-  const humanCard = document.querySelector("#parent-human-approval-card");
-  const dagContainer = document.querySelector("#parent-dag-container");
-  const textFallback = document.querySelector("#parent-dag-text-fallback");
-  const intLane = document.querySelector("#parent-integration-lane");
-  if (!select) return;
-
-  try {
-    let parents = state.snapshot?.parentExecutions || [];
-    if (parents.length === 0) {
-      const res = await fetch("/api/pm/parents");
-      if (res.ok) {
-        const data = await res.json();
-        if (data.ok && Array.isArray(data.parents)) parents = data.parents;
+  if (typeof document !== "undefined") {
+    const filterBtns = document.querySelectorAll(".pm-sub-nav .pm-filter-btn");
+    filterBtns.forEach(btn => {
+      if (btn.dataset.pmFilter === filter) {
+        btn.classList.add("is-active");
+      } else {
+        btn.classList.remove("is-active");
       }
+    });
+  }
+
+  if (filter === "inbox") {
+    renderPmInbox(pm.groups);
+  } else if (filter === "approvals") {
+    renderPmApprovals(pm.groups?.awaitingApproval || []);
+  } else if (filter === "attention") {
+    const items = [...(pm.groups?.blocked || []), ...(pm.groups?.needsRework || [])];
+    renderPmAttention(items);
+  } else if (filter === "journal") {
+    renderPmJournal();
+  }
+}
+
+function renderPmInbox(groups = {}) {
+  const container = getElem("pm-queue-container");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const groupKeys = [
+    ["awaitingApproval", "🛡️ Onay Bekleyenler (Awaiting Approval)", "approval"],
+    ["humanApproval", "🏁 İnsan Onay Kapısı (Ready for Human Approval)", "human"],
+    ["blocked", "🛑 Bloke / Müdahale Gerekenler", "blocked"],
+    ["needsRework", "🔄 Rework / Düzeltme Aşamasında", "rework"],
+    ["executing", "⚡ Yürütülüyor (Executing)", "active"],
+    ["inReview", "👁️ Review Aşamasında", "review"],
+    ["ready", "✨ Agent Ready (Kuyrukta)", "ready"],
+    ["needsPlanning", "📝 Planlama Bekleyenler", "idle"]
+  ];
+
+  let totalRendered = 0;
+
+  groupKeys.forEach(([key, title, style]) => {
+    const items = groups[key] || [];
+    if (items.length === 0) return;
+    totalRendered += items.length;
+
+    const section = element("div", "pm-group-block");
+    const header = element("div", "pm-group-header");
+    const titleSpan = element("h4", null, title);
+    const countBadge = element("span", "badge badge-count", String(items.length));
+    header.appendChild(titleSpan);
+    header.appendChild(countBadge);
+    section.appendChild(header);
+
+    const list = element("div", "pm-items-grid");
+    items.forEach(item => {
+      list.appendChild(createPmItemCard(item, style));
+    });
+    section.appendChild(list);
+    container.appendChild(section);
+  });
+
+  if (totalRendered === 0) {
+    const empty = element("div", "empty-state");
+    empty.appendChild(element("p", null, "Operasyonel iş kuyruğunda bekleyen paket yok."));
+    container.appendChild(empty);
+  }
+}
+
+function renderPmApprovals(items = []) {
+  const list = getElem("pm-approvals-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (items.length === 0) {
+    const empty = element("div", "empty-state");
+    empty.appendChild(element("p", null, "Şu anda onay bekleyen yürütme planı yok."));
+    list.appendChild(empty);
+    return;
+  }
+
+  items.forEach(item => {
+    list.appendChild(createPmItemCard(item, "approval", true));
+  });
+}
+
+function renderPmAttention(items = []) {
+  const list = getElem("pm-attention-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (items.length === 0) {
+    const empty = element("div", "empty-state");
+    empty.appendChild(element("p", null, "Müdahale veya dikkat gerektiren bir durum yok."));
+    list.appendChild(empty);
+    return;
+  }
+
+  items.forEach(item => {
+    list.appendChild(createPmItemCard(item, "blocked", true));
+  });
+}
+
+function createPmItemCard(item, styleClass, showActions = false) {
+  const card = element("div", `pm-item-card ${styleClass}`);
+  card.dataset = card.dataset || {};
+  card.dataset.issueKey = item.issueKey;
+
+  const top = element("div", "pm-item-top");
+  const keyBadge = element("span", "badge badge-key", item.issueKey);
+  const stateBadge = element("span", `state-badge ${styleClass}`, STATUS_LABELS[item.canonicalState] || item.canonicalState || item.currentRunState || "—");
+  top.appendChild(keyBadge);
+  top.appendChild(stateBadge);
+
+  const summary = element("h4", "pm-item-summary", item.summary || "Açıklama yok");
+
+  const meta = element("div", "pm-item-meta");
+  if (item.persona) meta.appendChild(element("span", null, `Persona: ${item.persona}`));
+  if (item.taskAgent) meta.appendChild(element("span", null, `Agent: ${item.taskAgent}`));
+  if (item.executorProvider) meta.appendChild(element("span", null, `${item.executorProvider} · ${item.executorModel || "default"}`));
+  if (item.risk) meta.appendChild(element("span", "badge-risk", `Risk: ${item.risk}`));
+
+  card.appendChild(top);
+  card.appendChild(summary);
+  card.appendChild(meta);
+
+  if (item.blockedReason) {
+    const blk = element("div", "pm-item-blocker", `🛑 ${item.blockedReason}`);
+    card.appendChild(blk);
+  }
+
+  if (item.planFingerprint) {
+    const fp = element("div", "pm-item-fp", `FP: ${item.planFingerprint.slice(0, 12)}...`);
+    card.appendChild(fp);
+  }
+
+  const actions = element("div", "pm-item-actions");
+  const viewBtn = element("button", "pm-btn pm-btn-view", "İncele");
+  viewBtn.type = "button";
+  if (typeof viewBtn.addEventListener === "function") {
+    viewBtn.addEventListener("click", () => {
+      openDecisionTrace(item.issueKey);
+    });
+  }
+  actions.appendChild(viewBtn);
+
+  if (item.humanActionRequired || item.action || showActions || item.operationalGroup === "awaitingApproval") {
+    const approveBtn = element("button", "pm-btn pm-btn-approve", "✓ Onayla");
+    approveBtn.type = "button";
+    if (typeof approveBtn.addEventListener === "function") {
+      approveBtn.addEventListener("click", () => {
+        openApprovalModal(item, approveBtn);
+      });
     }
+    actions.appendChild(approveBtn);
 
-    select.innerHTML = parents.length === 0
-      ? '<option value="">Kayıtlı parent / epic bulunamadı</option>'
-      : parents.map(p => `<option value="${safeHtml(p.parentKey)}" ${p.parentKey === selectedKey ? 'selected' : ''}>${safeHtml(p.parentKey)} — ${safeHtml(p.summary || p.parentKey)} (${safeHtml(p.state)})</option>`).join("");
+    const rejectBtn = element("button", "pm-btn pm-btn-reject", "✕ Reddet");
+    rejectBtn.type = "button";
+    if (typeof rejectBtn.addEventListener === "function") {
+      rejectBtn.addEventListener("click", () => {
+        openRejectionModal(item, rejectBtn);
+      });
+    }
+    actions.appendChild(rejectBtn);
+  }
 
-    const activeKey = selectedKey || (parents.length > 0 ? parents[0].parentKey : null);
-    if (!activeKey) {
-      if (summaryCard) summaryCard.innerHTML = `<div style="padding: 20px; color: var(--muted);">Aktif parent orkestrasyon kaydı bulunamadı.</div>`;
-      if (dagContainer) dagContainer.innerHTML = "";
-      if (intLane) intLane.innerHTML = "";
+  card.appendChild(actions);
+  return card;
+}
+
+function renderPmJournal() {
+  const messagesEl = getElem("pm-messages");
+  const decisionsEl = getElem("pm-decisions");
+  const msgs = state.snapshot?.pmMessages || [];
+  const decs = state.snapshot?.pmDecisions || [];
+
+  if (messagesEl) {
+    messagesEl.innerHTML = "";
+    if (msgs.length === 0) {
+      messagesEl.appendChild(element("p", "empty-text", "Henüz PM mesajı yok."));
+    } else {
+      msgs.slice(0, 30).forEach(m => {
+        const block = element("div", `pm-msg ${m.sender === "user" ? "user-msg" : "system-msg"}`);
+        const hdr = element("small", null, `${m.sender} · ${formatTime(m.createdAt)}`);
+        const body = element("p", null, m.content || m.text || "");
+        block.appendChild(hdr);
+        block.appendChild(body);
+        messagesEl.appendChild(block);
+      });
+    }
+  }
+
+  if (decisionsEl) {
+    decisionsEl.innerHTML = "";
+    if (decs.length === 0) {
+      decisionsEl.appendChild(element("p", "empty-text", "Henüz kayıtlı karar yok."));
+    } else {
+      decs.slice(0, 30).forEach(d => {
+        const item = element("div", "decision-item");
+        const hdr = element("strong", null, `${d.issueKey || "GENEL"}: ${d.type}`);
+        const time = element("small", null, formatTime(d.createdAt));
+        item.appendChild(hdr);
+        item.appendChild(time);
+        if (d.payload) {
+          const desc = element("p", null, typeof d.payload === "string" ? d.payload : JSON.stringify(d.payload));
+          item.appendChild(desc);
+        }
+        decisionsEl.appendChild(item);
+      });
+    }
+  }
+}
+
+// Work Item Decision Trace Drawer
+async function openDecisionTrace(issueKey, fromHistory = false) {
+  if (!issueKey) return;
+  state.selectedWorkItemKey = issueKey;
+
+  const modal = getElem("decision-trace-modal");
+  const title = getElem("trace-drawer-title");
+  const pill = getElem("trace-issue-pill");
+  const summaryEl = getElem("trace-issue-summary");
+  const body = getElem("trace-drawer-body");
+
+  if (!modal || !body) return;
+
+  if (pill) pill.textContent = issueKey;
+  if (title) title.textContent = `Work Item Decision Trace · ${issueKey}`;
+  if (summaryEl) summaryEl.textContent = "Detaylar yükleniyor...";
+  body.innerHTML = '<div class="loading-spinner">Yükleniyor...</div>';
+
+  openModal("decision-trace-modal");
+
+  if (!fromHistory) {
+    syncUrlState(false);
+  }
+
+  try {
+    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(issueKey)}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    renderDecisionTraceDetail(data);
+  } catch (err) {
+    body.innerHTML = `<div class="error-banner">Karar izi yüklenemedi: ${safeHtml(err.message)}</div>`;
+  }
+}
+
+function renderDecisionTraceDetail(data) {
+  const summaryEl = getElem("trace-issue-summary");
+  const body = getElem("trace-drawer-body");
+  if (!body) return;
+  body.innerHTML = "";
+
+  const wi = data.workItem || {};
+  const orch = data.orchestratorDecision || {};
+  const exec = data.execution || {};
+  const rev = data.review || {};
+  const human = data.humanControl || {};
+  const blk = data.blockedInfo || {};
+  const history = data.history || [];
+
+  if (summaryEl) summaryEl.textContent = wi.summary || "Açıklama yok";
+
+  const wiSection = element("div", "trace-section");
+  wiSection.appendChild(element("h3", "trace-section-title", "1. Work Item Özeti"));
+  const wiGrid = element("div", "trace-grid");
+  wiGrid.appendChild(createTraceCell("Key", wi.key));
+  wiGrid.appendChild(createTraceCell("Kanonik Durum", wi.canonicalState));
+  wiGrid.appendChild(createTraceCell("Kaynak Sağlayıcı", wi.sourceProvider || "jira"));
+  wiGrid.appendChild(createTraceCell("Otonom İlerlenebilir", wi.autonomousEligible ? "Evet" : "Hayır"));
+  wiSection.appendChild(wiGrid);
+  body.appendChild(wiSection);
+
+  const orchSection = element("div", "trace-section");
+  orchSection.appendChild(element("h3", "trace-section-title", "2. Orkestrasyon ve Planlama Kararı"));
+  const orchGrid = element("div", "trace-grid");
+  orchGrid.appendChild(createTraceCell("Persona", orch.persona || "—"));
+  orchGrid.appendChild(createTraceCell("Task Agent", orch.taskAgent || "—"));
+  orchGrid.appendChild(createTraceCell("Risk", orch.risk || "normal"));
+  orchGrid.appendChild(createTraceCell("Plan Parmak İzi", orch.planFingerprint ? orch.planFingerprint.slice(0, 16) + "..." : "—"));
+  orchGrid.appendChild(createTraceCell("İzinli Yollar", Array.isArray(orch.allowedPaths) ? orch.allowedPaths.join(", ") : "—"));
+  orchGrid.appendChild(createTraceCell("Bağımlılıklar", Array.isArray(orch.dependencies) && orch.dependencies.length ? orch.dependencies.join(", ") : "Bağımsız"));
+  orchSection.appendChild(orchGrid);
+  body.appendChild(orchSection);
+
+  const execSection = element("div", "trace-section");
+  execSection.appendChild(element("h3", "trace-section-title", "3. Yürütme Motoru ve Worktree"));
+  const execGrid = element("div", "trace-grid");
+  execGrid.appendChild(createTraceCell("Provider / Model", `${exec.provider || "—"} / ${exec.model || "—"}`));
+  execGrid.appendChild(createTraceCell("Branch", exec.branch || "—"));
+  execGrid.appendChild(createTraceCell("Worktree", exec.worktree || "—"));
+  execGrid.appendChild(createTraceCell("Commit SHA", exec.commit || "—"));
+  execGrid.appendChild(createTraceCell("Deneme (Attempt)", String(exec.attempt ?? "0")));
+  execSection.appendChild(execGrid);
+  body.appendChild(execSection);
+
+  const revSection = element("div", "trace-section");
+  revSection.appendChild(element("h3", "trace-section-title", "4. Reviewer ve Doğrulama Bulguları"));
+  const revGrid = element("div", "trace-grid");
+  revGrid.appendChild(createTraceCell("Reviewer Agent", rev.reviewerTaskAgent || "—"));
+  revGrid.appendChild(createTraceCell("Verdict", rev.verdict || "Henüz verilmedi"));
+  revGrid.appendChild(createTraceCell("İncelenen SHA", rev.latestImplementationSha || "—"));
+  revSection.appendChild(revGrid);
+
+  if (rev.structuredFindings && Array.isArray(rev.structuredFindings) && rev.structuredFindings.length > 0) {
+    const findingsList = element("ul", "trace-findings-list");
+    rev.structuredFindings.forEach(f => {
+      const li = element("li", null, typeof f === "string" ? f : `${f.severity || "INFO"}: ${f.message || JSON.stringify(f)}`);
+      findingsList.appendChild(li);
+    });
+    revSection.appendChild(findingsList);
+  }
+  body.appendChild(revSection);
+
+  const humanSection = element("div", "trace-section");
+  humanSection.appendChild(element("h3", "trace-section-title", "5. İnsan Kontrol ve Onay Kapısı"));
+  const humanGrid = element("div", "trace-grid");
+  humanGrid.appendChild(createTraceCell("İnsan Aksiyonu Gerekli", human.humanActionRequired ? "EVET" : "HAYIR"));
+  humanGrid.appendChild(createTraceCell("Bekleyen Aksiyon", human.pendingAction || "Yok"));
+  humanGrid.appendChild(createTraceCell("Onay Durumu", human.approvalState || "not_required"));
+  humanGrid.appendChild(createTraceCell("Çalışma Modu", human.operatingMode || "AUTONOMOUS"));
+  humanSection.appendChild(humanGrid);
+  body.appendChild(humanSection);
+
+  if (blk.isBlocked) {
+    const blkSection = element("div", "trace-section trace-blocked-box");
+    blkSection.appendChild(element("h3", "trace-section-title", "🛑 Bloke Durumu ve Teşhis"));
+    const blkGrid = element("div", "trace-grid");
+    blkGrid.appendChild(createTraceCell("Gerekçe", blk.reason || "Bilinmiyor"));
+    blkGrid.appendChild(createTraceCell("Tekrar Denenebilir", blk.canRetry ? "Evet" : "Hayır"));
+    blkGrid.appendChild(createTraceCell("Onaylanabilir", blk.canApprove ? "Evet" : "Hayır"));
+    blkSection.appendChild(blkGrid);
+    body.appendChild(blkSection);
+  }
+
+  const histSection = element("div", "trace-section");
+  histSection.appendChild(element("h3", "trace-section-title", "6. Denetlenebilir Olay Zaman Çizelgesi"));
+  if (history.length === 0) {
+    histSection.appendChild(element("p", "empty-text", "Zaman çizelgesi boş."));
+  } else {
+    const timeline = element("div", "trace-timeline");
+    history.forEach(item => {
+      const step = element("div", "timeline-step");
+      const dot = element("span", "timeline-dot");
+      const content = element("div", "timeline-content");
+      const time = element("small", null, formatTime(item.timestamp || item.createdAt));
+      const stage = element("strong", null, `${item.stage || item.state}: `);
+      const desc = element("span", null, item.message || JSON.stringify(item.payload || {}));
+      content.appendChild(time);
+      content.appendChild(stage);
+      content.appendChild(desc);
+      step.appendChild(dot);
+      step.appendChild(content);
+      timeline.appendChild(step);
+    });
+    histSection.appendChild(timeline);
+  }
+  body.appendChild(histSection);
+}
+
+function createTraceCell(label, value) {
+  const cell = element("div", "trace-cell");
+  cell.appendChild(element("span", "trace-cell-label", label));
+  cell.appendChild(element("strong", "trace-cell-value", value !== null && value !== undefined && value !== "" ? String(value) : "—"));
+  return cell;
+}
+
+// Approval & Rejection Modals
+function openApprovalModal(item, triggerBtn = null) {
+  state.pendingApprovalItem = item;
+  const issueEl = getElem("app-modal-issue");
+  const actionEl = getElem("app-modal-action");
+  const agentEl = getElem("app-modal-agent");
+  const riskEl = getElem("app-modal-risk");
+  const provEl = getElem("app-modal-provider");
+  const pathsEl = getElem("app-modal-paths");
+  const fpEl = getElem("app-modal-fp");
+  const statusEl = getElem("approval-modal-status");
+  const confirmBtn = getElem("approval-modal-confirm-btn");
+  const cancelBtn = getElem("approval-modal-cancel-btn");
+
+  if (issueEl) issueEl.textContent = item.issueKey || "—";
+  if (actionEl) actionEl.textContent = item.action || "implementation";
+  if (agentEl) agentEl.textContent = item.taskAgent || item.persona || "—";
+  if (riskEl) riskEl.textContent = item.risk || "normal";
+  if (provEl) provEl.textContent = `${item.executorProvider || "default"} / ${item.executorModel || "default"}`;
+  if (pathsEl) pathsEl.textContent = Array.isArray(item.allowedPaths) ? item.allowedPaths.join(", ") : "—";
+  if (fpEl) fpEl.textContent = item.planFingerprint || "—";
+  if (statusEl) { statusEl.hidden = true; statusEl.textContent = ""; }
+
+  if (confirmBtn) confirmBtn.disabled = false;
+  if (cancelBtn) cancelBtn.disabled = false;
+
+  openModal("approval-modal", triggerBtn);
+}
+
+async function submitApproval() {
+  const item = state.pendingApprovalItem;
+  if (!item) return;
+
+  const confirmBtn = getElem("approval-modal-confirm-btn");
+  const cancelBtn = getElem("approval-modal-cancel-btn");
+  const statusEl = getElem("approval-modal-status");
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "modal-status-msg is-loading";
+    statusEl.textContent = "Onay kaydediliyor...";
+  }
+
+  try {
+    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: item.action || "implementation",
+        planFingerprint: item.planFingerprint,
+        attempt: item.reworkAttempt || 0,
+        approver: "pm-operator"
+      })
+    });
+
+    if (res.status === 409) {
+      const data = await res.json().catch(() => ({}));
+      if (statusEl) {
+        statusEl.className = "modal-status-msg is-error";
+        statusEl.textContent = `409 Çakışma: Plan parmak izi değişmiş (${data.error || "Plan güncellendi"}). Çalışma alanı yenileniyor...`;
+      }
+      await fetchSnapshot();
       return;
     }
 
-    state.selectedParentKey = activeKey;
-    updateUrlState({ parent: activeKey });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);
+    }
 
-    const detailRes = await fetch(`/api/pm/parents/${activeKey}`);
-    if (!detailRes.ok) throw new Error("Parent detay bilgisi alınamadı");
-    const detailData = await detailRes.json();
-    if (!detailData.ok) throw new Error(detailData.error || "Detay verisi geçersiz");
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-success";
+      statusEl.textContent = "✓ Onay başarıyla kaydedildi.";
+    }
 
-    const parent = detailData.parent;
-    renderParentSummary(parent, summaryCard, humanCard);
-    renderParentDag(parent, dagContainer, textFallback);
-    renderParentIntegrationLane(parent, intLane);
-
+    setTimeout(() => {
+      closeModal("approval-modal");
+      state.pendingApprovalItem = null;
+      fetchSnapshot();
+    }, 700);
   } catch (err) {
-    if (summaryCard) {
-      summaryCard.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = `Hata: ${err.message}`;
     }
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
   }
 }
 
-function renderParentSummary(parent, cardEl, humanCardEl) {
-  if (!cardEl) return;
-  const p = parent.parent || parent;
-  const stateVal = (parent.state || p.state || "active").toLowerCase();
+function openRejectionModal(item, triggerBtn = null) {
+  state.pendingRejectionItem = item;
+  const reasonInput = getElem("rejection-reason-input");
+  const statusEl = getElem("rejection-modal-status");
+  const confirmBtn = getElem("rejection-modal-confirm-btn");
+  const cancelBtn = getElem("rejection-modal-cancel-btn");
 
-  // WAITING_HUMAN Completion Evidence Banner
-  if (humanCardEl) {
-    if (stateVal === "waiting_human" || parent.waitingHuman) {
-      humanCardEl.hidden = false;
-      const review = parent.integrationReview || parent.completionPacket?.integrationReview;
-      humanCardEl.innerHTML = `
-        <div class="human-badge">★ HAZIR · İNSAN ONAYI BEKLİYOR</div>
-        <h4 style="margin: 0 0 8px 0; color: #fff; font-size: 1.05rem;">Parent Entegrasyonu Tamamlandı — Geliştirme Dalına Merge Bekliyor</h4>
-        <p style="margin: 0 0 12px 0; color: #cbd5e1; font-size: 0.85rem; line-height: 1.4;">
-          Tüm alt görevler başarıyla entegre edildi ve aggregate reviewer tarafından doğrulandı. Otonom teslimat tamamlanmıştır.
-          <strong>Güvenlik Sınırı:</strong> Otomatik merge veya deploy butonu bulunmaz; nihai <code>develop</code> merge ve <code>Done</code> geçişi insan kontrolündedir.
-        </p>
-        <div style="background: rgba(0,0,0,0.3); border-radius: 6px; padding: 10px; font-size: 0.8rem;">
-          <div><strong>Branch:</strong> <code>${safeHtml(parent.integrationBranch || p.integrationBranch || '—')}</code> (SHA: <code>${safeHtml(parent.integrationHeadSha?.slice(0, 8) || '—')}</code>)</div>
-          <div><strong>Reviewer:</strong> ${safeHtml(review?.reviewerId || 'lead-reviewer')} · <strong>Verdict:</strong> <span style="color: #4ade80; font-weight: bold;">${safeHtml(review?.verdict?.toUpperCase() || 'CLEAN')}</span> · <strong>Süre:</strong> ${review?.durationMs ? Math.round(review.durationMs / 1000) + 's' : '—'}</div>
-        </div>
-      `;
-    } else {
-      humanCardEl.hidden = true;
-      humanCardEl.innerHTML = "";
-    }
-  }
+  if (reasonInput) reasonInput.value = "";
+  if (statusEl) { statusEl.hidden = true; statusEl.textContent = ""; }
+  if (confirmBtn) confirmBtn.disabled = false;
+  if (cancelBtn) cancelBtn.disabled = false;
 
-  // Blocked / Hierarchy Drift notice
-  let blockedHtml = "";
-  if (Array.isArray(parent.blockedReasons) && parent.blockedReasons.length > 0) {
-    blockedHtml = `
-      <div class="blocked-reasons-panel">
-        <strong>⚠️ Parent Orkestrasyon Engelleri:</strong>
-        <ul style="margin: 4px 0 0 16px; padding: 0;">
-          ${parent.blockedReasons.map(r => `<li>${safeHtml(r)}</li>`).join("")}
-        </ul>
-      </div>
-    `;
-  }
-
-  cardEl.innerHTML = `
-    <div class="parent-summary-top">
-      <div>
-        <h3 class="parent-title">${safeHtml(p.parentKey || parent.parentKey)}: ${safeHtml(p.summary || parent.summary || '')}</h3>
-        <div style="font-size: 0.8rem; color: var(--muted); margin-top: 4px;">
-          Kaynak: <strong>${safeHtml(p.sourceProvider || 'jira').toUpperCase()}</strong> · Base: <code>${safeHtml(parent.baseRef || 'develop')}</code>
-          (${parent.baseSha ? `<code>${parent.baseSha.slice(0, 8)}</code>` : '—'})
-        </div>
-      </div>
-      <div>
-        <span class="badge status-${safeHtml(stateVal)}">${safeHtml(STATUS_LABELS[stateVal] || stateVal.toUpperCase())}</span>
-      </div>
-    </div>
-
-    ${blockedHtml}
-
-    <div class="parent-meta-grid">
-      <div class="parent-meta-cell">
-        <span>Integration Branch</span>
-        <strong><code>${safeHtml(parent.integrationBranch || p.integrationBranch || '—')}</code></strong>
-      </div>
-      <div class="parent-meta-cell">
-        <span>Integration Head SHA</span>
-        <strong><code>${safeHtml(parent.integrationHeadSha?.slice(0, 10) || '—')}</code></strong>
-      </div>
-      <div class="parent-meta-cell">
-        <span>Graph Fingerprint</span>
-        <strong title="${safeHtml(parent.graphFingerprint || '')}"><code>${safeHtml(parent.graphFingerprint?.slice(0, 12) || '—')}</code></strong>
-      </div>
-      <div class="parent-meta-cell">
-        <span>Alt Görev Sayısı</span>
-        <strong>${parent.children?.length || 0} Child Tasks</strong>
-      </div>
-    </div>
-  `;
+  openModal("rejection-modal", triggerBtn);
 }
 
-function renderParentDag(parent, containerEl, textFallbackEl) {
-  if (!containerEl) return;
-  const children = parent.children || [];
+async function submitRejection() {
+  const item = state.pendingRejectionItem;
+  if (!item) return;
 
-  if (children.length === 0) {
-    containerEl.innerHTML = `<div style="padding: 24px; color: var(--muted); font-size: 0.85rem;">Bu parent altında kayıtlı child task bulunmuyor.</div>`;
-    if (textFallbackEl) textFallbackEl.textContent = "Bağlı alt görev yok.";
+  const reasonInput = getElem("rejection-reason-input");
+  const confirmBtn = getElem("rejection-modal-confirm-btn");
+  const cancelBtn = getElem("rejection-modal-cancel-btn");
+  const statusEl = getElem("rejection-modal-status");
+
+  const reason = reasonInput ? reasonInput.value.trim() : "";
+  if (!reason) {
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = "Lütfen bir reddetme gerekçesi belirtin.";
+    }
     return;
   }
 
-  // Render Accessible Text Fallback
-  if (textFallbackEl) {
-    const lines = children.map(c => {
-      const deps = c.dependencies?.length ? ` [Bağımlılıklar: ${c.dependencies.join(", ")}]` : " [Bağımsız]";
-      return `${c.issueKey}: ${c.summary} (${c.runtimeState || 'idle'}) - Entegrasyon: ${c.integrationState}${deps}`;
-    });
-    textFallbackEl.textContent = lines.join("\n");
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "modal-status-msg is-loading";
+    statusEl.textContent = "Red işlemi kaydediliyor...";
   }
 
-  // Partition Independent vs Dependent nodes
+  try {
+    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(item.issueKey)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: item.action || "implementation",
+        planFingerprint: item.planFingerprint,
+        reason,
+        approver: "pm-operator"
+      })
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);
+    }
+
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-success";
+      statusEl.textContent = "✓ Reddedildi ve iş bloke edildi.";
+    }
+
+    setTimeout(() => {
+      closeModal("rejection-modal");
+      state.pendingRejectionItem = null;
+      fetchSnapshot();
+    }, 700);
+  } catch (err) {
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = `Hata: ${err.message}`;
+    }
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
+  }
+}
+
+// Parent Orchestration & Child DAG
+function populateParentSelector() {
+  const select = getElem("parent-select");
+  if (!select) return;
+
+  const parents = state.snapshot?.parentExecutions || [];
+  select.innerHTML = "";
+
+  if (parents.length === 0) {
+    const opt = element("option", null, "Kayıtlı parent epik bulunamadı");
+    opt.value = "";
+    select.appendChild(opt);
+    return;
+  }
+
+  const defaultOpt = element("option", null, "-- Parent Epik Seçin --");
+  defaultOpt.value = "";
+  select.appendChild(defaultOpt);
+
+  parents.forEach(p => {
+    const pKey = p.parentKey || p.key;
+    const opt = element("option", null, `${pKey}: ${p.summary || "Epik"}`);
+    opt.value = pKey;
+    if (state.selectedParentKey === pKey) {
+      opt.selected = true;
+    }
+    select.appendChild(opt);
+  });
+
+  if (!state.selectedParentKey && parents.length > 0) {
+    const firstKey = parents[0].parentKey || parents[0].key;
+    state.selectedParentKey = firstKey;
+    select.value = firstKey;
+    fetchParentDetail(firstKey);
+  }
+}
+
+async function fetchParentDetail(parentKey) {
+  if (!parentKey) return;
+  state.selectedParentKey = parentKey;
+
+  const select = getElem("parent-select");
+  if (select && select.value !== parentKey) {
+    select.value = parentKey;
+  }
+
+  try {
+    const res = await fetch(`/api/pm/parents/${encodeURIComponent(parentKey)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderParentDetail(data);
+  } catch (err) {
+    const summaryText = getElem("parent-summary-text");
+    if (summaryText) summaryText.textContent = `Parent yüklenemedi: ${err.message}`;
+  }
+}
+
+function renderParentDetail(data) {
+  const parent = data.parent || {};
+  const stateVal = data.state || "active";
+  const children = data.children || [];
+  const blockedReasons = data.blockedReasons || [];
+  const isWaitingHuman = Boolean(data.waitingHuman) || stateVal === "waiting_human" || stateVal === "human_approval";
+
+  const keyBadge = getElem("parent-key-badge");
+  const summaryText = getElem("parent-summary-text");
+  const statePillEl = getElem("parent-state-pill");
+  const baseSha = getElem("parent-base-sha");
+  const intBranch = getElem("parent-int-branch");
+  const intHeadSha = getElem("parent-int-head-sha");
+  const graphFp = getElem("parent-graph-fp");
+  const blockersBox = getElem("parent-blockers-container");
+
+  if (keyBadge) keyBadge.textContent = parent.parentKey || parent.key || "—";
+  if (summaryText) summaryText.textContent = parent.summary || "Parent Epik";
+  if (statePillEl) {
+    statePillEl.textContent = STATUS_LABELS[stateVal] || stateVal.toUpperCase();
+    statePillEl.className = `state-pill ${stateVal}`;
+  }
+  if (baseSha) baseSha.textContent = data.baseSha ? `${data.baseRef || "develop"} @ ${data.baseSha.slice(0, 8)}` : (data.baseRef || "develop");
+  if (intBranch) intBranch.textContent = data.integrationBranch || "—";
+  if (intHeadSha) intHeadSha.textContent = data.integrationHeadSha ? data.integrationHeadSha.slice(0, 8) : "—";
+  if (graphFp) graphFp.textContent = data.graphFingerprint ? data.graphFingerprint.slice(0, 12) + "..." : "—";
+
+  if (blockersBox) {
+    if (blockedReasons.length > 0) {
+      blockersBox.hidden = false;
+      blockersBox.innerHTML = `<strong>🛑 Parent Blockerları:</strong><ul>${blockedReasons.map(r => `<li>${safeHtml(r)}</li>`).join("")}</ul>`;
+    } else {
+      blockersBox.hidden = true;
+      blockersBox.innerHTML = "";
+    }
+  }
+
+  const compCard = getElem("parent-human-approval-card");
+  if (compCard) {
+    if (isWaitingHuman) {
+      compCard.hidden = false;
+      const cFp = getElem("comp-graph-fp");
+      const cBase = getElem("comp-base-sha");
+      const cHead = getElem("comp-int-head");
+      const cRev = getElem("comp-review-verdict");
+
+      if (cFp) cFp.textContent = data.graphFingerprint ? data.graphFingerprint.slice(0, 12) + "..." : "—";
+      if (cBase) cBase.textContent = data.baseSha ? data.baseSha.slice(0, 10) : "—";
+      if (cHead) cHead.textContent = data.integrationHeadSha ? data.integrationHeadSha.slice(0, 10) : "—";
+      if (cRev) cRev.textContent = data.integrationReview?.verdict || "CLEAN";
+    } else {
+      compCard.hidden = true;
+    }
+  }
+
+  renderChildDag(children);
+  renderIntegrationLane(children, data.integrationBranch);
+  renderParentReviewFindings(data);
+}
+
+function renderChildDag(children = []) {
+  const container = getElem("parent-dag-container");
+  const textFallback = getElem("parent-dag-text-fallback");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (children.length === 0) {
+    container.appendChild(element("div", "empty-state", "Bu parent epikte child task yok."));
+    if (textFallback) textFallback.textContent = "Child task bulunamadı.";
+    return;
+  }
+
+  if (textFallback) {
+    const lines = children.map(c => {
+      const deps = c.dependencies && c.dependencies.length > 0 ? ` (Bağımlı: ${c.dependencies.join(", ")})` : " (Bağımsız / Paralel)";
+      return `• ${c.issueKey}: ${c.summary || "Task"} | Durum: ${c.runtimeState || c.orchestrationState || "eligible"} | Entegrasyon: ${c.integrationState || "not-queued"}${deps}`;
+    });
+    textFallback.textContent = lines.join("\n");
+  }
+
   const independent = children.filter(c => !c.dependencies || c.dependencies.length === 0);
   const dependent = children.filter(c => c.dependencies && c.dependencies.length > 0);
 
-  function renderDagNode(c) {
-    const stateClass = c.integrationState === "integrated"
-      ? "state-integrated"
-      : c.integrationState === "conflict" || c.runtimeState?.includes("conflict")
-        ? "state-conflict"
-        : c.runtimeState?.includes("blocked")
-          ? "state-blocked"
-          : c.runtimeState === "executing"
-            ? "state-executing"
-            : c.runtimeState === "reviewing" || c.runtimeState === "verifying"
-              ? "state-review"
-              : "state-idle";
+  const wave1Box = element("div", "dag-wave");
+  wave1Box.appendChild(element("h4", "dag-wave-title", "Dalga 1 (Paralel / Bağımsız Tasklar)"));
+  const wave1Grid = element("div", "dag-nodes-grid");
+  independent.forEach(c => wave1Grid.appendChild(createDagNode(c)));
+  wave1Box.appendChild(wave1Grid);
+  container.appendChild(wave1Box);
 
-    const depsBadge = c.dependencies?.length
-      ? `<span class="dep-badge">Bağımlı: ${safeHtml(c.dependencies.join(", "))}</span>`
-      : `<span class="dep-badge" style="background: rgba(255,255,255,0.05);">Bağımsız</span>`;
-
-    const conflictMsg = c.blockedReasons?.length
-      ? `<div style="color: #f87171; font-size: 0.72rem; margin-top: 4px;">⚠️ ${safeHtml(c.blockedReasons[0])}</div>`
-      : "";
-
-    return `
-      <div class="dag-node-card ${stateClass}" onclick="openDecisionTrace('${safeHtml(c.issueKey)}')">
-        <div class="dag-node-header">
-          <span class="dag-node-key">${safeHtml(c.issueKey)}</span>
-          <span class="badge status-${safeHtml(c.runtimeState)}">${safeHtml(STATUS_LABELS[c.runtimeState] || c.runtimeState)}</span>
-        </div>
-        <div class="dag-node-summary">${safeHtml(c.summary || c.issueKey)}</div>
-        <div style="margin-top: 8px;">${depsBadge}</div>
-        <div class="dag-node-footer">
-          <span>Entegrasyon: <strong>${safeHtml(c.integrationState || 'not-queued')}</strong></span>
-          <button class="pm-btn pm-btn-view" style="font-size: 0.7rem; padding: 2px 6px;">İncele</button>
-        </div>
-        ${conflictMsg}
-      </div>
-    `;
+  if (dependent.length > 0) {
+    const wave2Box = element("div", "dag-wave");
+    wave2Box.appendChild(element("h4", "dag-wave-title", "Dalga 2+ (Sıralı / Bağımlı Tasklar)"));
+    const wave2Grid = element("div", "dag-nodes-grid");
+    dependent.forEach(c => wave2Grid.appendChild(createDagNode(c)));
+    wave2Box.appendChild(wave2Grid);
+    container.appendChild(wave2Box);
   }
-
-  containerEl.innerHTML = `
-    <div style="margin-bottom: 12px; font-weight: 600; font-size: 0.85rem; color: #94a3b8;">
-      PARALEL / BAĞIMSIZ GÖREVLER (${independent.length})
-    </div>
-    <div class="dag-stage">
-      ${independent.map(renderDagNode).join("")}
-    </div>
-
-    ${dependent.length > 0 ? `
-      <div style="margin: 20px 0 12px 0; font-weight: 600; font-size: 0.85rem; color: #94a3b8;">
-        BAĞIMLI / ARDIŞIK GÖREVLER (${dependent.length})
-      </div>
-      <div class="dag-stage">
-        ${dependent.map(renderDagNode).join("")}
-      </div>
-    ` : ''}
-  `;
 }
 
-function renderParentIntegrationLane(parent, containerEl) {
-  if (!containerEl) return;
-  const children = parent.children || [];
+function createDagNode(child) {
+  const node = element("button", "dag-node-btn");
+  node.type = "button";
+  node.dataset = node.dataset || {};
+  node.dataset.issueKey = child.issueKey;
+
+  let stateClass = "state-ready";
+  if (child.integrationState === "integrated") stateClass = "state-integrated";
+  else if (child.runtimeState === "blocked" || child.runtimeState === "blocked-conflict") stateClass = "state-conflict";
+  else if (child.runtimeState === "executing") stateClass = "state-executing";
+  else if (child.runtimeState === "verifying" || child.reviewedSha) stateClass = "state-review";
+
+  if (node.classList && typeof node.classList.add === "function") {
+    node.classList.add(stateClass);
+  }
+
+  const top = element("div", "dag-node-top");
+  const key = element("strong", "dag-node-key", child.issueKey);
+  const badge = element("span", "badge-dag", child.integrationState === "integrated" ? "ENTEGRE" : (child.reviewedSha ? "REVIEWED" : (STATUS_LABELS[child.runtimeState] || child.runtimeState)));
+  top.appendChild(key);
+  top.appendChild(badge);
+
+  const title = element("p", "dag-node-title", child.summary || "Task");
+
+  const meta = element("div", "dag-node-meta");
+  if (child.dependencies && child.dependencies.length > 0) {
+    meta.appendChild(element("small", null, `← Bağımlı: ${child.dependencies.join(", ")} (${child.dependencyState})`));
+  } else {
+    meta.appendChild(element("small", null, "✓ Bağımsız / Paralel"));
+  }
+  if (child.childBaseSha) {
+    meta.appendChild(element("small", "code-cell", `Base SHA: ${child.childBaseSha.slice(0, 8)}`));
+  }
+
+  node.appendChild(top);
+  node.appendChild(title);
+  node.appendChild(meta);
+
+  if (typeof node.addEventListener === "function") {
+    node.addEventListener("click", () => {
+      openDecisionTrace(child.issueKey);
+    });
+  }
+
+  return node;
+}
+
+function renderIntegrationLane(children = [], branchName) {
+  const lane = getElem("parent-integration-lane");
+  if (!lane) return;
+  lane.innerHTML = "";
 
   if (children.length === 0) {
-    containerEl.innerHTML = `<div style="color: var(--muted); font-size: 0.8rem;">Entegrasyon kaydı bulunmuyor.</div>`;
+    lane.appendChild(element("div", "empty-state", "Entegrasyon kuyruğu boş."));
     return;
   }
 
-  containerEl.innerHTML = `
-    <div class="integration-lane-grid">
-      ${children.map(c => `
-        <div class="integration-lane-card">
-          <div class="ilc-top">
-            <span class="badge badge-key">${safeHtml(c.issueKey)}</span>
-            <span class="badge status-${safeHtml(c.integrationState)}">${safeHtml(c.integrationState?.toUpperCase() || 'NOT QUEUED')}</span>
-          </div>
-          <div style="font-size: 0.8rem; font-weight: 500; color: #fff; margin: 4px 0 8px 0;">${safeHtml(c.summary || c.issueKey)}</div>
-          <div style="font-size: 0.72rem; color: var(--muted); line-height: 1.4;">
-            <div>Reviewed SHA: <code>${safeHtml(c.reviewedSha?.slice(0, 8) || '—')}</code></div>
-            <div>Integrated SHA: <code>${safeHtml(c.integratedSha?.slice(0, 8) || '—')}</code></div>
-            <div>Base SHA: <code>${safeHtml(c.childBaseSha?.slice(0, 8) || '—')}</code></div>
-          </div>
-          <div style="margin-top: 8px;">
-            <button class="pm-btn pm-btn-view" style="font-size: 0.72rem; width: 100%;" onclick="openDecisionTrace('${safeHtml(c.issueKey)}')">İş Karar İzini Aç</button>
-          </div>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
+  children.forEach((c, idx) => {
+    const item = element("div", "integration-item");
+    const num = element("span", "int-seq", String(idx + 1));
+    const content = element("div", "int-content");
+    const hdr = element("strong", null, `${c.issueKey} · ${c.summary || "Task"}`);
 
-// ── Work Item Decision Trace Modal ──────────────────────────────────────────
+    const diffStatus = element("div", "int-badges");
+    diffStatus.appendChild(element("span", `badge ${c.reviewedSha ? "badge-clean" : "badge-pending"}`, c.reviewedSha ? `Reviewed: ${c.reviewedSha.slice(0, 8)}` : "Review Bekliyor"));
+    diffStatus.appendChild(element("span", `badge ${c.integratedSha ? "badge-integrated" : "badge-not-integrated"}`, c.integratedSha ? `Integrated: ${c.integratedSha.slice(0, 8)}` : "Henüz Entegre Edilmedi"));
 
-async function openDecisionTrace(issueKey) {
-  const modal = document.querySelector("#decision-trace-modal");
-  const body = document.querySelector("#decision-trace-body");
-  const pill = document.querySelector("#trace-issue-pill");
-  const title = document.querySelector("#trace-issue-title");
-  if (!modal || !body) return;
-
-  modal.hidden = false;
-  body.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">İş kalemi detayları yükleniyor...</div>`;
-
-  try {
-    const res = await fetch(`/api/pm/work-items/${issueKey}`);
-    if (!res.ok) throw new Error("İş kalemi verisi alınamadı");
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Bilinmeyen hata");
-
-    const item = data.workItem;
-    pill.textContent = item.issueKey;
-    title.textContent = `${item.issueKey}: ${item.summary || 'Detay Görünümü'}`;
-
-    const decisions = item.decisions || [];
-    const runs = item.runs || [];
-    const parentInfo = item.parent || {};
-
-    let decisionsHtml = "";
-    if (decisions.length === 0) {
-      decisionsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Henüz kayıtlı karar bulunmuyor.</p>`;
-    } else {
-      decisionsHtml = decisions.map(d => `
-        <div class="timeline-item">
-          <div class="timeline-top">
-            <span class="actor-badge actor-${d.actor || 'system'}">${d.actor || 'SİSTEM'}</span>
-            <span class="timeline-time">${formatTime(d.createdAt, true)}</span>
-          </div>
-          <div style="color: #fff; font-weight: 500; margin: 2px 0;">${safeHtml(d.action)}: ${d.approved !== false ? '✅ ONAYLANDI' : '❌ REDDEDİLDİ'}</div>
-          ${d.reason ? `<div style="font-size: 0.78rem; color: #94a3b8;">${safeHtml(d.reason)}</div>` : ''}
-          ${d.planFingerprint ? `<div style="font-size: 0.72rem; color: var(--muted); margin-top: 2px;">Plan FP: <code>${safeHtml(d.planFingerprint.slice(0, 12))}</code></div>` : ''}
-        </div>
-      `).join("");
-    }
-
-    let runsHtml = "";
-    if (runs.length === 0) {
-      runsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Henüz yürütme kaydı bulunmuyor.</p>`;
-    } else {
-      runsHtml = runs.map(r => `
-        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <strong style="color: #fff;">Run #${r.id} (${r.role || 'worker'})</strong>
-            <span class="badge status-${r.state}">${r.state}</span>
-          </div>
-          <div style="font-size: 0.75rem; color: var(--muted); margin-top: 4px;">
-            Agent: <strong>${r.taskAgent || r.persona}</strong> · Model: <strong>${r.model || 'default'}</strong> · Tokens: <strong>${r.tokens || 0}</strong>
-          </div>
-          <div style="margin-top: 6px;">
-            <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openTelemetryDetail('${r.id}')">📊 Telemetri ve Timeline İncele</button>
-          </div>
-        </div>
-      `).join("");
-    }
-
-    body.innerHTML = `
-      <div class="trace-section">
-        <h4>📋 İş Kalemi Durumu</h4>
-        <div class="trace-grid-two">
-          <div class="trace-info-cell"><span>Statü / Aşama</span><strong>${safeHtml(item.state || 'idle')}</strong></div>
-          <div class="trace-info-cell"><span>Öncelik / Risk</span><strong>${safeHtml(item.risk || 'normal')}</strong></div>
-          <div class="trace-info-cell"><span>Parent / Epik</span><strong>${item.parentKey ? `<a href="javascript:void(0)" onclick="switchView('parents-view'); renderParentsView('${item.parentKey}');" style="color: #60a5fa;">${item.parentKey}</a>` : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Entegrasyon Durumu</span><strong>${safeHtml(item.integrationState || 'not-queued')}</strong></div>
-        </div>
-      </div>
-
-      <div class="trace-section">
-        <h4>⚖️ PM & Orkestrasyon Kararları</h4>
-        <div class="timeline-list">${decisionsHtml}</div>
-      </div>
-
-      <div class="trace-section">
-        <h4>🚀 İlgili Çalıştırmalar (Runs)</h4>
-        <div>${runsHtml}</div>
-      </div>
-    `;
-
-    updateUrlState({ issue: issueKey });
-
-  } catch (err) {
-    body.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
-  }
-}
-
-const traceCloseBtn = document.querySelector("#trace-close-btn");
-if (traceCloseBtn) {
-  traceCloseBtn.addEventListener("click", () => {
-    const modal = document.querySelector("#decision-trace-modal");
-    if (modal) modal.hidden = true;
-    updateUrlState({ issue: null });
+    content.appendChild(hdr);
+    content.appendChild(diffStatus);
+    item.appendChild(num);
+    item.appendChild(content);
+    lane.appendChild(item);
   });
 }
 
-// ── In-Page Modals: Approvals & Rejections ───────────────────────────────────
-
-let currentApprovalContext = null;
-
-function openApprovalModal(issueKey, action, planFingerprint, attempt, summary = "", risk = "normal", agent = "backend-engineer") {
-  const modal = document.querySelector("#approval-modal");
-  const sub = document.querySelector("#approval-modal-sub");
-  const scopeEl = document.querySelector("#approval-plan-scope");
-  const fpEl = document.querySelector("#approval-plan-fingerprint");
-  const errEl = document.querySelector("#approval-modal-error");
-  if (!modal) return;
-
-  currentApprovalContext = { issueKey, action, planFingerprint, attempt };
-  if (sub) sub.textContent = `${issueKey}: ${summary} (Aksiyon: ${action}, Risk: ${risk})`;
-  if (scopeEl) scopeEl.textContent = `Aksiyon: ${action} | Hedef Agent: ${agent} | Risk Seviyesi: ${risk}`;
-  if (fpEl) fpEl.textContent = planFingerprint;
-  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
-
-  modal.hidden = false;
-}
-
-function closeApprovalModal() {
-  const modal = document.querySelector("#approval-modal");
-  if (modal) modal.hidden = true;
-  currentApprovalContext = null;
-}
-
-const appCancelBtn = document.querySelector("#approval-cancel-btn");
-if (appCancelBtn) appCancelBtn.addEventListener("click", closeApprovalModal);
-
-const appConfirmBtn = document.querySelector("#approval-confirm-btn");
-if (appConfirmBtn) {
-  appConfirmBtn.addEventListener("click", async () => {
-    if (!currentApprovalContext) return;
-    const { issueKey, action, planFingerprint, attempt } = currentApprovalContext;
-    const errEl = document.querySelector("#approval-modal-error");
-    appConfirmBtn.disabled = true;
-    appConfirmBtn.textContent = "Onaylanıyor...";
-
-    try {
-      const res = await fetch(`/api/pm/work-items/${issueKey}/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action,
-          planFingerprint,
-          attempt,
-          approver: "PM Operator",
-          reason: "Onay modalı üzerinden onaylandı"
-        })
-      });
-
-      if (res.status === 409) {
-        const data = await res.json();
-        throw new Error(data.error || "Plan parmak izi uyuşmazlığı (stale fingerprint). Çalışma alanı yenileniyor.");
-      }
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Onay başarısız (${res.status})`);
-      }
-
-      closeApprovalModal();
-      await refresh();
-
-    } catch (err) {
-      if (errEl) {
-        errEl.hidden = false;
-        errEl.textContent = err.message;
-      }
-      setTimeout(() => refresh(), 1500);
-    } finally {
-      appConfirmBtn.disabled = false;
-      appConfirmBtn.textContent = "Onayla ve Başlat";
-    }
-  });
-}
-
-function openRejectionModal(issueKey, action, planFingerprint, attempt, summary = "") {
-  const modal = document.querySelector("#rejection-modal");
-  const sub = document.querySelector("#rejection-modal-sub");
-  const reasonInput = document.querySelector("#rejection-reason-input");
-  const errEl = document.querySelector("#rejection-modal-error");
-  if (!modal) return;
-
-  currentApprovalContext = { issueKey, action, planFingerprint, attempt };
-  if (sub) sub.textContent = `${issueKey}: ${summary} (Aksiyon: ${action})`;
-  if (reasonInput) reasonInput.value = "";
-  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
-
-  modal.hidden = false;
-}
-
-function closeRejectionModal() {
-  const modal = document.querySelector("#rejection-modal");
-  if (modal) modal.hidden = true;
-  currentApprovalContext = null;
-}
-
-const rejCancelBtn = document.querySelector("#rejection-cancel-btn");
-if (rejCancelBtn) rejCancelBtn.addEventListener("click", closeRejectionModal);
-
-const rejConfirmBtn = document.querySelector("#rejection-confirm-btn");
-if (rejConfirmBtn) {
-  rejConfirmBtn.addEventListener("click", async () => {
-    if (!currentApprovalContext) return;
-    const { issueKey, action, planFingerprint, attempt } = currentApprovalContext;
-    const reasonInput = document.querySelector("#rejection-reason-input");
-    const errEl = document.querySelector("#rejection-modal-error");
-    const reason = reasonInput ? reasonInput.value.trim() : "";
-
-    if (!reason) {
-      if (errEl) { errEl.hidden = false; errEl.textContent = "Lütfen bir ret gerekçesi giriniz."; }
-      return;
-    }
-
-    rejConfirmBtn.disabled = true;
-    rejConfirmBtn.textContent = "Reddediliyor...";
-
-    try {
-      const res = await fetch(`/api/pm/work-items/${issueKey}/reject`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action,
-          planFingerprint,
-          attempt,
-          approver: "PM Operator",
-          reason
-        })
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Ret işlemi başarısız (${res.status})`);
-      }
-
-      closeRejectionModal();
-      await refresh();
-
-    } catch (err) {
-      if (errEl) {
-        errEl.hidden = false;
-        errEl.textContent = err.message;
-      }
-    } finally {
-      rejConfirmBtn.disabled = false;
-      rejConfirmBtn.textContent = "Planı Reddet";
-    }
-  });
-}
-
-// ── PM Workspace View ───────────────────────────────────────────────────────
-
-function renderPmWorkspace() {
-  if (!state.snapshot?.pmWorkspace) return;
-  const ws = state.snapshot.pmWorkspace;
-  const groups = ws.groups || {};
-  const container = document.querySelector("#pm-workspace-list");
+function renderParentReviewFindings(data) {
+  const container = getElem("parent-review-findings");
   if (!container) return;
+  container.innerHTML = "";
 
-  let items = [];
-  if (state.currentPmFilter === "inbox") {
-    items = [...(groups.executionApproval || []), ...(groups.humanApproval || []), ...(groups.blocked || [])];
-  } else if (state.currentPmFilter === "approvals") {
-    items = groups.executionApproval || [];
-  } else if (state.currentPmFilter === "blocked") {
-    items = groups.blocked || [];
-  } else if (state.currentPmFilter === "active") {
-    items = [...(groups.ready || []), ...(groups.executing || []), ...(groups.inReview || []), ...(groups.needsRework || [])];
-  } else if (state.currentPmFilter === "completed") {
-    items = groups.completed || [];
-  } else {
-    items = Object.values(groups).flat();
-  }
+  const rev = data.integrationReview;
+  const repoVerif = data.repositoryVerification || data.completionPacket?.repositoryVerification;
 
-  if (items.length === 0) {
-    container.innerHTML = `<div style="padding: 32px; text-align: center; color: var(--muted);">Bu filtrede iş kalemi bulunmuyor.</div>`;
+  if (!rev && !repoVerif) {
+    container.appendChild(element("p", "empty-text", "Tüm child tasklar entegre edildiğinde aggregate review ve repo doğrulaması burada görüntülenecektir."));
     return;
   }
 
-  container.innerHTML = items.map(item => {
-    const isApprovalReq = item.status === "awaiting_approval" || item.group === "executionApproval";
-    const isHumanApproval = item.status === "waiting_human" || item.group === "humanApproval";
-    const isBlocked = item.status === "blocked" || item.group === "blocked";
-
-    let actionsHtml = "";
-    if (isApprovalReq && item.approvalRequest) {
-      const req = item.approvalRequest;
-      actionsHtml = `
-        <button class="pm-btn pm-btn-approve" onclick="openApprovalModal('${safeHtml(item.issueKey)}', '${safeHtml(req.action)}', '${safeHtml(req.planFingerprint)}', ${req.attempt || 0}, '${safeHtml(item.summary || '')}', '${safeHtml(item.risk || 'normal')}', '${safeHtml(item.taskAgent || 'backend-engineer')}')">Onayla</button>
-        <button class="pm-btn pm-btn-reject" onclick="openRejectionModal('${safeHtml(item.issueKey)}', '${safeHtml(req.action)}', '${safeHtml(req.planFingerprint)}', ${req.attempt || 0}, '${safeHtml(item.summary || '')}')">Reddet</button>
-      `;
-    } else if (isHumanApproval) {
-      actionsHtml = `
-        <span class="badge" style="background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.4);">İnsan Onayı Bekliyor</span>
-      `;
+  if (repoVerif) {
+    const verifBox = element("div", "finding-box");
+    verifBox.appendChild(element("h4", null, `Repository Verification (${repoVerif.command || "npm run check"})`));
+    verifBox.appendChild(element("p", null, `Durum: ${repoVerif.passed ? "✓ Başarılı" : "✕ Başarısız"}`));
+    if (repoVerif.output) {
+      const pre = element("pre", "code-block", repoVerif.output.slice(0, 500));
+      verifBox.appendChild(pre);
     }
+    container.appendChild(verifBox);
+  }
 
-    return `
-      <div class="pm-item-card">
-        <div class="pm-item-header">
-          <div>
-            <span class="badge badge-key">${safeHtml(item.issueKey)}</span>
-            <span class="pm-item-title">${safeHtml(item.summary || item.issueKey)}</span>
-          </div>
-          <div>
-            <span class="badge status-${safeHtml(item.status)}">${safeHtml(STATUS_LABELS[item.status] || item.status)}</span>
-          </div>
-        </div>
-
-        <div style="font-size: 0.8rem; color: var(--muted); margin: 6px 0;">
-          Agent: <strong>${safeHtml(item.taskAgent || item.persona || 'unassigned')}</strong> · Risk: <strong>${safeHtml(item.risk || 'normal')}</strong>
-          ${item.parentKey ? `· Parent: <a href="javascript:void(0)" onclick="switchView('parents-view'); renderParentsView('${safeHtml(item.parentKey)}');" style="color: #60a5fa;">${safeHtml(item.parentKey)}</a>` : ''}
-        </div>
-
-        ${item.blockedReasons?.length ? `
-          <div style="color: #f87171; font-size: 0.75rem; background: rgba(239, 68, 68, 0.1); border-left: 2px solid #ef4444; padding: 4px 8px; margin: 6px 0;">
-            ⚠️ ${safeHtml(item.blockedReasons[0])}
-          </div>
-        ` : ''}
-
-        <div class="pm-item-actions">
-          <button class="pm-btn pm-btn-view" onclick="openDecisionTrace('${safeHtml(item.issueKey)}')">İş Karar İzi</button>
-          ${actionsHtml}
-        </div>
-      </div>
-    `;
-  }).join("");
+  if (rev) {
+    const revBox = element("div", "finding-box");
+    revBox.appendChild(element("h4", null, `Aggregate Integration Review (${rev.reviewer || "reviewer-agent"})`));
+    revBox.appendChild(element("p", null, `Verdict: ${rev.verdict || "CLEAN"}`));
+    if (rev.findings && rev.findings.length > 0) {
+      const ul = element("ul", null);
+      rev.findings.forEach(f => ul.appendChild(element("li", null, typeof f === "string" ? f : JSON.stringify(f))));
+      revBox.appendChild(ul);
+    }
+    container.appendChild(revBox);
+  }
 }
 
-function setupPmSubNav() {
-  document.querySelectorAll(".pm-filter-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".pm-filter-btn").forEach(b => b.classList.remove("is-active"));
-      btn.classList.add("is-active");
-      state.currentPmFilter = btn.dataset.filter || "inbox";
-      renderPmWorkspace();
-    });
-  });
-}
-
-// ── Observability View ──────────────────────────────────────────────────────
-
-async function renderObservability() {
-  const tableBody = document.querySelector("#obs-runs-table-body");
-  const providersGrid = document.querySelector("#obs-providers-grid");
-  if (!tableBody) return;
-
+// Observability View
+async function fetchObservabilitySummary() {
+  const windowParam = state.currentObsWindow || "24h";
   try {
-    const res = await fetch(`/api/observability/summary?window=${state.currentObsWindow}`);
-    if (!res.ok) throw new Error("Observability verisi alınamadı");
+    const res = await fetch(`/api/observability/summary?window=${encodeURIComponent(windowParam)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
-
-    // Render Provider Health
-    if (providersGrid) {
-      const pHealth = data.providerHealth || [];
-      if (pHealth.length === 0) {
-        providersGrid.innerHTML = '<div style="color: var(--muted); font-size: 0.8rem;">Kayıtlı sağlayıcı sağlık verisi bulunamadı.</div>';
-      } else {
-        providersGrid.innerHTML = pHealth.map(p => `
-          <div class="provider-health-card">
-            <div class="ph-top">
-              <span class="ph-provider-name">${safeHtml(p.provider.toUpperCase())}</span>
-              <span class="badge status-${safeHtml(p.status)}">${safeHtml(p.status.toUpperCase())}</span>
-            </div>
-            <div class="ph-stats-grid">
-              <div class="ph-stat-cell"><span>Başarı Oranı</span><strong>${p.successRate != null ? Math.round(p.successRate * 100) + '%' : '—'}</strong></div>
-              <div class="ph-stat-cell"><span>Ort. Süre</span><strong>${p.averageDurationMs != null ? Math.round(p.averageDurationMs / 1000) + 's' : '—'}</strong></div>
-              <div class="ph-stat-cell"><span>Başarı</span><strong>${p.recentSuccesses || 0}</strong></div>
-              <div class="ph-stat-cell"><span>Hata</span><strong>${p.recentFailures || 0}</strong></div>
-            </div>
-          </div>
-        `).join("");
-      }
+    renderObservability(data);
+  } catch (err) {
+    const runsTbody = getElem("obs-runs-table-body");
+    if (runsTbody) {
+      runsTbody.innerHTML = `<tr><td colspan="8" class="error-banner">Gözlemlenebilirlik verisi alınamadı: ${safeHtml(err.message)}</td></tr>`;
     }
+  }
+}
 
-    // Render Observability Runs Table
+function renderObservability(data) {
+  const liveGrid = getElem("obs-live-grid");
+  if (liveGrid) {
+    liveGrid.innerHTML = "";
+    const runs = state.snapshot?.runs || [];
+    const liveRuns = runs.filter(r => r.stateKind === "active" || r.stateKind === "review");
+
+    if (liveRuns.length === 0) {
+      liveGrid.appendChild(element("p", "empty-text", "Şu anda çalışan veya incelemede aktif işlem yok."));
+    } else {
+      liveRuns.forEach(run => {
+        const card = element("div", "obs-live-card");
+        const top = element("div", "obs-live-top");
+        top.appendChild(element("strong", null, run.issue || run.issueKey));
+        top.appendChild(element("span", `state-badge ${run.stateKind}`, STATUS_LABELS[run.state] || run.state));
+        card.appendChild(top);
+        card.appendChild(element("p", "obs-live-desc", `${run.persona || "persona"} · ${run.provider || "provider"}`));
+        liveGrid.appendChild(card);
+      });
+    }
+  }
+
+  const provGrid = getElem("obs-providers-grid");
+  if (provGrid) {
+    provGrid.innerHTML = "";
+    const providers = data.providers || [];
+    if (providers.length === 0) {
+      provGrid.appendChild(element("p", "empty-text", "Provider telemetri verisi bulunamadı."));
+    } else {
+      providers.forEach(p => {
+        const card = element("div", "obs-provider-card");
+        const hdr = element("div", "obs-prov-header");
+        hdr.appendChild(element("h4", null, p.provider));
+        const badge = element("span", `prov-status-badge ${p.status || "healthy"}`, p.status || "healthy");
+        hdr.appendChild(badge);
+        card.appendChild(hdr);
+
+        const metrics = element("div", "obs-prov-metrics");
+        metrics.appendChild(createTraceCell("Başarı Oranı", p.successRate !== null ? `${Math.round(p.successRate * 100)}%` : "—"));
+        metrics.appendChild(createTraceCell("Ort. Süre", p.averageDurationMs !== null ? formatDurationMs(p.averageDurationMs) : "—"));
+        metrics.appendChild(createTraceCell("Başarılı / Başarısız", `${p.recentSuccesses || 0} / ${p.recentFailures || 0}`));
+        if (p.cooldownUntil) {
+          metrics.appendChild(createTraceCell("Cooldown", formatTime(p.cooldownUntil)));
+        }
+        card.appendChild(metrics);
+        provGrid.appendChild(card);
+      });
+    }
+  }
+
+  const tbody = getElem("obs-runs-table-body");
+  if (tbody) {
+    tbody.innerHTML = "";
     const runs = data.runs || [];
     if (runs.length === 0) {
-      tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--muted); padding: 24px;">Bu zaman penceresinde kayıtlı çalıştırma yok.</td></tr>`;
+      const row = element("tr");
+      const td = element("td", null, "Seçilen zaman penceresinde yürütme kaydı yok.");
+      td.colSpan = 8;
+      row.appendChild(td);
+      tbody.appendChild(row);
       return;
     }
 
-    tableBody.innerHTML = runs.map(r => `
-      <tr>
-        <td><span class="badge badge-key">${safeHtml(r.issueKey)}</span></td>
-        <td><strong>${safeHtml(r.taskAgent || r.persona)}</strong> <small style="color: var(--muted); display: block;">${safeHtml(r.role)}</small></td>
-        <td>${safeHtml(r.provider)} <small style="color: var(--muted); display: block;">${safeHtml(r.model || '—')}</small></td>
-        <td><span class="badge status-${safeHtml(r.state)}">${safeHtml(STATUS_LABELS[r.state] || r.state)}</span></td>
-        <td>${r.durationSeconds != null ? `${r.durationSeconds}s` : '—'}</td>
-        <td>${r.usage?.available && r.usage?.totalTokens != null ? `<strong>${r.usage.totalTokens}</strong> tok` : '<span style="color: var(--muted);">—</span>'}</td>
-        <td>${formatTime(r.createdAt, true)}</td>
-        <td><button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openTelemetryDetail('${safeHtml(r.runId)}')">Timeline</button></td>
-      </tr>
-    `).join("");
+    runs.forEach(run => {
+      const row = element("tr");
+      const issueTd = element("td", "code-cell", run.issueKey || "—");
+      const roleTd = element("td", null, `${run.role || "impl"} / ${run.taskAgent || "agent"}`);
+      const modelTd = element("td", null, `${run.provider || "—"} / ${run.model || "default"}`);
+      const statusTd = element("td", null, STATUS_LABELS[run.state] || run.state || "—");
 
-  } catch (err) {
-    tableBody.innerHTML = `<tr><td colspan="8" style="color: #f87171; padding: 16px;">Hata: ${safeHtml(err.message)}</td></tr>`;
+      const durTd = element("td", null);
+      if (run.durationSeconds !== null && run.durationSeconds !== undefined) {
+        durTd.textContent = formatDuration(run.durationSeconds);
+      } else {
+        durTd.textContent = "—";
+      }
+
+      const tokTd = element("td", null);
+      if (run.usage && run.usage.available && run.usage.totalTokens !== null) {
+        tokTd.textContent = `${formatNumber(run.usage.totalTokens)} tok`;
+      } else if (run.tokens !== null && run.tokens !== undefined) {
+        tokTd.textContent = `${formatNumber(run.tokens)} tok`;
+      } else {
+        tokTd.textContent = "—";
+      }
+
+      const dateTd = element("td", null, formatTime(run.createdAt || run.timestamp));
+
+      const actionTd = element("td", null);
+      const detailBtn = element("button", "pm-btn pm-btn-view", "Detay");
+      detailBtn.type = "button";
+      if (typeof detailBtn.addEventListener === "function") {
+        detailBtn.addEventListener("click", () => {
+          openTelemetryDrawer(run.runId || run.id);
+        });
+      }
+      actionTd.appendChild(detailBtn);
+
+      row.appendChild(issueTd);
+      row.appendChild(roleTd);
+      row.appendChild(modelTd);
+      row.appendChild(statusTd);
+      row.appendChild(durTd);
+      row.appendChild(tokTd);
+      row.appendChild(dateTd);
+      row.appendChild(actionTd);
+      tbody.appendChild(row);
+    });
   }
 }
 
-async function openTelemetryDetail(runId) {
-  const modal = document.querySelector("#telemetry-drawer-modal");
-  const body = document.querySelector("#telem-drawer-body");
-  const pill = document.querySelector("#telem-run-pill");
-  const title = document.querySelector("#telem-drawer-title");
-  const summary = document.querySelector("#telem-run-summary");
+// Telemetry Timeline Drawer
+async function openTelemetryDrawer(runId, fromHistory = false) {
+  if (!runId) return;
+  state.selectedRunId = runId;
+
+  const modal = getElem("telemetry-drawer-modal");
+  const pill = getElem("telem-run-pill");
+  const title = getElem("telem-drawer-title");
+  const summaryEl = getElem("telem-run-summary");
+  const body = getElem("telem-drawer-body");
+
   if (!modal || !body) return;
 
-  modal.hidden = false;
-  body.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">Telemetri verisi yükleniyor...</div>`;
+  if (pill) pill.textContent = runId;
+  if (title) title.textContent = `Run Telemetry Timeline · ${runId}`;
+  if (summaryEl) summaryEl.textContent = "Telemetri yükleniyor...";
+  body.innerHTML = '<div class="loading-spinner">Yükleniyor...</div>';
+
+  openModal("telemetry-drawer-modal");
+
+  if (!fromHistory) {
+    syncUrlState(false);
+  }
 
   try {
-    const res = await fetch(`/api/observability/runs/${runId}`);
-    if (!res.ok) throw new Error("Telemetri verisi alınamadı");
+    const res = await fetch(`/api/observability/runs/${encodeURIComponent(runId)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Telemetri hatası");
-
-    pill.textContent = data.identity?.issueKey || `Run #${runId}`;
-    title.textContent = `Run Telemetry: ${data.identity?.issueKey || runId}`;
-    summary.textContent = `Rol: ${data.identity?.role} · Agent: ${data.agent?.taskAgent} · Provider: ${data.execution?.provider} (${data.execution?.model || 'default'})`;
-
-    const timings = data.timing || {};
-    const usage = data.usage || {};
-    const events = data.events || [];
-
-    let eventsHtml = "";
-    if (events.length === 0) {
-      eventsHtml = `<p style="color: var(--muted); font-size: 0.8rem;">Olay kaydı bulunmuyor.</p>`;
-    } else {
-      eventsHtml = events.map(ev => `
-        <div class="timeline-item">
-          <div class="timeline-top">
-            <span class="actor-badge actor-runtime">${safeHtml(ev.stage)}</span>
-            <span class="timeline-time">${formatTime(ev.timestamp, true)}</span>
-          </div>
-          <div style="color: #f1f5f9; font-weight: 500;">
-            ${safeHtml(ev.status.toUpperCase())} ${ev.model ? `· model: ${safeHtml(ev.model)}` : ''}
-            ${ev.usage?.totalTokens != null ? `· ${ev.usage.totalTokens} tokens` : ''}
-          </div>
-          ${ev.error ? `<div style="color: #f87171; font-size: 0.75rem; margin-top: 2px;">⚠️ ${safeHtml(ev.error.safeMessage || ev.error.category)}</div>` : ''}
-        </div>
-      `).join("");
-    }
-
-    body.innerHTML = `
-      <div class="trace-section">
-        <h4>⚡ Yürütme ve Süre Bilgileri</h4>
-        <div class="trace-grid-two">
-          <div class="trace-info-cell"><span>Kuyruk Bekleme</span><strong>${timings.queueWaitMs != null ? timings.queueWaitMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Yürütme Süresi</span><strong>${timings.executionDurationMs != null ? timings.executionDurationMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Uçtan Uca Süre</span><strong>${timings.endToEndDurationMs != null ? timings.endToEndDurationMs + 'ms' : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Deneme / Attempt</span><strong>${timings.attempt != null ? timings.attempt + 1 : 1} / ${timings.totalAttempts || 3}</strong></div>
-        </div>
-      </div>
-
-      <div class="trace-section">
-        <h4>◇ Normalized Token Usage Ledger</h4>
-        <div class="trace-grid-two">
-          <div class="trace-info-cell"><span>Girdi Token</span><strong>${usage.available && usage.inputTokens != null ? usage.inputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Çıktı Token</span><strong>${usage.available && usage.outputTokens != null ? usage.outputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Cached Girdi</span><strong>${usage.available && usage.cachedInputTokens != null ? usage.cachedInputTokens : '—'}</strong></div>
-          <div class="trace-info-cell"><span>Toplam Token</span><strong>${usage.available && usage.totalTokens != null ? usage.totalTokens : '—'}</strong></div>
-        </div>
-      </div>
-
-      <div class="trace-section">
-        <h4>📜 Telemetri Olay Çizelgesi (Ordered Lifecycle Events)</h4>
-        <div class="timeline-list">${eventsHtml}</div>
-      </div>
-    `;
-
-    updateUrlState({ run: runId });
-
+    renderTelemetryDrawerDetail(data);
   } catch (err) {
-    body.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+    body.innerHTML = `<div class="error-banner">Telemetri detayı yüklenemedi: ${safeHtml(err.message)}</div>`;
   }
 }
 
-const telemCloseBtn = document.querySelector("#telem-close-btn");
-if (telemCloseBtn) {
-  telemCloseBtn.addEventListener("click", () => {
-    const modal = document.querySelector("#telemetry-drawer-modal");
-    if (modal) modal.hidden = true;
-    updateUrlState({ run: null });
-  });
+function renderTelemetryDrawerDetail(data) {
+  const summaryEl = getElem("telem-run-summary");
+  const body = getElem("telem-drawer-body");
+  if (!body) return;
+  body.innerHTML = "";
+
+  const id = data.identity || {};
+  const st = data.state || {};
+  const tm = data.timing || {};
+  const usg = data.usage || {};
+  const ci = data.codeIntelligence || {};
+  const events = data.events || [];
+
+  if (summaryEl) {
+    summaryEl.textContent = `${id.issueKey || "Task"} · ${id.role || "impl"} (${st.current || "unknown"})`;
+  }
+
+  const idSection = element("div", "trace-section");
+  idSection.appendChild(element("h3", "trace-section-title", "1. Run Kimliği ve Konfigürasyon"));
+  const idGrid = element("div", "trace-grid");
+  idGrid.appendChild(createTraceCell("Issue", id.issueKey));
+  idGrid.appendChild(createTraceCell("Rol", id.role));
+  idGrid.appendChild(createTraceCell("Persona / Agent", `${id.persona || "—"} / ${id.taskAgent || "—"}`));
+  idGrid.appendChild(createTraceCell("Agent Version", id.agentVersion ?? "—"));
+  idGrid.appendChild(createTraceCell("Provider / Model", `${id.provider || "—"} / ${id.model || "default"}`));
+  idGrid.appendChild(createTraceCell("Deneme No", String(id.attempt ?? "0")));
+  idSection.appendChild(idGrid);
+  body.appendChild(idSection);
+
+  const tokSection = element("div", "trace-section");
+  tokSection.appendChild(element("h3", "trace-section-title", "2. Token Kullanımı ve Maliyet Ledgeri"));
+  const tokGrid = element("div", "trace-grid");
+  tokGrid.appendChild(createTraceCell("Input Tokens", usg.inputTokens !== null ? formatNumber(usg.inputTokens) : "Usage unavailable"));
+  tokGrid.appendChild(createTraceCell("Output Tokens", usg.outputTokens !== null ? formatNumber(usg.outputTokens) : "Usage unavailable"));
+  tokGrid.appendChild(createTraceCell("Cached Input Tokens", usg.cachedInputTokens !== null ? formatNumber(usg.cachedInputTokens) : "—"));
+  tokGrid.appendChild(createTraceCell("Toplam Token", usg.totalTokens !== null ? formatNumber(usg.totalTokens) : "Usage unavailable"));
+  tokGrid.appendChild(createTraceCell("Hesaplanan Maliyet", data.cost ? `$${data.cost.amount || 0}` : "Cost unavailable"));
+  tokSection.appendChild(tokGrid);
+  body.appendChild(tokSection);
+
+  const timeSection = element("div", "trace-section");
+  timeSection.appendChild(element("h3", "trace-section-title", "3. Yürütme Süreleri"));
+  const timeGrid = element("div", "trace-grid");
+  timeGrid.appendChild(createTraceCell("Kuyruk Süresi", tm.queuedDurationMs !== null && tm.queuedDurationMs !== undefined ? formatDurationMs(tm.queuedDurationMs) : "—"));
+  timeGrid.appendChild(createTraceCell("Çalışma Süresi", tm.executionDurationMs !== null && tm.executionDurationMs !== undefined ? formatDurationMs(tm.executionDurationMs) : (tm.durationMs !== null ? formatDurationMs(tm.durationMs) : "Duration unavailable")));
+  timeSection.appendChild(timeGrid);
+  body.appendChild(timeSection);
+
+  if (ci && (ci.symbolResolutions || ci.referencesFound)) {
+    const ciSection = element("div", "trace-section");
+    ciSection.appendChild(element("h3", "trace-section-title", "4. Code Intelligence Metrikleri"));
+    const ciGrid = element("div", "trace-grid");
+    ciGrid.appendChild(createTraceCell("Sembol Çözümlemeleri", String(ci.symbolResolutions || 0)));
+    ciGrid.appendChild(createTraceCell("Referanslar", String(ci.referencesFound || 0)));
+    ciSection.appendChild(ciGrid);
+    body.appendChild(ciSection);
+  }
+
+  const evSection = element("div", "trace-section");
+  evSection.appendChild(element("h3", "trace-section-title", "5. Sıralı Telemetri Olayları"));
+  if (events.length === 0) {
+    evSection.appendChild(element("p", "empty-text", "Olay kaydı yok."));
+  } else {
+    const list = element("div", "trace-timeline");
+    events.forEach(ev => {
+      const step = element("div", "timeline-step");
+      const dot = element("span", `timeline-dot ${ev.stage || "progress"}`);
+      const content = element("div", "timeline-content");
+      content.appendChild(element("small", null, `${formatTime(ev.timestamp || ev.createdAt)} · Seq ${ev.sequence ?? 0}`));
+      content.appendChild(element("strong", null, `${ev.stage || "event"} (${ev.status || "ok"})`));
+      if (ev.usage && ev.usage.available) {
+        content.appendChild(element("span", null, ` — ${formatNumber(ev.usage.totalTokens)} tokens`));
+      }
+      step.appendChild(dot);
+      step.appendChild(content);
+      list.appendChild(step);
+    });
+    evSection.appendChild(list);
+  }
+  body.appendChild(evSection);
 }
 
-document.querySelectorAll(".window-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".window-btn").forEach(b => b.classList.remove("is-active"));
-    btn.classList.add("is-active");
-    state.currentObsWindow = btn.dataset.window || "24h";
-    renderObservability();
+// Agent Management View
+function renderAgentRegistry() {
+  const list = getElem("agent-definitions");
+  const usageEl = getElem("usage-events");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (typeof document !== "undefined") {
+    const filterBtns = document.querySelectorAll(".agent-filters .agent-filter-btn");
+    filterBtns.forEach(btn => {
+      if (btn.dataset.agentFilter === state.currentAgentFilter) {
+        btn.classList.add("is-active");
+      } else {
+        btn.classList.remove("is-active");
+      }
+    });
+  }
+
+  const defs = state.snapshot?.agentDefinitions || [];
+  const filter = state.currentAgentFilter;
+  const filtered = defs.filter(d => {
+    if (filter === "enabled") return d.status === "enabled";
+    if (filter === "disabled") return d.status === "disabled";
+    if (filter === "archived") return d.status === "archived";
+    return true;
   });
-});
 
-// ── Agent Management View ───────────────────────────────────────────────────
+  if (filtered.length === 0) {
+    list.appendChild(element("div", "empty-state", "Kayıtlı agent bulunamadı."));
+  } else {
+    filtered.forEach(agent => {
+      list.appendChild(createAgentCard(agent));
+    });
+  }
 
-async function renderAgentDefinitions() {
-  const container = document.querySelector("#agents-list");
-  if (!container) return;
+  if (usageEl) {
+    usageEl.innerHTML = "";
+    const events = state.snapshot?.usageEvents || [];
+    if (events.length === 0) {
+      usageEl.appendChild(element("p", "empty-text", "Henüz kullanım telemetrisi kaydedilmedi."));
+    } else {
+      events.slice(0, 20).forEach(ev => {
+        const item = element("div", "usage-item");
+        item.appendChild(element("strong", null, ev.agentId || ev.taskAgent || "agent"));
+        item.appendChild(element("span", null, `${ev.tokens ? formatNumber(ev.tokens) : "—"} tok · ${formatTime(ev.createdAt)}`));
+        usageEl.appendChild(item);
+      });
+    }
+  }
+}
+
+function createAgentCard(agent) {
+  const card = element("div", `agent-def-card status-${agent.status || "enabled"}`);
+  card.dataset = card.dataset || {};
+  card.dataset.agentId = agent.id;
+
+  const top = element("div", "agent-def-top");
+  const titleBox = element("div", null);
+  titleBox.appendChild(element("strong", "agent-def-name", agent.displayName || agent.id));
+  titleBox.appendChild(element("span", "code-cell", ` (${agent.id}) v${agent.version || agent.currentVersion || 1}`));
+  const badge = element("span", `badge badge-${agent.status || "enabled"}`, (agent.status || "enabled").toUpperCase());
+  top.appendChild(titleBox);
+  top.appendChild(badge);
+
+  const meta = element("div", "agent-def-meta");
+  meta.appendChild(createTraceCell("Rol", agent.role));
+  meta.appendChild(createTraceCell("Default Persona", agent.defaultPersona || "—"));
+  meta.appendChild(createTraceCell("Skills", Array.isArray(agent.skills) ? agent.skills.join(", ") : "—"));
+  meta.appendChild(createTraceCell("Allowed Paths", Array.isArray(agent.allowedPaths) ? agent.allowedPaths.join(", ") : "—"));
+  meta.appendChild(createTraceCell("Risk", agent.risk || "normal"));
+  meta.appendChild(createTraceCell("Max Concurrency", String(agent.maxConcurrency || 1)));
+  if (agent.definitionHash) {
+    meta.appendChild(createTraceCell("Definition Hash", agent.definitionHash.slice(0, 12) + "..."));
+  }
+
+  const actions = element("div", "agent-def-actions");
+  const editBtn = element("button", "pm-btn pm-btn-view", "✏️ Düzenle (v+1)");
+  editBtn.type = "button";
+  if (typeof editBtn.addEventListener === "function") {
+    editBtn.addEventListener("click", () => {
+      openAgentEditModal(agent, editBtn);
+    });
+  }
+  actions.appendChild(editBtn);
+
+  const verBtn = element("button", "pm-btn pm-btn-view", "📜 Versiyonlar");
+  verBtn.type = "button";
+  if (typeof verBtn.addEventListener === "function") {
+    verBtn.addEventListener("click", () => {
+      openAgentVersionsDrawer(agent.id, verBtn);
+    });
+  }
+  actions.appendChild(verBtn);
+
+  if (agent.status === "enabled") {
+    const disBtn = element("button", "pm-btn pm-btn-reject", "Devre Dışı Bırak");
+    disBtn.type = "button";
+    if (typeof disBtn.addEventListener === "function") {
+      disBtn.addEventListener("click", () => updateAgentStatus(agent.id, "disabled"));
+    }
+    actions.appendChild(disBtn);
+  } else if (agent.status === "disabled") {
+    const enBtn = element("button", "pm-btn pm-btn-approve", "Etkinleştir");
+    enBtn.type = "button";
+    if (typeof enBtn.addEventListener === "function") {
+      enBtn.addEventListener("click", () => updateAgentStatus(agent.id, "enabled"));
+    }
+    actions.appendChild(enBtn);
+
+    const archBtn = element("button", "pm-btn pm-btn-reject", "Arşivle");
+    archBtn.type = "button";
+    if (typeof archBtn.addEventListener === "function") {
+      archBtn.addEventListener("click", () => updateAgentStatus(agent.id, "archived"));
+    }
+    actions.appendChild(archBtn);
+  } else if (agent.status === "archived") {
+    const enBtn = element("button", "pm-btn pm-btn-approve", "Yeniden Etkinleştir");
+    enBtn.type = "button";
+    if (typeof enBtn.addEventListener === "function") {
+      enBtn.addEventListener("click", () => updateAgentStatus(agent.id, "enabled"));
+    }
+    actions.appendChild(enBtn);
+  }
+
+  card.appendChild(top);
+  card.appendChild(meta);
+  card.appendChild(actions);
+  return card;
+}
+
+async function updateAgentStatus(agentId, newStatus) {
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: newStatus })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await fetchSnapshot();
+  } catch (err) {
+    alert(`Agent durumu güncellenemedi: ${err.message}`);
+  }
+}
+
+async function openAgentVersionsDrawer(agentId, triggerBtn = null) {
+  const modal = getElem("agent-versions-drawer");
+  const pill = getElem("agent-ver-pill");
+  const title = getElem("agent-ver-title");
+  const summaryEl = getElem("agent-ver-summary");
+  const body = getElem("agent-ver-drawer-body");
+
+  if (!modal || !body) return;
+
+  if (pill) pill.textContent = agentId;
+  if (title) title.textContent = `Agent Versiyon Geçmişi · ${agentId}`;
+  if (summaryEl) summaryEl.textContent = "Versiyonlar yükleniyor...";
+  body.innerHTML = '<div class="loading-spinner">Yükleniyor...</div>';
+
+  openModal("agent-versions-drawer", triggerBtn);
 
   try {
-    const res = await fetch("/api/agents?includeArchived=true");
-    if (!res.ok) throw new Error("Agent listesi alınamadı");
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/versions`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
+    const versions = Array.isArray(data) ? data : (data.versions || []);
 
-    const agents = data.agents || [];
-    if (agents.length === 0) {
-      container.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--muted);">Kayıtlı agent tanımı bulunamadı.</div>`;
+    body.innerHTML = "";
+    if (summaryEl) summaryEl.textContent = `Toplam ${versions.length} immutable versiyon`;
+
+    if (versions.length === 0) {
+      body.appendChild(element("p", "empty-text", "Versiyon bulunamadı."));
       return;
     }
 
-    container.innerHTML = agents.map(agent => {
-      const isEnabled = agent.status === "enabled";
-      const isArchived = agent.status === "archived";
+    versions.forEach(v => {
+      const item = element("div", "version-card");
+      const hdr = element("div", "version-header");
+      hdr.appendChild(element("strong", null, `v${v.version}`));
+      hdr.appendChild(element("small", null, formatTime(v.createdAt, true)));
+      item.appendChild(hdr);
 
-      return `
-        <div class="agent-reg-card">
-          <div class="arc-header">
-            <div>
-              <span class="arc-id">${safeHtml(agent.id)}</span>
-              <span class="badge status-${safeHtml(agent.status)}">${safeHtml(agent.status.toUpperCase())}</span>
-              <span class="badge" style="background: rgba(255,255,255,0.05); color: #cbd5e1;">v${agent.version || 1}</span>
-            </div>
-            <div class="arc-actions">
-              <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openAgentVersionsDrawer('${safeHtml(agent.id)}')">Versiyonlar</button>
-              <button class="pm-btn pm-btn-view" style="font-size: 0.72rem;" onclick="openAgentEditModal('${safeHtml(agent.id)}')">Yeni Versiyon Kaydet</button>
-              ${isEnabled
-                ? `<button class="pm-btn pm-btn-reject" style="font-size: 0.72rem;" onclick="toggleAgentStatus('${safeHtml(agent.id)}', 'disable')">Devre Dışı Bırak</button>`
-                : `<button class="pm-btn pm-btn-approve" style="font-size: 0.72rem;" onclick="toggleAgentStatus('${safeHtml(agent.id)}', 'enable')">Aktifleştir</button>`}
-            </div>
-          </div>
-
-          <div style="font-size: 0.85rem; color: #fff; font-weight: 500; margin: 6px 0;">${safeHtml(agent.displayName || agent.id)}</div>
-          <div style="font-size: 0.78rem; color: var(--muted);">
-            Rol: <strong>${safeHtml(agent.role || 'implementation')}</strong> · Model: <strong>${safeHtml(agent.preferredModel || 'default')}</strong> · Risk: <strong>${safeHtml(agent.risk || 'normal')}</strong>
-          </div>
-
-          ${agent.skills?.length ? `
-            <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
-              ${agent.skills.map(s => `<span class="skill-chip">${safeHtml(s)}</span>`).join("")}
-            </div>
-          ` : ''}
-
-          <div style="margin-top: 8px; font-size: 0.72rem; color: var(--muted);">
-            Tanım Özeti (SHA): <code>${safeHtml(agent.definitionHash?.slice(0, 12) || '—')}</code>
-          </div>
-        </div>
-      `;
-    }).join("");
-
+      const grid = element("div", "version-grid");
+      grid.appendChild(createTraceCell("Definition Hash", v.definitionHash ? v.definitionHash.slice(0, 16) + "..." : "—"));
+      grid.appendChild(createTraceCell("Rol", v.definition?.role || "—"));
+      grid.appendChild(createTraceCell("Default Persona", v.definition?.defaultPersona || "—"));
+      grid.appendChild(createTraceCell("Skills", Array.isArray(v.definition?.skills) ? v.definition.skills.join(", ") : "—"));
+      grid.appendChild(createTraceCell("Allowed Paths", Array.isArray(v.definition?.allowedPaths) ? v.definition.allowedPaths.join(", ") : "—"));
+      item.appendChild(grid);
+      body.appendChild(item);
+    });
   } catch (err) {
-    container.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+    body.innerHTML = `<div class="error-banner">Versiyonlar yüklenemedi: ${safeHtml(err.message)}</div>`;
   }
 }
 
-async function toggleAgentStatus(agentId, action) {
+function openAgentEditModal(agent, triggerBtn = null) {
+  const idInput = getElem("edit-agent-id");
+  const nameInput = getElem("edit-agent-name");
+  const roleSelect = getElem("edit-agent-role");
+  const skillsInput = getElem("edit-agent-skills");
+  const pathsInput = getElem("edit-agent-paths");
+  const riskSelect = getElem("edit-agent-risk");
+  const concInput = getElem("edit-agent-max-concurrency");
+  const statusEl = getElem("agent-edit-status");
+
+  if (idInput) idInput.value = agent.id;
+  if (nameInput) nameInput.value = agent.displayName || agent.id;
+  if (roleSelect) roleSelect.value = agent.role || "implementation";
+  if (skillsInput) skillsInput.value = Array.isArray(agent.skills) ? agent.skills.join(", ") : "";
+  if (pathsInput) pathsInput.value = Array.isArray(agent.allowedPaths) ? agent.allowedPaths.join(", ") : "";
+  if (riskSelect) riskSelect.value = agent.risk || "normal";
+  if (concInput) concInput.value = agent.maxConcurrency || 2;
+  if (statusEl) { statusEl.hidden = true; statusEl.textContent = ""; }
+
+  openModal("agent-edit-modal", triggerBtn);
+}
+
+async function submitAgentEdit() {
+  const idInput = getElem("edit-agent-id");
+  const nameInput = getElem("edit-agent-name");
+  const roleSelect = getElem("edit-agent-role");
+  const skillsInput = getElem("edit-agent-skills");
+  const pathsInput = getElem("edit-agent-paths");
+  const riskSelect = getElem("edit-agent-risk");
+  const concInput = getElem("edit-agent-max-concurrency");
+  const statusEl = getElem("agent-edit-status");
+  const submitBtn = getElem("agent-edit-submit-btn");
+
+  const id = idInput ? idInput.value : "";
+  if (!id) return;
+
+  if (submitBtn) submitBtn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "modal-status-msg is-loading";
+    statusEl.textContent = "Yeni versiyon kaydediliyor...";
+  }
+
+  const payload = {
+    displayName: nameInput ? nameInput.value.trim() : id,
+    role: roleSelect ? roleSelect.value : "implementation",
+    skills: skillsInput ? skillsInput.value.split(",").map(s => s.trim()).filter(Boolean) : [],
+    allowedPaths: pathsInput ? pathsInput.value.split(",").map(p => p.trim()).filter(Boolean) : [],
+    risk: riskSelect ? riskSelect.value : "normal",
+    maxConcurrency: concInput ? Number(concInput.value) || 1 : 1
+  };
+
   try {
-    const res = await fetch(`/api/agents/${agentId}/${action}`, { method: "POST" });
+    const res = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Agent durum güncelleme başarısız (${res.status})`);
+      throw new Error(data.error || `HTTP ${res.status}`);
     }
-    await renderAgentDefinitions();
+
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-success";
+      statusEl.textContent = "✓ Yeni immutable versiyon (v+1) başarıyla oluşturuldu.";
+    }
+
+    setTimeout(() => {
+      closeModal("agent-edit-modal");
+      fetchSnapshot();
+    }, 700);
   } catch (err) {
-    alert(`Hata: ${err.message}`);
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = `Hata: ${err.message}`;
+    }
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
-async function openAgentVersionsDrawer(agentId) {
-  const drawer = document.querySelector("#agent-versions-drawer");
-  const listEl = document.querySelector("#agent-versions-list");
-  const subEl = document.querySelector("#agent-versions-sub");
-  if (!drawer || !listEl) return;
+function openAgentCreateModal(triggerBtn = null) {
+  const form = getElem("agent-create-form");
+  if (form && typeof form.reset === "function") form.reset();
+  const statusEl = getElem("agent-create-status");
+  if (statusEl) { statusEl.hidden = true; statusEl.textContent = ""; }
+  const submitBtn = getElem("agent-create-submit-btn");
+  if (submitBtn) submitBtn.disabled = false;
 
-  drawer.hidden = false;
-  if (subEl) subEl.textContent = `${agentId} için sabit versiyon geçmişi`;
-  listEl.innerHTML = `<div style="padding: 16px; color: var(--muted);">Versiyon geçmişi yükleniyor...</div>`;
+  openModal("agent-create-modal", triggerBtn);
+}
+
+async function submitAgentCreate() {
+  const idInput = getElem("create-agent-id");
+  const nameInput = getElem("create-agent-name");
+  const roleSelect = getElem("create-agent-role");
+  const skillsInput = getElem("create-agent-skills");
+  const pathsInput = getElem("create-agent-paths");
+  const riskSelect = getElem("create-agent-risk");
+  const concInput = getElem("create-agent-max-concurrency");
+  const statusEl = getElem("agent-create-status");
+  const submitBtn = getElem("agent-create-submit-btn");
+
+  const id = idInput ? idInput.value.trim() : "";
+  const name = nameInput ? nameInput.value.trim() : "";
+  if (!id || !name) {
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = "Agent ID ve Görünen İsim zorunludur.";
+    }
+    return;
+  }
+
+  if (submitBtn) submitBtn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "modal-status-msg is-loading";
+    statusEl.textContent = "Agent tanımlanıyor...";
+  }
+
+  const payload = {
+    id,
+    displayName: name,
+    role: roleSelect ? roleSelect.value : "implementation",
+    defaultPersona: "backend-engineer",
+    skills: skillsInput ? skillsInput.value.split(",").map(s => s.trim()).filter(Boolean) : [],
+    allowedPaths: pathsInput ? pathsInput.value.split(",").map(p => p.trim()).filter(Boolean) : [],
+    risk: riskSelect ? riskSelect.value : "normal",
+    maxConcurrency: concInput ? Number(concInput.value) || 1 : 1
+  };
 
   try {
-    const res = await fetch(`/api/agents/${agentId}/versions`);
-    if (!res.ok) throw new Error("Versiyonlar alınamadı");
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Geçersiz yanıt");
+    const res = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
-    const versions = data.versions || [];
-    listEl.innerHTML = versions.map(v => `
-      <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <strong style="color: #fff;">Versiyon v${v.version}</strong>
-          <small style="color: var(--muted);">${formatTime(v.createdAt, true)}</small>
-        </div>
-        <div style="font-size: 0.72rem; color: var(--muted); margin: 4px 0;">
-          Hash: <code>${safeHtml(v.definitionHash || '—')}</code>
-        </div>
-        <pre style="background: rgba(0,0,0,0.4); padding: 8px; border-radius: 4px; font-size: 0.72rem; color: #a5f3fc; overflow-x: auto; margin: 6px 0 0 0;">${safeHtml(JSON.stringify(v.definition, null, 2))}</pre>
-      </div>
-    `).join("");
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
 
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-success";
+      statusEl.textContent = "✓ Agent başarıyla tanımlandı.";
+    }
+
+    setTimeout(() => {
+      closeModal("agent-create-modal");
+      fetchSnapshot();
+    }, 700);
   } catch (err) {
-    listEl.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+    if (statusEl) {
+      statusEl.className = "modal-status-msg is-error";
+      statusEl.textContent = `Hata: ${err.message}`;
+    }
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
-const verCloseBtn = document.querySelector("#agent-versions-close-btn");
-if (verCloseBtn) {
-  verCloseBtn.addEventListener("click", () => {
-    const drawer = document.querySelector("#agent-versions-drawer");
-    if (drawer) drawer.hidden = true;
+// Provider Configuration View
+function renderConfigView(data) {
+  const mutationBadge = getElem("config-mutation-badge");
+  const isMutable = Boolean(data.config?.mutationEnabled);
+
+  if (mutationBadge) {
+    mutationBadge.textContent = isMutable ? "Yapılandırılabilir (Mutable)" : "Salt Okunur (Read-Only)";
+    mutationBadge.className = isMutable ? "badge badge-enabled" : "read-only-badge";
+  }
+
+  const providers = data.providers || {};
+  const selections = data.config?.selections || {};
+  const mutableFields = data.config?.mutableFields || [];
+
+  renderProviderSection("ws", "workSource", providers.workSources, selections.workSource, isMutable && mutableFields.includes("workSource"));
+  renderProviderSection("orch", "orchestrator", providers.orchestrators, selections.orchestrator, isMutable && mutableFields.includes("orchestrator"));
+  renderProviderSection("exec", "executor", providers.executors, selections.executor, isMutable && mutableFields.includes("executor"));
+  renderProviderSection("ci", "codeIntelligence", providers.codeIntelligence, selections.codeIntelligence, isMutable && mutableFields.includes("codeIntelligence"));
+  renderProviderSection("sc", "sourceControl", providers.sourceControl, selections.sourceControl, false);
+}
+
+function renderProviderSection(prefix, fieldName, providerList = [], selectedName, canMutate) {
+  const selBadge = getElem(`cfg-${prefix}-selected`);
+  const list = getElem(`cfg-${prefix}-list`);
+
+  if (selBadge) selBadge.textContent = selectedName || "Yok";
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!Array.isArray(providerList) || providerList.length === 0) {
+    list.appendChild(element("div", "config-option-item", "Sağlayıcı bilgisi bulunamadı"));
+    return;
+  }
+
+  providerList.forEach(p => {
+    const pName = typeof p === "string" ? p : (p.name || p.provider);
+    const isSelected = pName === selectedName;
+
+    const item = element("div", `config-option-item ${isSelected ? "is-selected" : ""}`);
+    const nameSpan = element("strong", null, pName);
+    item.appendChild(nameSpan);
+
+    if (isSelected) {
+      item.appendChild(element("span", "badge badge-enabled", "AKTİF"));
+    } else if (canMutate) {
+      const selectBtn = element("button", "pm-btn pm-btn-view", "Seç");
+      selectBtn.type = "button";
+      if (typeof selectBtn.addEventListener === "function") {
+        selectBtn.addEventListener("click", () => {
+          updateProviderSelection(fieldName, pName);
+        });
+      }
+      item.appendChild(selectBtn);
+    } else {
+      item.appendChild(element("span", "badge", "Pasif"));
+    }
+
+    list.appendChild(item);
   });
 }
 
-// ── Provider / Configuration View ───────────────────────────────────────────
-
-async function renderConfigView() {
-  const container = document.querySelector("#config-providers-container");
-  const readOnlyNotice = document.querySelector("#config-readonly-notice");
-  if (!container) return;
-
+async function updateProviderSelection(field, value) {
   try {
-    const res = await fetch("/api/snapshot");
-    if (!res.ok) throw new Error("Snapshot alınamadı");
-    const data = await res.json();
-
-    const meta = data.controlPlane || {};
-    const providers = meta.providers || {};
-    const selections = meta.config?.selections || {};
-    const mutationEnabled = Boolean(meta.config?.mutationEnabled);
-
-    if (readOnlyNotice) {
-      readOnlyNotice.hidden = mutationEnabled;
-    }
-
-    const sections = [
-      { key: "workSource", title: "Work Source", list: providers.workSources || [] },
-      { key: "orchestrator", title: "Orchestrator", list: providers.orchestrators || [] },
-      { key: "executor", title: "Executor", list: providers.executors || [] },
-      { key: "codeIntelligence", title: "Code Intelligence", list: providers.codeIntelligence || [] },
-      { key: "sourceControl", title: "Source Control", list: providers.sourceControl || [] }
-    ];
-
-    container.innerHTML = sections.map(sec => {
-      const selectedId = selections[sec.key] || "";
-      const isMutable = mutationEnabled && sec.key !== "sourceControl";
-
-      return `
-        <div class="config-provider-card">
-          <div class="cpc-header">
-            <h4>${safeHtml(sec.title)}</h4>
-            <span class="badge" style="background: rgba(255,255,255,0.05); color: #cbd5e1;">${safeHtml(selectedId || 'none')}</span>
-          </div>
-
-          <div style="margin: 12px 0;">
-            <label style="font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px;">Aktif Sağlayıcı Seçimi:</label>
-            <select class="form-select config-provider-select" data-section="${safeHtml(sec.key)}" ${!isMutable ? 'disabled' : ''}>
-              ${sec.list.map(p => `
-                <option value="${safeHtml(p.id || p.name)}" ${p.selected || p.id === selectedId || p.name === selectedId ? 'selected' : ''} ${p.enabled === false ? 'disabled' : ''}>
-                  ${safeHtml(p.displayName || p.name || p.id)} ${p.enabled === false ? '(Devre Dışı)' : ''}
-                </option>
-              `).join("")}
-            </select>
-          </div>
-
-          <div style="font-size: 0.72rem; color: var(--muted);">
-            ${isMutable ? 'Seçimi değiştirdiğinizde ayarlar diske atomik kaydedilir.' : 'Bu sağlayıcı seçimi çalışma zamanında salt-okunurdur.'}
-          </div>
-        </div>
-      `;
-    }).join("");
-
-    // Bind onChange handlers for mutable provider dropdowns
-    container.querySelectorAll(".config-provider-select").forEach(sel => {
-      sel.addEventListener("change", async () => {
-        const section = sel.dataset.section;
-        const newProvider = sel.value;
-        try {
-          const patchRes = await fetch("/api/config/providers", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [section]: newProvider })
-          });
-          if (!patchRes.ok) {
-            const patchErr = await patchRes.json().catch(() => ({}));
-            throw new Error(patchErr.error || `Güncelleme başarısız (${patchRes.status})`);
-          }
-          await refresh();
-          await renderConfigView();
-        } catch (err) {
-          alert(`Hata: ${err.message}`);
-          await renderConfigView();
-        }
-      });
+    const res = await fetch("/api/config/providers", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value })
     });
-
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `HTTP ${res.status}`);
+    }
+    await fetchSnapshot();
   } catch (err) {
-    container.innerHTML = `<div class="error-banner">Hata: ${safeHtml(err.message)}</div>`;
+    alert(`Yapılandırma güncellenemedi: ${err.message}`);
   }
 }
 
-// ── Refresh & Polling ───────────────────────────────────────────────────────
-
-async function refresh() {
+// Snapshot Fetch & Reconciliation
+async function fetchSnapshot() {
   try {
     const res = await fetch("/api/snapshot");
-    if (!res.ok) throw new Error("Snapshot alınamadı");
-    const snapshot = await res.json();
-    state.snapshot = snapshot;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.snapshot = data;
     state.connected = true;
     state.loading = false;
 
-    if (elements.connectionDot) elements.connectionDot.className = "status-dot is-connected";
-    if (elements.connectionLabel) elements.connectionLabel.textContent = "Bağlı";
-    if (elements.syncTime) elements.syncTime.textContent = formatTime(snapshot.generatedAt || new Date().toISOString());
-    if (elements.error) elements.error.hidden = true;
+    const errBanner = getElem("error-banner");
+    if (errBanner) errBanner.hidden = true;
 
-    renderOverview();
+    updateTopbar(data);
+    renderOverview(data);
+    renderPmWorkspace();
+    renderConfigView(data);
+    renderAgentRegistry();
 
     if (state.currentView === "parents-view") {
-      renderParentsView(state.selectedParentKey);
-    } else if (state.currentView === "pm-view") {
-      renderPmWorkspace();
-    } else if (state.currentView === "observability-view") {
-      renderObservability();
-    } else if (state.currentView === "config-view") {
-      renderConfigView();
-    } else if (state.currentView === "agents-view") {
-      renderAgentDefinitions();
+      populateParentSelector();
     }
-
   } catch (err) {
     state.connected = false;
-    if (elements.connectionDot) elements.connectionDot.className = "status-dot is-disconnected";
-    if (elements.connectionLabel) elements.connectionLabel.textContent = "Bağlantı kesildi";
-    if (elements.error) {
-      elements.error.hidden = false;
-      elements.error.textContent = `Kontrol paneli güncellenemedi: ${err.message}`;
-    }
+    const errBanner = getElem("error-banner");
+    if (errBanner) errBanner.hidden = false;
+    const connDot = getElem("connection-dot");
+    const connLabel = getElem("connection-label");
+    if (connDot) connDot.className = "connection-dot is-offline";
+    if (connLabel) connLabel.textContent = "Bağlantı Kesildi";
   }
 }
 
-// ── Event Handlers & Initialization ─────────────────────────────────────────
+// Global Event Listeners & Setup
+function setupEventListeners() {
+  if (typeof document === "undefined") return;
 
-if (typeof document !== "undefined") {
-  document.querySelectorAll(".tab-button").forEach(button => {
-    button.addEventListener("click", () => {
-      const target = button.dataset.target;
-      if (target) switchView(target);
+  const tabButtons = document.querySelectorAll(".main-tabs .tab-button");
+  tabButtons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      const targetView = btn.dataset.target;
+      if (targetView) switchView(targetView, false);
     });
   });
 
-  const parentSel = document.querySelector("#parent-select");
-  if (parentSel) {
-    parentSel.addEventListener("change", () => {
-      state.selectedParentKey = parentSel.value;
-      renderParentsView(parentSel.value);
+  const pmFilterBtns = document.querySelectorAll(".pm-sub-nav .pm-filter-btn");
+  pmFilterBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.currentPmFilter = btn.dataset.pmFilter || "inbox";
+      renderPmWorkspace();
+    });
+  });
+
+  const pmStats = document.querySelectorAll(".pm-summary-bar .pm-stat");
+  pmStats.forEach(stat => {
+    stat.addEventListener("click", () => {
+      const group = stat.dataset.group;
+      if (group === "awaitingApproval") {
+        state.currentPmFilter = "approvals";
+      } else if (group === "blocked" || group === "needsRework") {
+        state.currentPmFilter = "attention";
+      } else {
+        state.currentPmFilter = "inbox";
+      }
+      renderPmWorkspace();
+    });
+  });
+
+  const pmForm = getElem("pm-form");
+  if (pmForm) {
+    pmForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = getElem("pm-input");
+      if (!input || !input.value.trim()) return;
+      const msg = input.value.trim();
+      input.value = "";
+      try {
+        await fetch("/api/pm/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: msg })
+        });
+        await fetchSnapshot();
+      } catch {}
     });
   }
 
-  const searchInput = document.querySelector("#run-search");
+  const fleetFilterBtns = document.querySelectorAll(".filters .filter-button");
+  fleetFilterBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      fleetFilterBtns.forEach(b => {
+        b.classList.remove("is-selected");
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.classList.add("is-selected");
+      btn.setAttribute("aria-pressed", "true");
+      state.filter = btn.dataset.filter || "all";
+      renderRuns();
+    });
+  });
+
+  const searchInput = getElem("run-search");
   if (searchInput) {
     searchInput.addEventListener("input", (e) => {
       state.query = e.target.value;
@@ -1893,20 +2443,219 @@ if (typeof document !== "undefined") {
     });
   }
 
-  document.querySelectorAll(".filter-btn").forEach(btn => {
+  const parentSelect = getElem("parent-select");
+  if (parentSelect) {
+    parentSelect.addEventListener("change", (e) => {
+      const pKey = e.target.value;
+      if (pKey) {
+        state.selectedParentKey = pKey;
+        fetchParentDetail(pKey);
+        syncUrlState(false);
+      }
+    });
+  }
+
+  const parentRefreshBtn = getElem("parent-refresh-btn");
+  if (parentRefreshBtn) {
+    parentRefreshBtn.addEventListener("click", () => {
+      if (state.selectedParentKey) {
+        fetchParentDetail(state.selectedParentKey);
+      } else {
+        populateParentSelector();
+      }
+    });
+  }
+
+  const obsWindowBtns = document.querySelectorAll(".obs-window-controls .window-btn");
+  obsWindowBtns.forEach(btn => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("is-active"));
+      obsWindowBtns.forEach(b => b.classList.remove("is-active"));
       btn.classList.add("is-active");
-      state.filter = btn.dataset.filter || "all";
-      renderRuns();
+      state.currentObsWindow = btn.dataset.window || "24h";
+      fetchObservabilitySummary();
     });
   });
 
-  setupPmSubNav();
-  restoreUrlState();
-  refresh();
+  const agentFilterBtns = document.querySelectorAll(".agent-filters .agent-filter-btn");
+  agentFilterBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.currentAgentFilter = btn.dataset.agentFilter || "all";
+      renderAgentRegistry();
+    });
+  });
 
-  setInterval(() => {
-    if (!document.hidden) refresh();
-  }, 2500);
+  const agentCreateBtn = getElem("agent-create-btn");
+  if (agentCreateBtn) {
+    agentCreateBtn.addEventListener("click", () => {
+      openAgentCreateModal(agentCreateBtn);
+    });
+  }
+
+  const agentCreateSubmitBtn = getElem("agent-create-submit-btn");
+  if (agentCreateSubmitBtn) {
+    agentCreateSubmitBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      submitAgentCreate();
+    });
+  }
+
+  const agentCreateCancelBtn = getElem("agent-create-cancel-btn");
+  const agentCreateCloseBtn = getElem("agent-create-close-btn");
+  if (agentCreateCancelBtn) agentCreateCancelBtn.addEventListener("click", () => closeModal("agent-create-modal"));
+  if (agentCreateCloseBtn) agentCreateCloseBtn.addEventListener("click", () => closeModal("agent-create-modal"));
+
+  const agentEditSubmitBtn = getElem("agent-edit-submit-btn");
+  if (agentEditSubmitBtn) {
+    agentEditSubmitBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      submitAgentEdit();
+    });
+  }
+
+  const agentEditCancelBtn = getElem("agent-edit-cancel-btn");
+  const agentEditCloseBtn = getElem("agent-edit-close-btn");
+  if (agentEditCancelBtn) agentEditCancelBtn.addEventListener("click", () => closeModal("agent-edit-modal"));
+  if (agentEditCloseBtn) agentEditCloseBtn.addEventListener("click", () => closeModal("agent-edit-modal"));
+
+  const agentVerCloseBtn = getElem("agent-ver-close-btn");
+  if (agentVerCloseBtn) agentVerCloseBtn.addEventListener("click", () => closeModal("agent-versions-drawer"));
+
+  const traceCloseBtn = getElem("trace-close-btn");
+  if (traceCloseBtn) {
+    traceCloseBtn.addEventListener("click", () => {
+      closeModal("decision-trace-modal");
+      state.selectedWorkItemKey = null;
+      syncUrlState(false);
+    });
+  }
+
+  const telemCloseBtn = getElem("telem-close-btn");
+  if (telemCloseBtn) {
+    telemCloseBtn.addEventListener("click", () => {
+      closeModal("telemetry-drawer-modal");
+      state.selectedRunId = null;
+      syncUrlState(false);
+    });
+  }
+
+  const appConfirmBtn = getElem("approval-modal-confirm-btn");
+  const appCancelBtn = getElem("approval-modal-cancel-btn");
+  const appCloseBtn = getElem("approval-modal-close-btn");
+  if (appConfirmBtn) appConfirmBtn.addEventListener("click", submitApproval);
+  if (appCancelBtn) appCancelBtn.addEventListener("click", () => closeModal("approval-modal"));
+  if (appCloseBtn) appCloseBtn.addEventListener("click", () => closeModal("approval-modal"));
+
+  const rejConfirmBtn = getElem("rejection-modal-confirm-btn");
+  const rejCancelBtn = getElem("rejection-modal-cancel-btn");
+  const rejCloseBtn = getElem("rejection-modal-close-btn");
+  if (rejConfirmBtn) rejConfirmBtn.addEventListener("click", submitRejection);
+  if (rejCancelBtn) rejCancelBtn.addEventListener("click", () => closeModal("rejection-modal"));
+  if (rejCloseBtn) rejCloseBtn.addEventListener("click", () => closeModal("rejection-modal"));
+
+  const modalBackdrops = document.querySelectorAll(".trace-modal-backdrop");
+  modalBackdrops.forEach(backdrop => {
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) {
+        backdrop.hidden = true;
+        if (backdrop.id === "decision-trace-modal") {
+          state.selectedWorkItemKey = null;
+          syncUrlState(false);
+        } else if (backdrop.id === "telemetry-drawer-modal") {
+          state.selectedRunId = null;
+          syncUrlState(false);
+        }
+      }
+    });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" || e.keyCode === 27) {
+      modalBackdrops.forEach(backdrop => {
+        if (!backdrop.hidden) {
+          backdrop.hidden = true;
+          if (backdrop.id === "decision-trace-modal") {
+            state.selectedWorkItemKey = null;
+            syncUrlState(false);
+          } else if (backdrop.id === "telemetry-drawer-modal") {
+            state.selectedRunId = null;
+            syncUrlState(false);
+          }
+        }
+      });
+      if (state.lastFocusedElement && typeof state.lastFocusedElement.focus === "function") {
+        try { state.lastFocusedElement.focus(); } catch {}
+        state.lastFocusedElement = null;
+      }
+    }
+  });
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("popstate", () => {
+      readUrlState();
+    });
+  }
+}
+
+// Initialization
+async function init() {
+  setupEventListeners();
+  await fetchSnapshot();
+  readUrlState();
+
+  if (typeof setInterval === "function") {
+    setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) {
+        fetchSnapshot();
+      }
+    }, 3000);
+  }
+}
+
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    state,
+    elements,
+    STATUS_LABELS,
+    PERSONA_INITIALS,
+    ROLE_LABELS,
+    safeHtml,
+    element,
+    getElem,
+    formatNumber,
+    formatDuration,
+    formatDurationMs,
+    formatTime,
+    taskCard,
+    roleLane,
+    visibleRuns,
+    renderRuns,
+    renderCapacity,
+    renderOverview,
+    renderPmWorkspace,
+    renderParentDetail,
+    renderObservability,
+    renderConfigView,
+    renderAgentRegistry,
+    openModal,
+    closeModal,
+    syncUrlState,
+    readUrlState
+  };
+}
+if (typeof window !== "undefined") {
+  window.PaceControlPlane = {
+    state,
+    elements,
+    renderRuns,
+    renderCapacity,
+    fetchSnapshot
+  };
 }

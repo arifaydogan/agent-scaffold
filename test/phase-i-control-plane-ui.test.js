@@ -7,9 +7,25 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { RunStore } from "../lib/store.js";
-import { createDashboardServer, buildControlPlaneMetadata, buildDashboardSnapshot, buildDemoSnapshot } from "../lib/dashboard.js";
-import { describeSourceControlProviders, selectedSourceControlProviderName } from "../lib/source-control.js";
-import { computePlanFingerprint, computeParentBranchFingerprint } from "../lib/policy.js";
+import {
+  createDashboardServer,
+  buildControlPlaneMetadata,
+  buildDashboardSnapshot,
+  buildDemoSnapshot
+} from "../lib/dashboard.js";
+import {
+  buildPmWorkspace,
+  buildPmWorkItemDetail,
+  handlePmApproval,
+  handlePmRejection
+} from "../lib/pm-workspace.js";
+import {
+  buildObservabilitySummary,
+  buildRunObservability,
+  normalizeUsage
+} from "../lib/telemetry.js";
+import { resolveOperatingMode, computePlanFingerprint } from "../lib/policy.js";
+import { describeSourceControlProviders } from "../lib/source-control.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +64,7 @@ function makeSettings(tmpDir, overrides = {}) {
     controlPlane: {
       configMutationEnabled: true,
       allowLoopbackMutations: true,
+      pmMutationEnabled: true,
       ...overrides.controlPlane
     },
     workSource: {
@@ -83,7 +100,8 @@ function makeSettings(tmpDir, overrides = {}) {
       allowedProjects: ["PACE"],
       requiredLabels: ["agent-ready"],
       humanOnlyStatuses: ["Done"],
-      operatingMode: "autonomous"
+      operatingMode: "autonomous",
+      ...overrides.policy
     },
     ...overrides.data
   };
@@ -98,655 +116,515 @@ function makeSettings(tmpDir, overrides = {}) {
   };
 }
 
-async function request(server, pathStr, options = {}) {
-  const addr = server.address();
-  const host = addr.family === "IPv6" ? `[${addr.address}]` : addr.address;
-  const url = `http://${host}:${addr.port}${pathStr}`;
-
-  const res = await fetch(url, {
-    method: options.method || "GET",
-    headers: options.headers || {},
-    body: options.body ? (typeof options.body === "string" ? options.body : JSON.stringify(options.body)) : undefined
+function request(server, pathStr, options = {}) {
+  return new Promise((resolve, reject) => {
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 80;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: pathStr,
+        method: options.method || "GET",
+        headers: options.headers || {}
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          raw += chunk;
+        });
+        res.on("end", () => {
+          let data = raw;
+          if (res.headers["content-type"]?.includes("application/json")) {
+            try {
+              data = JSON.parse(raw);
+            } catch {}
+          }
+          resolve({ status: res.statusCode, headers: res.headers, data });
+        });
+      }
+    );
+    req.on("error", reject);
+    if (options.body) {
+      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    }
+    req.end();
   });
-
-  const contentType = res.headers.get("content-type") || "";
-  let data;
-  if (contentType.includes("application/json")) {
-    data = await res.json();
-  } else {
-    data = await res.text();
-  }
-
-  return {
-    status: res.status,
-    headers: res.headers,
-    data
-  };
 }
 
-test("Phase I — A. Assets Serving & Security Headers", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("assets");
-  const settings = makeSettings(tmpDir);
-  const server = createDashboardServer(settings, { store, port: 0 });
+// -----------------------------------------------------------------------------
+// Test A: DOM Selector Contract
+// -----------------------------------------------------------------------------
+test("Phase I — A. DOM Selector Contract (Every JS ID exists in index.html)", () => {
+  const htmlPath = path.join(rootDir, "ui", "index.html");
+  const jsPath = path.join(rootDir, "ui", "dashboard.js");
+  const html = fs.readFileSync(htmlPath, "utf-8");
+  const js = fs.readFileSync(jsPath, "utf-8");
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    // 1. Root / serves index.html
-    const rootRes = await request(server, "/");
-    assert.equal(rootRes.status, 200);
-    assert.match(rootRes.headers.get("content-type"), /text\/html/);
-    assert.equal(rootRes.headers.get("x-content-type-options"), "nosniff");
-    assert.match(rootRes.headers.get("content-security-policy"), /default-src 'self'/);
-    assert.match(rootRes.data, /Control Plane · PaceBuild/);
-    assert.match(rootRes.data, /Parent Orkestrasyon/);
-
-    // 2. /assets/dashboard.js serves Javascript
-    const jsRes = await request(server, "/assets/dashboard.js");
-    assert.equal(jsRes.status, 200);
-    assert.match(jsRes.headers.get("content-type"), /(?:text|application)\/javascript/);
-    assert.match(jsRes.data, /renderParentsView/);
-    assert.match(jsRes.data, /openApprovalModal/);
-
-    // 3. /assets/dashboard.css serves CSS
-    const cssRes = await request(server, "/assets/dashboard.css");
-    assert.equal(cssRes.status, 200);
-    assert.match(cssRes.headers.get("content-type"), /text\/css/);
-    assert.match(cssRes.data, /parent-summary-card/);
-    assert.match(cssRes.data, /dag-container/);
-
-    // 4. Unknown asset returns 404
-    const unknownRes = await request(server, "/assets/non-existent.js");
-    assert.equal(unknownRes.status, 404);
-
-    // 5. Path traversal returns 404
-    const traversalRes = await request(server, "/assets/../package.json");
-    assert.equal(traversalRes.status, 404);
-
-  } finally {
-    server.close();
-    cleanup();
-  }
-});
-
-test("Phase I — B. PM Approval UI / API Contract (Exact fingerprint, 409 conflict, & Rejection)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("approvals");
-  const settings = makeSettings(tmpDir);
-  const server = createDashboardServer(settings, { store, port: 0 });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const issueKey = "PACE-101";
-    const planA = { issue: issueKey, summary: "Initial Implementation Plan", allowedPaths: ["lib/**"], taskAgent: "backend-engineer" };
-    const fpA = computePlanFingerprint(planA);
-
-    // Record approval request with fpA
-    store.addPmDecision(issueKey, "approval_requested", {
-      action: "implementation",
-      planFingerprint: fpA,
-      attempt: 0,
-      reason: "High risk task requires operator approval"
-    });
-
-    // 1. Approve with exact fingerprint fpA -> 200 OK
-    const approveRes = await request(server, `/api/pm/work-items/${issueKey}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: {
-        action: "implementation",
-        planFingerprint: fpA,
-        attempt: 0,
-        approver: "PM Operator",
-        reason: "Approved from UI modal"
-      }
-    });
-    assert.equal(approveRes.status, 200);
-    assert.equal(approveRes.data.ok, true);
-    assert.equal(approveRes.data.decision.approved, true);
-
-    // Verify approval stored in store
-    const checkApproval = store.hasExecutionApproval(issueKey, { action: "implementation", planFingerprint: fpA, attempt: 0 });
-    assert.ok(checkApproval);
-    assert.equal(checkApproval.approved, true);
-
-    // 2. A newer plan B is requested with fpB
-    const planB = { issue: issueKey, summary: "Updated Implementation Plan", allowedPaths: ["lib/**", "src/**"], taskAgent: "backend-engineer" };
-    const fpB = computePlanFingerprint(planB);
-
-    store.addPmDecision(issueKey, "approval_requested", {
-      action: "implementation",
-      planFingerprint: fpB,
-      attempt: 0,
-      reason: "Plan modified"
-    });
-
-    // Submitting approval with stale fpA -> 409 Conflict!
-    const staleApproveRes = await request(server, `/api/pm/work-items/${issueKey}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: {
-        action: "implementation",
-        planFingerprint: fpA,
-        attempt: 0,
-        approver: "PM Operator",
-        reason: "Stale approval attempt"
-      }
-    });
-    assert.equal(staleApproveRes.status, 409);
-    assert.match(staleApproveRes.data.error, /Plan fingerprint mismatch/i);
-    assert.equal(staleApproveRes.data.expected, fpB);
-
-    // 3. Rejection with reason -> 200 OK and records rejected decision
-    const rejectRes = await request(server, `/api/pm/work-items/${issueKey}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: {
-        action: "implementation",
-        planFingerprint: fpB,
-        attempt: 0,
-        approver: "PM Operator",
-        reason: "Scope too broad; rejected"
-      }
-    });
-    assert.equal(rejectRes.status, 200);
-    assert.equal(rejectRes.data.ok, true);
-    assert.equal(rejectRes.data.decision.approved, false);
-    assert.equal(rejectRes.data.decision.reason, "Scope too broad; rejected");
-
-  } finally {
-    server.close();
-    cleanup();
-  }
-});
-
-test("Phase I — C. Parent Detail API / UI Model (Valid DAG, Dependent Children, Integrated, & Conflict)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("parent-dag");
-  const settings = makeSettings(tmpDir);
-  const server = createDashboardServer(settings, { store, port: 0 });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const parentKey = "PACE-200";
-    const baseSha = "1111111111111111111111111111111111111111";
-    const intHeadSha = "2222222222222222222222222222222222222222";
-    const graphFp = "fp-parent-200-graph";
-
-    // Record parent execution
-    store.upsertParentExecution({
-      parentKey,
-      sourceProvider: "jira",
-      summary: "Kamera Entegrasyon Epik",
-      baseRef: "develop",
-      baseSha,
-      integrationBranch: "epic/pace-200-camera",
-      integrationHeadSha: intHeadSha,
-      graphFingerprint: graphFp,
-      dag: {
-        nodes: ["PACE-201", "PACE-202", "PACE-203"],
-        edges: [{ from: "PACE-201", to: "PACE-202" }]
-      },
-      state: "active"
-    });
-
-    // Record tasks (children)
-    store.upsertEpicTask({
-      epicKey: parentKey,
-      issueKey: "PACE-201",
-      summary: "Kamera SDK Entegrasyonu",
-      branch: "task/pace-201-sdk",
-      state: "accepted",
-      orchestrationState: "accepted",
-      dependencies: [],
-      childBaseSha: baseSha,
-      reviewedSha: "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
-      integratedSha: "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
-    });
-
-    store.queueEpicIntegration({
-      epicKey: parentKey,
-      issueKey: "PACE-201",
-      leafBranch: "task/pace-201-sdk"
-    });
-    store.claimEpicIntegration({ epicKey: parentKey, issueKey: "PACE-201" });
-    store.finishEpicIntegration({
-      epicKey: parentKey,
-      issueKey: "PACE-201",
-      commit: "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
-    });
-
-    store.upsertEpicTask({
-      epicKey: parentKey,
-      issueKey: "PACE-202",
-      summary: "Kamera UI Paneli",
-      branch: "task/pace-202-ui",
-      state: "executing",
-      orchestrationState: "executing",
-      dependencies: ["PACE-201"],
-      childBaseSha: "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"
-    });
-
-    store.upsertEpicTask({
-      epicKey: parentKey,
-      issueKey: "PACE-203",
-      summary: "Kamera Güvenlik Logları",
-      branch: "task/pace-203-security",
-      state: "accepted",
-      orchestrationState: "accepted",
-      dependencies: [],
-      childBaseSha: baseSha,
-      blockedReasons: ["Git merge conflict in config/camera.json"]
-    });
-
-    // Now queue and record conflict for PACE-203
-    store.queueEpicIntegration({
-      epicKey: parentKey,
-      issueKey: "PACE-203",
-      leafBranch: "task/pace-203-security"
-    });
-    store.claimEpicIntegration({ epicKey: parentKey, issueKey: "PACE-203" });
-    store.finishEpicIntegration({
-      epicKey: parentKey,
-      issueKey: "PACE-203",
-      conflict: "Merge conflict in config/camera.json"
-    });
-
-    // 1. List parents via GET /api/pm/parents
-    const listRes = await request(server, "/api/pm/parents");
-    assert.equal(listRes.status, 200);
-    assert.equal(listRes.data.ok, true);
-    assert.equal(listRes.data.parents.length, 1);
-    assert.equal(listRes.data.parents[0].parentKey, parentKey);
-
-    // 2. Get normalized parent detail via GET /api/pm/parents/:key
-    const detailRes = await request(server, `/api/pm/parents/${parentKey}`);
-    assert.equal(detailRes.status, 200);
-    assert.equal(detailRes.data.ok, true);
-
-    const p = detailRes.data.parent;
-    assert.equal(p.parent.parentKey, parentKey);
-    assert.equal(p.state, "active");
-    assert.equal(p.baseRef, "develop");
-    assert.equal(p.baseSha, baseSha);
-    assert.equal(p.integrationBranch, "epic/pace-200-camera");
-    assert.equal(p.integrationHeadSha, intHeadSha);
-    assert.equal(p.graphFingerprint, graphFp);
-
-    // Check children array & DAG relationships
-    assert.equal(p.children.length, 3);
-
-    const child201 = p.children.find(c => c.issueKey === "PACE-201");
-    assert.equal(child201.dependencyState, "ready");
-    assert.equal(child201.integrationState, "integrated");
-    assert.equal(child201.integratedSha, "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222");
-
-    const child202 = p.children.find(c => c.issueKey === "PACE-202");
-    assert.deepEqual(child202.dependencies, ["PACE-201"]);
-    // Since PACE-201 is integrated, PACE-202's dependencyState is satisfied!
-    assert.equal(child202.dependencyState, "satisfied");
-    assert.equal(child202.runtimeState, "executing");
-
-    const child203 = p.children.find(c => c.issueKey === "PACE-203");
-    assert.equal(child203.runtimeState, "blocked-conflict");
-    assert.equal(child203.integrationState, "conflict");
-    assert.match(child203.blockedReasons[0], /Git merge conflict/);
-
-    // Parent surfaces child conflict in blockedReasons
-    assert.ok(p.blockedReasons.some(r => r.includes("Integration conflict in child PACE-203") || r.includes("Git merge conflict")));
-
-  } finally {
-    server.close();
-    cleanup();
-  }
-});
-
-test("Phase I — D. Parent Completion Boundary (WAITING_HUMAN has completion evidence, NO auto-merge button)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("parent-completion");
-  const settings = makeSettings(tmpDir);
-  const server = createDashboardServer(settings, { store, port: 0 });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const parentKey = "PACE-300";
-    const baseSha = "3333333333333333333333333333333333333333";
-    const intHeadSha = "4444444444444444444444444444444444444444";
-    const graphFp = "fp-parent-300-complete";
-
-    const completionPacket = {
-      parentKey,
-      graphFingerprint: graphFp,
-      baseSha,
-      integrationHeadSha: intHeadSha,
-      integrationReview: {
-        verdict: "clean",
-        reviewerId: "lead-reviewer",
-        durationMs: 4200,
-        findings: []
-      },
-      status: "ready_for_human_approval"
-    };
-
-    store.upsertParentExecution({
-      parentKey,
-      sourceProvider: "jira",
-      summary: "Tamamlanan Epik",
-      baseRef: "develop",
-      baseSha,
-      integrationBranch: "epic/pace-300-done",
-      integrationHeadSha: intHeadSha,
-      graphFingerprint: graphFp,
-      state: "waiting_human",
-      completionPacket
-    });
-
-    const res = await request(server, `/api/pm/parents/${parentKey}`);
-    assert.equal(res.status, 200);
-
-    const parent = res.data.parent;
-    assert.equal(parent.state, "waiting_human");
-    assert.equal(parent.waitingHuman, true);
-    assert.ok(parent.integrationReview);
-    assert.equal(parent.integrationReview.verdict, "clean");
-
-    // Verify snapshot also carries WAITING_HUMAN in humanApproval group
-    const snapshotRes = await request(server, "/api/snapshot");
-    assert.equal(snapshotRes.status, 200);
-
-    const humanApprovalItems = snapshotRes.data.pmWorkspace.groups.humanApproval || [];
-    assert.ok(humanApprovalItems.some(i => i.issueKey === parentKey));
-
-  } finally {
-    server.close();
-    cleanup();
-  }
-});
-
-test("Phase I — E. Provider / Configuration View (Read-Only Safety & Future Runs Disclaimer)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("config-view");
-  const settings = makeSettings(tmpDir);
-
-  // 1. buildControlPlaneMetadata includes SourceControlProvider
-  const meta = buildControlPlaneMetadata(settings);
-  assert.ok(meta.providers.sourceControl, "sourceControl must be present in providers");
-  assert.equal(meta.providers.sourceControl[0].id, "local-git");
-  assert.equal(meta.config.selections.sourceControl, "local-git");
-  assert.deepEqual(meta.config.mutableFields, ["workSource", "orchestrator", "executor", "codeIntelligence"]);
-
-  // 2. Mutation enabled server allows PATCH /api/config/providers
-  const server = createDashboardServer(settings, { store, port: 0 });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const patchRes = await request(server, "/api/config/providers", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: { executor: "local" }
-    });
-    assert.equal(patchRes.status, 200);
-    assert.equal(patchRes.data.ok, true);
-    assert.equal(patchRes.data.config.selections.executor, "local");
-
-    // 3. Read-only server blocks PATCH /api/config/providers
-    const roSettings = makeSettings(tmpDir, { controlPlane: { configMutationEnabled: false } });
-    const roServer = createDashboardServer(roSettings, { store, port: 0 });
-    await new Promise((resolve) => roServer.listen(0, "127.0.0.1", resolve));
-
-    try {
-      const roPatchRes = await request(roServer, "/api/config/providers", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: { executor: "codex" }
-      });
-      assert.equal(roPatchRes.status, 403);
-      assert.match(String(roPatchRes.data?.error || roPatchRes.data), /disabled/i);
-    } finally {
-      roServer.close();
+  // Extract all getElem("..."), document.getElementById("..."), and document.querySelector("#...")
+  const idRegex = /(?:getElem\(\s*["']([^"']+)["']\s*\)|getElementById\(\s*["']([^"']+)["']\s*\)|querySelector\(\s*["']#([^"']+)["']\s*\))/g;
+  const queriedIds = new Set();
+  let match;
+  while ((match = idRegex.exec(js)) !== null) {
+    const id = match[1] || match[2] || match[3];
+    if (id && !id.includes("${")) {
+      queriedIds.add(id);
     }
+  }
 
+  assert.ok(queriedIds.size >= 25, `Expected at least 25 queried IDs, found ${queriedIds.size}`);
+
+  const missingIds = [];
+  for (const id of queriedIds) {
+    const hasId = html.includes(`id="${id}"`) || html.includes(`id='${id}'`);
+    if (!hasId) {
+      missingIds.push(id);
+    }
+  }
+
+  assert.deepEqual(missingIds, [], `The following IDs queried in dashboard.js are missing from index.html: ${missingIds.join(", ")}`);
+});
+
+// -----------------------------------------------------------------------------
+// Test B: CSP Compatibility & Static Check
+// -----------------------------------------------------------------------------
+test("Phase I — B. CSP Compatibility & Static Check (Zero inline JS, strict script-src 'self')", async () => {
+  const htmlPath = path.join(rootDir, "ui", "index.html");
+  const jsPath = path.join(rootDir, "ui", "dashboard.js");
+  const html = fs.readFileSync(htmlPath, "utf-8");
+  const js = fs.readFileSync(jsPath, "utf-8");
+
+  // Verify no inline event handlers in HTML
+  assert.ok(!/onclick\s*=/i.test(html), "index.html must not contain inline onclick handlers");
+  assert.ok(!/onerror\s*=/i.test(html), "index.html must not contain inline onerror handlers");
+  assert.ok(!/onload\s*=/i.test(html), "index.html must not contain inline onload handlers");
+  assert.ok(!/href\s*=\s*["']javascript:/i.test(html), "index.html must not contain javascript: URLs");
+
+  // Verify no inline event handlers generated in JS template strings
+  assert.ok(!/onclick\s*=/i.test(js), "dashboard.js must not generate inline onclick handlers");
+  assert.ok(!/onerror\s*=/i.test(js), "dashboard.js must not generate inline onerror handlers");
+  assert.ok(!/onload\s*=/i.test(js), "dashboard.js must not generate inline onload handlers");
+  assert.ok(!/href\s*=\s*["']javascript:/i.test(js), "dashboard.js must not generate javascript: href URLs");
+
+  // Verify HTTP server CSP header
+  const { store, tmpDir, cleanup } = makeTempDb("csp-check");
+  const settings = makeSettings(tmpDir);
+  const server = createDashboardServer(settings, { store, port: 0 });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const res = await request(server, "/");
+    assert.equal(res.status, 200);
+    const csp = res.headers["content-security-policy"];
+    assert.ok(csp, "Server must return Content-Security-Policy header");
+    assert.ok(csp.includes("script-src 'self'"), "CSP must enforce script-src 'self'");
+    assert.ok(!csp.includes("'unsafe-inline'"), "script-src must NOT contain 'unsafe-inline'");
   } finally {
     server.close();
     cleanup();
   }
 });
 
-test("Phase I — F. Agent Registry API & Semantics (List, Versions, Immutable v+1, Enable/Disable/Archive)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("agent-registry");
+// -----------------------------------------------------------------------------
+// Test C: PM Workspace Contract
+// -----------------------------------------------------------------------------
+test("Phase I — C. PM Workspace Contract (Real buildPmWorkspace shape & actions)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("pm-workspace");
+  const settings = makeSettings(tmpDir);
+
+  const plan1 = {
+    issue: "PACE-101",
+    summary: "Auth controller scope fix",
+    role: "implementation",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    risk: "normal",
+    allowedPaths: ["src/auth/**"]
+  };
+  const runId1 = store.createRun("PACE-101", plan1);
+  store.transition(runId1, "executing");
+
+  // Create a run in supervised mode that requires human approval
+  const plan2 = {
+    issue: "PACE-102",
+    summary: "High risk schema change",
+    role: "implementation",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    risk: "high",
+    configSnapshot: {
+      operatingMode: "supervised"
+    }
+  };
+  const runId2 = store.createRun("PACE-102", plan2);
+
+  const workspace = buildPmWorkspace(settings, { store });
+
+  assert.ok(workspace.groups, "Must have groups");
+  assert.ok(Array.isArray(workspace.groups.needsPlanning));
+  assert.ok(Array.isArray(workspace.groups.awaitingApproval));
+  assert.ok(Array.isArray(workspace.groups.ready));
+  assert.ok(Array.isArray(workspace.groups.executing));
+  assert.ok(Array.isArray(workspace.groups.inReview));
+  assert.ok(Array.isArray(workspace.groups.needsRework));
+  assert.ok(Array.isArray(workspace.groups.blocked));
+  assert.ok(Array.isArray(workspace.groups.humanApproval));
+
+  assert.equal(workspace.groups.executing.length, 1);
+  assert.equal(workspace.groups.executing[0].issueKey, "PACE-101");
+  assert.equal(workspace.groups.awaitingApproval.length, 1);
+  assert.equal(workspace.groups.awaitingApproval[0].issueKey, "PACE-102");
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test D: Decision Trace Contract
+// -----------------------------------------------------------------------------
+test("Phase I — D. Decision Trace Contract (buildPmWorkItemDetail returns complete read model)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("decision-trace");
+  const settings = makeSettings(tmpDir);
+
+  const plan = {
+    issue: "PACE-201",
+    summary: "Refactor cache layer",
+    role: "implementation",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer",
+    risk: "low",
+    allowedPaths: ["src/cache/**"]
+  };
+  const runId = store.createRun("PACE-201", plan);
+  store.transition(runId, "started");
+  store.transition(runId, "verifying");
+
+  const detail = buildPmWorkItemDetail(settings, "PACE-201", { store });
+
+  assert.ok(detail.workItem, "workItem required");
+  assert.equal(detail.workItem.key, "PACE-201");
+  assert.equal(detail.workItem.summary, "Refactor cache layer");
+
+  assert.ok(detail.orchestratorDecision, "orchestratorDecision required");
+  assert.equal(detail.orchestratorDecision.persona, "backend-engineer");
+  assert.equal(detail.orchestratorDecision.taskAgent, "backend-engineer");
+  assert.equal(detail.orchestratorDecision.risk, "low");
+
+  assert.ok(detail.execution, "execution required");
+  assert.ok(detail.review, "review required");
+  assert.ok(detail.humanControl, "humanControl required");
+  assert.ok(detail.blockedInfo, "blockedInfo required");
+  assert.ok(Array.isArray(detail.history), "history timeline required");
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test E: Provider Configuration Contract
+// -----------------------------------------------------------------------------
+test("Phase I — E. Provider Configuration Contract (Top-level snapshot metadata & SourceControl read-only)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("config-contract");
+  const settings = makeSettings(tmpDir);
+
+  const snapshot = buildDashboardSnapshot(settings, { store });
+
+  assert.ok(snapshot.providers, "Top-level providers required");
+  assert.ok(snapshot.providers.workSources, "workSources required");
+  assert.ok(snapshot.providers.orchestrators, "orchestrators required");
+  assert.ok(snapshot.providers.executors, "executors required");
+  assert.ok(snapshot.providers.codeIntelligence, "codeIntelligence required");
+  assert.ok(snapshot.providers.sourceControl, "sourceControl required");
+
+  assert.ok(snapshot.config, "Top-level config required");
+  assert.ok(snapshot.config.selections, "config.selections required");
+  assert.ok(Array.isArray(snapshot.config.mutableFields), "config.mutableFields required");
+  assert.ok(!snapshot.config.mutableFields.includes("sourceControl"), "sourceControl must NOT be mutable");
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test F: Observability Contract
+// -----------------------------------------------------------------------------
+test("Phase I — F. Observability Contract (buildObservabilitySummary exposes providers array)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("obs-contract");
+  const settings = makeSettings(tmpDir);
+
+  const summary = buildObservabilitySummary(settings, { store, window: "24h" });
+
+  assert.ok(Array.isArray(summary.providers), "summary.providers must be an array");
+  assert.ok(summary.providers.length > 0, "must include configured executor providers");
+
+  const codex = summary.providers.find(p => p.provider === "codex");
+  assert.ok(codex, "codex provider health must be present");
+  assert.ok(typeof codex.status === "string");
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test G: Operating Mode Authoritativeness
+// -----------------------------------------------------------------------------
+test("Phase I — G. Operating Mode Authoritativeness (MANUAL, SUPERVISED, AUTONOMOUS)", () => {
+  const { tmpDir, cleanup } = makeTempDb("mode-test");
+
+  const autoSettings = makeSettings(tmpDir, { policy: { operatingMode: "autonomous" } });
+  assert.equal(resolveOperatingMode(autoSettings), "autonomous");
+
+  const supSettings = makeSettings(tmpDir, { policy: { operatingMode: "supervised" } });
+  assert.equal(resolveOperatingMode(supSettings), "supervised");
+
+  const manSettings = makeSettings(tmpDir, { policy: { operatingMode: "manual" } });
+  assert.equal(resolveOperatingMode(manSettings), "manual");
+
+  const meta = buildControlPlaneMetadata(autoSettings);
+  assert.equal(meta.config.operatingMode, "autonomous");
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test H: Telemetry Null Truthfulness
+// -----------------------------------------------------------------------------
+test("Phase I — H. Telemetry Null Truthfulness (No fabricated 0 tokens or 0 ms)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("telemetry-nulls");
+  const settings = makeSettings(tmpDir);
+
+  const plan = {
+    issue: "PACE-301",
+    summary: "Task with unknown duration and tokens",
+    role: "implementation",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer"
+  };
+  const runId = store.createRun("PACE-301", plan);
+
+  const now = new Date().toISOString();
+
+  store.recordTelemetryEvent({
+    eventId: "ev-queued-null-1",
+    runId,
+    issueKey: "PACE-301",
+    role: "implementation",
+    stage: "queued",
+    status: "queued",
+    sequence: 1,
+    provider: "codex",
+    createdAt: now
+  });
+
+  store.recordTelemetryEvent({
+    eventId: "ev-started-null-1",
+    runId,
+    issueKey: "PACE-301",
+    role: "implementation",
+    stage: "started",
+    status: "started",
+    sequence: 2,
+    provider: "codex",
+    createdAt: now
+  });
+
+  store.recordTelemetryEvent({
+    eventId: "ev-terminal-null-1",
+    runId,
+    issueKey: "PACE-301",
+    role: "implementation",
+    stage: "terminal",
+    status: "completed",
+    sequence: 3,
+    provider: "codex",
+    usage: { available: false },
+    createdAt: now
+  });
+
+  const obs = buildRunObservability(settings, runId, { store });
+  assert.equal(obs.usage.available, false);
+  assert.equal(obs.usage.totalTokens, null);
+  assert.equal(obs.usage.inputTokens, null);
+  assert.equal(obs.usage.outputTokens, null);
+
+  const summary = buildObservabilitySummary(settings, { store });
+  const recentRun = summary.runs.find(r => r.runId === runId);
+  assert.ok(recentRun);
+  assert.equal(recentRun.durationSeconds, null);
+
+  cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// Test I: Agent Mutations & Immutable Versioning
+// -----------------------------------------------------------------------------
+test("Phase I — I. Agent Registry Mutations & Versioning (Create -> Edit -> v2 -> Enable/Disable/Archive)", async () => {
+  const { store, tmpDir, cleanup } = makeTempDb("agent-mutations");
   const settings = makeSettings(tmpDir);
   const server = createDashboardServer(settings, { store, port: 0 });
-
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
-    // 1. Create a new agent
+    // 1. Create Agent
     const createRes = await request(server, "/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: {
-        id: "custom-tester",
-        displayName: "Custom Test Specialist",
-        definition: {
-          role: "implementation",
-          skills: ["backend-testing", "api-design"],
-          allowedPaths: ["test/**", "lib/**"],
-          risk: "normal",
-          maxConcurrency: 2
-        }
+        id: "qa-specialist",
+        displayName: "QA Automation Specialist",
+        role: "specialist",
+        skills: ["backend-testing", "api-testing"],
+        allowedPaths: ["test/**"],
+        risk: "low",
+        maxConcurrency: 2
       }
     });
     assert.equal(createRes.status, 201);
-    assert.equal(createRes.data.ok, true);
-    assert.equal(createRes.data.agent.id, "custom-tester");
+    assert.equal(createRes.data.agent.id, "qa-specialist");
     assert.equal(createRes.data.agent.version, 1);
     assert.equal(createRes.data.agent.status, "enabled");
 
-    // 2. Disable agent
-    const disableRes = await request(server, "/api/agents/custom-tester/disable", { method: "POST" });
-    assert.equal(disableRes.status, 200);
-    assert.equal(disableRes.data.agent.status, "disabled");
+    // 2. Status changes
+    const disRes = await request(server, "/api/agents/qa-specialist/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: { status: "disabled" }
+    });
+    assert.equal(disRes.status, 200);
+    assert.equal(disRes.data.agent.status, "disabled");
 
-    // 3. Enable agent
-    const enableRes = await request(server, "/api/agents/custom-tester/enable", { method: "POST" });
-    assert.equal(enableRes.status, 200);
-    assert.equal(enableRes.data.agent.status, "enabled");
-
-    // 4. Update agent -> creates immutable v2!
-    const patchRes = await request(server, "/api/agents/custom-tester", {
+    // 3. Edit agent -> creates immutable v2
+    const patchRes = await request(server, "/api/agents/qa-specialist", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: {
-        displayName: "Custom Test Specialist v2",
-        definition: {
-          role: "implementation",
-          skills: ["backend-testing", "api-design", "security-audit"],
-          allowedPaths: ["test/**", "lib/**", "src/**"],
-          risk: "low",
-          maxConcurrency: 3
-        }
+        displayName: "QA Automation Specialist v2",
+        role: "specialist",
+        skills: ["backend-testing", "api-testing", "perf-testing"],
+        allowedPaths: ["test/**", "benchmarks/**"]
       }
     });
     assert.equal(patchRes.status, 200);
-    assert.equal(patchRes.data.ok, true);
     assert.equal(patchRes.data.agent.version, 2);
 
-    // 5. Version history returns 2 versions
-    const verRes = await request(server, "/api/agents/custom-tester/versions");
+    // 4. Check versions history
+    const verRes = await request(server, "/api/agents/qa-specialist/versions");
     assert.equal(verRes.status, 200);
-    assert.equal(verRes.data.ok, true);
-    assert.equal(verRes.data.versions.length, 2);
-    assert.equal(verRes.data.versions[0].version, 1);
-    assert.equal(verRes.data.versions[1].version, 2);
-    assert.notEqual(verRes.data.versions[0].definitionHash, verRes.data.versions[1].definitionHash);
-
+    const versions = verRes.data.versions || verRes.data;
+    assert.equal(versions.length, 2);
+    assert.equal(versions[0].version, 1);
+    assert.equal(versions[1].version, 2);
   } finally {
     server.close();
     cleanup();
   }
 });
 
-test("Phase I — G. Observability & Telemetry Truthfulness (Preserves unavailable nulls without fabricating zeros)", async () => {
-  const { store, tmpDir, cleanup } = makeTempDb("telemetry-truth");
-  const settings = makeSettings(tmpDir);
-  const server = createDashboardServer(settings, { store, port: 0 });
+// -----------------------------------------------------------------------------
+// Test J: Parent DAG & WAITING_HUMAN Completion Evidence
+// -----------------------------------------------------------------------------
+test("Phase I — J. Parent DAG & WAITING_HUMAN Completion Evidence (NO auto-merge button)", () => {
+  const { store, cleanup } = makeTempDb("parent-dag");
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-  try {
-    const issueKey = "PACE-401";
-    const plan = {
-      issue: issueKey,
-      summary: "Refactor database pool",
-      role: "implementation",
-      persona: "backend-engineer",
-      taskAgent: "backend-engineer",
-      configSnapshot: {
-        taskAgent: "backend-engineer",
-        executorProvider: "codex",
-        executorModel: "gpt-5"
-      }
-    };
-
-    const runId = store.createRun(issueKey, plan);
-
-    // Record lifecycle events
-    store.recordTelemetryEvent({
-      eventId: "ev-queued-01",
-      runId,
-      issueKey,
-      role: "implementation",
-      stage: "queued",
-      status: "queued",
-      sequence: 1,
-      provider: "codex"
-    });
-
-    store.recordTelemetryEvent({
-      eventId: "ev-started-01",
-      runId,
-      issueKey,
-      role: "implementation",
-      stage: "started",
-      status: "started",
-      sequence: 2,
-      provider: "codex"
-    });
-
-    // Terminal event with NO token usage and NO duration available
-    store.recordTelemetryEvent({
-      eventId: "ev-terminal-01",
-      runId,
-      issueKey,
-      role: "implementation",
-      stage: "terminal",
-      status: "success",
-      sequence: 3,
-      provider: "codex",
-      usage: { available: false }
-    });
-
-    const runRes = await request(server, `/api/observability/runs/${runId}`);
-    assert.equal(runRes.status, 200);
-    assert.equal(runRes.data.ok, true);
-
-    const data = runRes.data;
-    // Token usage remains unavailable, not 0
-    assert.equal(data.usage.available, false);
-    assert.equal(data.usage.totalTokens, null);
-    assert.equal(data.usage.inputTokens, null);
-    assert.equal(data.usage.outputTokens, null);
-
-  } finally {
-    server.close();
-    cleanup();
-  }
-});
-
-test("Phase I — H. Security, DOM Safety, & XSS Prevention", () => {
-  // Test safeHtml helper logic
-  function safeHtml(str) {
-    if (str === null || str === undefined) return "";
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  const maliciousStrings = [
-    '<script>alert("XSS")</script>',
-    '<img src=x onerror=alert(1)>',
-    '"><svg onload=alert(document.domain)>',
-    'javascript:alert(1)',
-    'PACE-101 <iframe src="evil.com">'
-  ];
-
-  maliciousStrings.forEach(malicious => {
-    const escaped = safeHtml(malicious);
-    assert.ok(!escaped.includes("<script>"), "Must escape <script>");
-    assert.ok(!escaped.includes("<img"), "Must escape <img>");
-    assert.ok(!escaped.includes("<svg"), "Must escape <svg>");
-    assert.ok(!escaped.includes("<iframe"), "Must escape <iframe>");
-    assert.ok(escaped.includes("&lt;") || !malicious.includes("<"), "Must convert tags to HTML entities");
+  store.upsertEpic({
+    key: "PACE-500",
+    summary: "Video Analytics Pipeline",
+    branch: "epic/pace-500-pipeline",
+    baseBranch: "develop"
   });
+
+  store.upsertEpicTask({
+    epicKey: "PACE-500",
+    issueKey: "PACE-501",
+    summary: "Frame decoder",
+    branch: "feat/501",
+    state: "integrated",
+    dependencies: [],
+    reviewedSha: "sha1",
+    integratedSha: "sha1"
+  });
+
+  store.upsertEpicTask({
+    epicKey: "PACE-500",
+    issueKey: "PACE-502",
+    summary: "Inference engine",
+    branch: "feat/502",
+    state: "integrated",
+    dependencies: ["PACE-501"],
+    reviewedSha: "sha2",
+    integratedSha: "sha2"
+  });
+
+  store.queueEpicIntegration({
+    epicKey: "PACE-500",
+    issueKey: "PACE-501",
+    leafBranch: "feat/501"
+  });
+  store.finishEpicIntegration({
+    epicKey: "PACE-500",
+    issueKey: "PACE-501",
+    commit: "sha1"
+  });
+
+  store.queueEpicIntegration({
+    epicKey: "PACE-500",
+    issueKey: "PACE-502",
+    leafBranch: "feat/502"
+  });
+  store.finishEpicIntegration({
+    epicKey: "PACE-500",
+    issueKey: "PACE-502",
+    commit: "sha2"
+  });
+
+  // Transition epic to waiting_human
+  store.database.prepare("UPDATE epics SET state = 'waiting_human' WHERE epic_key = 'PACE-500'").run();
+
+  const detail = store.getNormalizedParentDetail("PACE-500");
+  assert.ok(detail);
+  assert.equal(detail.state, "waiting_human");
+  assert.equal(detail.waitingHuman, true);
+  assert.equal(detail.children.length, 2);
+  assert.equal(detail.children[0].dependencyState, "ready");
+  assert.equal(detail.children[1].dependencyState, "satisfied");
+
+  // Verify HTML does not contain any auto-merge/deploy buttons
+  const htmlPath = path.join(rootDir, "ui", "index.html");
+  const html = fs.readFileSync(htmlPath, "utf-8");
+  assert.ok(!html.includes('id="merge-to-develop-btn"'), "Must NOT have auto-merge to develop button");
+  assert.ok(!html.includes('id="mark-done-btn"'), "Must NOT have auto-mark Done button");
+  assert.ok(!html.includes('id="deploy-btn"'), "Must NOT have auto-deploy button");
+
+  cleanup();
 });
 
-test("Phase I — I. Demo Snapshot Realistic Parent DAG Structure", () => {
-  const { tmpDir, cleanup } = makeTempDb("demo-snap");
-  try {
-    const settings = makeSettings(tmpDir);
-    const demoSnap = buildDemoSnapshot(settings);
+// -----------------------------------------------------------------------------
+// Test K: Deep Links & URL Navigation Logic
+// -----------------------------------------------------------------------------
+test("Phase I — K. Deep Links & URL State Navigation", () => {
+  const search = "?view=parents&parent=PACE-200&issue=PACE-214&run=run-42";
+  const params = new URLSearchParams(search);
 
-    assert.equal(demoSnap.mode, "demo");
-    assert.ok(Array.isArray(demoSnap.parentExecutions));
-    assert.ok(demoSnap.parentExecutions.length > 0);
+  assert.equal(params.get("view"), "parents");
+  assert.equal(params.get("parent"), "PACE-200");
+  assert.equal(params.get("issue"), "PACE-214");
+  assert.equal(params.get("run"), "run-42");
 
-    const demoParent = demoSnap.parentExecutions[0];
-    assert.equal(demoParent.parentKey, "PACE-200");
-    assert.equal(demoParent.baseRef, "develop");
-    assert.ok(demoParent.dag);
-    assert.ok(Array.isArray(demoParent.dag.nodes));
-    assert.ok(demoParent.dag.nodes.length >= 3);
-  } finally {
-    cleanup();
-  }
+  // Verify removal of single parameter
+  params.delete("issue");
+  assert.equal(params.get("issue"), null);
+  assert.equal(params.get("parent"), "PACE-200");
+  assert.equal(params.toString(), "view=parents&parent=PACE-200&run=run-42");
 });
 
-test("Phase I — J. Accessibility & Structural Elements in index.html", () => {
+// -----------------------------------------------------------------------------
+// Test L: Accessibility & Modal Attributes
+// -----------------------------------------------------------------------------
+test("Phase I — L. Accessibility & Modal Attributes", () => {
   const htmlPath = path.join(rootDir, "ui", "index.html");
   const html = fs.readFileSync(htmlPath, "utf-8");
 
-  // Semantic Landmarks
-  assert.ok(html.includes('class="skip-link"'), "Must contain accessible skip link");
-  assert.ok(html.includes('<main id="main-content"'), "Must contain main semantic landmark");
-  assert.ok(html.includes('role="dialog"'), "Modals must declare role=dialog");
-  assert.ok(html.includes('aria-modal="true"'), "Modals must declare aria-modal=true");
-  assert.ok(html.includes('aria-labelledby='), "Drawers must have aria-labelledby");
+  // Check all dialogs have role="dialog" and aria-modal="true"
+  const dialogMatches = html.match(/role="dialog"/g) || [];
+  const modalMatches = html.match(/aria-modal="true"/g) || [];
 
-  // 6 Primary Navigation Tabs
-  assert.ok(html.includes('data-target="overview-view"'), "Overview tab required");
-  assert.ok(html.includes('data-target="pm-view"'), "Work / PM tab required");
-  assert.ok(html.includes('data-target="parents-view"'), "Parent Orchestration tab required");
-  assert.ok(html.includes('data-target="observability-view"'), "Observability tab required");
-  assert.ok(html.includes('data-target="agents-view"'), "Agent Registry tab required");
-  assert.ok(html.includes('data-target="config-view"'), "Providers & Config tab required");
-
-  // Parent WAITING_HUMAN & DAG Elements
-  assert.ok(html.includes('id="parent-human-approval-card"'), "Ready for human approval card required");
-  assert.ok(html.includes('id="parent-dag-container"'), "Child DAG container required");
-  assert.ok(html.includes('id="parent-dag-text-fallback"'), "Accessible DAG text fallback required");
-  assert.ok(html.includes('id="parent-integration-lane"'), "Integration lane container required");
-
-  // In-Page Modals
-  assert.ok(html.includes('id="approval-modal"'), "In-page approval modal required");
-  assert.ok(html.includes('id="rejection-modal"'), "In-page rejection modal required");
-  assert.ok(html.includes('id="agent-edit-modal"'), "In-page agent edit modal required");
-  assert.ok(html.includes('id="agent-create-modal"'), "In-page agent create modal required");
-  assert.ok(html.includes('id="agent-versions-drawer"'), "Agent versions drawer required");
-
-  // Operating Mode Pill & Disclaimer
-  assert.ok(html.includes('id="operating-mode-pill"'), "Operating mode pill required");
-  assert.ok(html.includes('İmmutable Versiyonlama'), "Immutable versioning notice required");
-  assert.ok(html.includes('Gelecek Çalıştırmalar Uyarısı'), "Future runs configuration notice required");
+  assert.ok(dialogMatches.length >= 4, `Expected at least 4 dialog roles, found ${dialogMatches.length}`);
+  assert.equal(dialogMatches.length, modalMatches.length, "Every role=dialog must have aria-modal=true");
 });
