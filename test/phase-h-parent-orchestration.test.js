@@ -78,6 +78,12 @@ function makeTestGitRepo() {
   fs.writeFileSync(path.join(repo, "backend", "app.js"), "// backend\n", "utf8");
   fs.writeFileSync(path.join(repo, "frontend", "app.js"), "// frontend\n", "utf8");
 
+  fs.writeFileSync(path.join(repo, "AGENTS.md"), "# Agents\n", "utf8");
+  fs.writeFileSync(path.join(repo, "ORCHESTRATION.md"), "# Orchestration\n", "utf8");
+  fs.writeFileSync(path.join(repo, "PACEBUILD_ORCHESTRATOR.md"), "# PaceBuild\n", "utf8");
+  fs.mkdirSync(path.join(repo, ".agents", "rules"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".agents", "rules", "orchestration-gates.md"), "# Gates\n", "utf8");
+
   spawnSync("git", ["-C", repo, "add", "."]);
   spawnSync("git", ["-C", repo, "commit", "-qm", "initial commit"]);
   spawnSync("git", ["-C", repo, "branch", "-M", "develop"]);
@@ -1708,63 +1714,93 @@ test("Scenario AF: True production lifecycle E2E driven strictly through dispatc
   workSource.setDependencies(childB, [childA]); // B depends on A
   workSource.setDependencies(childC, []);        // C independent
 
-  const injectedRunIssue = async (settings, issue, execute, runtime, options) => {
-    if (issue.key === parentKey) {
-      return { exitCode: 0, output: { runId: null } };
+  // Set up provider configuration for production executor lifecycle
+  settings.data.executor.defaultProvider = "codex";
+  settings.data.executor.providers = {
+    codex: {
+      command: ["codex", "exec", "--prompt", "{{prompt}}"],
+      defaultModel: "gpt-5",
+      modelProfiles: { medium: "gpt-5", high: "gpt-5" }
     }
-    const task = store.getEpicTask(parentKey, issue.key);
-    assert.ok(task, `Task for ${issue.key} must be discovered`);
-
-    const wtPath = task.worktree || path.join(worktreeRoot, task.branch.replaceAll("/", "-"));
-    if (!fs.existsSync(wtPath)) {
-      const baseSha = task.childBaseSha;
-      assert.ok(baseSha, `childBaseSha must be pinned before worktree preparation for ${issue.key}`);
-      spawnSync("git", ["-C", repo, "worktree", "add", "-B", task.branch, wtPath, baseSha]);
-      store.upsertEpicTask({ ...task, worktree: wtPath });
-    }
-
-    const currentHead = String(spawnSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-    if (task.childBaseSha) {
-      assert.equal(currentHead, task.childBaseSha.toLowerCase());
-    }
-
-    const subDir = issue.key === childC ? "frontend" : "backend";
-    const fileName = issue.key === childA ? "a.js" : (issue.key === childB ? "b.js" : "c.js");
-    fs.mkdirSync(path.join(wtPath, subDir), { recursive: true });
-    fs.writeFileSync(path.join(wtPath, subDir, fileName), `// implementation for ${issue.key}\n`, "utf8");
-    spawnSync("git", ["-C", wtPath, "add", "."]);
-    spawnSync("git", ["-C", wtPath, "commit", "-qm", `feat: implement ${issue.key}`]);
-    const implSha = String(spawnSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).stdout).trim().toLowerCase();
-
-    const implRunId = store.createRun(issue.key, { role: "implementation", action: "implementation", summary: `Implement ${issue.key}`, childBaseSha: task.childBaseSha });
-    store.transition(implRunId, "queued");
-    store.transition(implRunId, "started");
-    store.transition(implRunId, "completed", { implementationSha: implSha });
-
-    const revRunId = store.createRun(issue.key, { role: "reviewer", action: "review", summary: `Review ${issue.key}`, implementationSha: implSha });
-    store.transition(revRunId, "queued");
-    store.transition(revRunId, "started");
-    store.transition(revRunId, "reviewed-clean", {
-      reviewOutcome: {
-        verdict: "clean",
-        implementationSha: implSha,
-        reviewerId: "correctness-reviewer",
-        evidence: [{ id: `clean-${issue.key}`, severity: "suggestion", category: "correctness", problem: `Clean implementation for ${issue.key}` }]
-      }
-    });
-
-    return { exitCode: 0, output: { runId: implRunId, implementationSha: implSha } };
+  };
+  settings.data.policy.review = {
+    provider: "codex",
+    taskAgent: "correctness-reviewer"
   };
 
-  // ── Cycle 1: First dispatchOnce ──
-  // Discovers parent, pins DAG, dispatches A and C through real runtime (B waits on A)
+  const fakeRuntime = {
+    spawnSync: (cmd, args, opts) => {
+      if (cmd === "git") {
+        return spawnSync(cmd, args, opts);
+      }
+      if (cmd === "npm" || (args && args.includes("npm"))) {
+        return { status: 0, stdout: "All tests passed\n", stderr: "" };
+      }
+      const cwd = opts?.cwd || "";
+      const argsStr = (args || []).join(" ");
+      const isImplementation = argsStr.includes("Implement work item");
+      if (isImplementation && cwd) {
+        // Real implementation provider process: write file and commit into worktree
+        const subDir = cwd.includes("pace-993") ? "frontend" : "backend";
+        const fileName = cwd.includes("pace-991") ? "a.js" : (cwd.includes("pace-992") ? "b.js" : "c.js");
+        fs.mkdirSync(path.join(cwd, subDir), { recursive: true });
+        fs.writeFileSync(path.join(cwd, subDir, fileName), `// implementation in ${cwd}\n`, "utf8");
+        spawnSync("git", ["-C", cwd, "add", "."]);
+        spawnSync("git", ["-C", cwd, "commit", "-qm", `feat: implement in ${cwd}`]);
+
+        const resultObj = {
+          status: "completed",
+          summary: "Implemented successfully",
+          changed_files: [],
+          validation_commands: [],
+          blockers: [],
+          risks: [],
+          duration_seconds: 1.2,
+          usage: { input_tokens: 150, output_tokens: 50 }
+        };
+        return { status: 0, stdout: JSON.stringify(resultObj), stderr: "" };
+      }
+
+      // Real reviewer provider process: return valid clean review JSON with non-empty evidence
+      const revObj = {
+        verdict: "clean",
+        evidence: [
+          {
+            id: `rev-clean-${Date.now()}`,
+            severity: "suggestion",
+            category: "correctness",
+            file: "backend/a.js",
+            line: 1,
+            problem: "Verified aggregate and child correctness",
+            expected: "No regressions",
+            verification: "All unit tests pass"
+          }
+        ],
+        duration_seconds: 2.0,
+        usage: { input_tokens: 200, output_tokens: 100 }
+      };
+      return { status: 0, stdout: JSON.stringify(revObj), stderr: "" };
+    }
+  };
+
+  const runTick = async () => {
+    const promises = [];
+    const res = tick(settings, store, { execute: true, workSource, runtime: fakeRuntime, promises });
+    if (promises.length > 0) {
+      await Promise.allSettled(promises);
+    }
+    return res;
+  };
+
+  // ── Cycle 1: First dispatchOnce (Wave 1: A and C implementation) ──
+  // Discovers parent, creates integration branch/worktree, dispatches independent A and C
   const dispatchRes1 = await dispatchOnce(settings, {
     store,
     workSource,
     execute: true,
     maxConcurrency: 3,
     limit: 10,
-    runIssue: injectedRunIssue
+    runtime: fakeRuntime
   });
   assert.equal(dispatchRes1.mode, "execute");
 
@@ -1772,35 +1808,61 @@ test("Scenario AF: True production lifecycle E2E driven strictly through dispatc
   assert.ok(parentExec1);
   assert.equal(parentExec1.state, "active");
 
-  // Tick integrates A and C into parent integration branch in serialized order
-  await tick(settings, store, { execute: true });
-  await tick(settings, store, { execute: true });
+  // Reconcile A and C verifying -> transitioning-review -> review-queued
+  await runTick();
+  await runTick();
+
+  // Dispatch review for A and C through real handleReview
+  await dispatchOnce(settings, {
+    store,
+    workSource,
+    execute: true,
+    maxConcurrency: 3,
+    limit: 10,
+    runtime: fakeRuntime
+  });
+
+  // Reconcile and integrate A and C in serialized order
+  await runTick();
+  await runTick();
 
   const taskA_integrated = store.getEpicTask(parentKey, childA);
   const taskC_integrated = store.getEpicTask(parentKey, childC);
   assert.equal(taskA_integrated.state, "integrated");
   assert.equal(taskC_integrated.state, "integrated");
 
-  // ── Cycle 2: Second dispatchOnce ──
-  // B is now dependency-ready; dispatched and implemented with exact childBaseSha
-  const dispatchRes2 = await dispatchOnce(settings, {
+  // Task B is now dependency-ready with exact childBaseSha pinned to integration branch head
+  const taskB_ready = store.getEpicTask(parentKey, childB);
+  assert.equal(taskB_ready.orchestrationState, "dependency-ready");
+  assert.ok(taskB_ready.childBaseSha);
+
+  // ── Cycle 2: Second dispatchOnce (Wave 2: B implementation) ──
+  await dispatchOnce(settings, {
     store,
     workSource,
     execute: true,
     maxConcurrency: 3,
     limit: 10,
-    runIssue: injectedRunIssue
+    runtime: fakeRuntime
   });
-  assert.equal(dispatchRes2.mode, "execute");
 
-  // ── Cycle 3: Final tick integrating B and running aggregate reviewer ──
-  await tick(settings, store, {
+  // Reconcile B verifying -> transitioning-review -> review-queued
+  await runTick();
+  await runTick();
+
+  // Dispatch review for B through real handleReview
+  await dispatchOnce(settings, {
+    store,
+    workSource,
     execute: true,
-    injectedReviewOutcome: {
-      verdict: "clean",
-      evidence: [{ id: "agg-rev", severity: "suggestion", category: "correctness", problem: "All children clean" }]
-    }
+    maxConcurrency: 3,
+    limit: 10,
+    runtime: fakeRuntime
   });
+
+  // ── Cycle 3: Final tick integrating B and running real aggregate reviewer ──
+  await runTick();
+  await runTick();
 
   const taskB_integrated = store.getEpicTask(parentKey, childB);
   assert.equal(taskB_integrated.state, "integrated");
@@ -2328,6 +2390,7 @@ test("Scenario AK: Reviewer and integration worker emit normalized Phase F telem
   assert.equal(failTelem.status, "failed");
   assert.equal(failTelem.error_category, "reviewer_execution_error");
   assert.ok(failTelem.error_message.includes("crashed") || failTelem.error_message.includes("return code 1"));
+  assert.equal(failTelem.duration_ms, null);
   assert.equal(failTelem.usage_available, 0);
   assert.equal(failTelem.input_tokens, null);
   assert.equal(failTelem.output_tokens, null);
@@ -2368,6 +2431,10 @@ test("Scenario AK: Reviewer and integration worker emit normalized Phase F telem
   assert.equal(okTelem.status, "completed");
   assert.equal(okTelem.error_category, null);
   assert.equal(okTelem.error_message, null);
+  assert.equal(okTelem.duration_ms, 4500);
+  assert.equal(okTelem.input_tokens, 1200);
+  assert.equal(okTelem.output_tokens, 350);
+  assert.equal(okTelem.usage_available, 1);
 });
 
 // ── Scenario AL: PM Workspace Surface Parent Approvals & Stale Fingerprints ──
