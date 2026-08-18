@@ -1327,3 +1327,82 @@ test("Phase I — N. Legacy usage_events SQLite Migration (Safe, Idempotent, Nul
     } catch {}
   }
 });
+
+// -----------------------------------------------------------------------------
+// Test O: Single Authoritative Usage Methods Definition & Run-Filter API
+// -----------------------------------------------------------------------------
+test("Phase I — O. Single Authoritative Usage Methods Definition & Run-Filter API", () => {
+  // 1. Assert exactly one recordUsageEvent and listUsageEvents method definition in RunStore source
+  const storeSource = fs.readFileSync(path.join(rootDir, "lib", "store.js"), "utf-8");
+  const recordMatches = storeSource.match(/^\s*recordUsageEvent\s*\(/gm) || [];
+  const listMatches = storeSource.match(/^\s*listUsageEvents\s*\(/gm) || [];
+  const addMatches = storeSource.match(/^\s*addUsageEvent\s*\(/gm) || [];
+
+  assert.equal(recordMatches.length, 1, `Expected exactly 1 definition of recordUsageEvent in store.js, found ${recordMatches.length}`);
+  assert.equal(listMatches.length, 1, `Expected exactly 1 definition of listUsageEvents in store.js, found ${listMatches.length}`);
+  assert.equal(addMatches.length, 1, `Expected exactly 1 definition of addUsageEvent in store.js, found ${addMatches.length}`);
+
+  const { store, cleanup } = makeTempDb("usage-filter-test");
+
+  try {
+    const customTime = "2026-08-18T12:00:00.000Z";
+    // 3. createdAt supplied to recordUsageEvent is preserved
+    store.recordUsageEvent({
+      runId: "run-alpha",
+      provider: "codex",
+      model: "gpt-5",
+      inputTokens: 1000,
+      outputTokens: 250,
+      durationMs: 3500,
+      createdAt: customTime
+    });
+
+    // 4. null usage persists NULL
+    store.recordUsageEvent({
+      runId: "run-alpha",
+      provider: "local",
+      model: "qwen",
+      inputTokens: null,
+      outputTokens: null,
+      durationMs: null
+    });
+
+    // 5. zero usage persists 0
+    store.recordUsageEvent({
+      runId: "run-beta",
+      provider: "local",
+      model: "tiny",
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: 0
+    });
+
+    // 6. runId-filtered listing returns only the requested run
+    const alphaEvents = store.listUsageEvents("run-alpha");
+    assert.equal(alphaEvents.length, 2, "run-alpha should have exactly 2 usage events");
+    assert.equal(alphaEvents[0].runId, "run-alpha");
+    assert.equal(alphaEvents[0].createdAt, customTime, "custom createdAt must be preserved");
+    assert.equal(alphaEvents[0].inputTokens, 1000);
+    assert.equal(alphaEvents[0].outputTokens, 250);
+    assert.equal(alphaEvents[0].durationMs, 3500);
+
+    assert.equal(alphaEvents[1].runId, "run-alpha");
+    assert.equal(alphaEvents[1].inputTokens, null, "null tokens must be null");
+    assert.equal(alphaEvents[1].outputTokens, null);
+    assert.equal(alphaEvents[1].durationMs, null);
+
+    const betaEvents = store.listUsageEvents(100, { runId: "run-beta" });
+    assert.equal(betaEvents.length, 1, "run-beta should have exactly 1 usage event");
+    assert.equal(betaEvents[0].runId, "run-beta");
+    assert.equal(betaEvents[0].inputTokens, 0, "0 tokens must stay 0");
+    assert.equal(betaEvents[0].outputTokens, 0);
+    assert.equal(betaEvents[0].durationMs, 0);
+
+    // 7. Bounded recent listing returns all runs ordered by DESC
+    const allRecent = store.listUsageEvents(10);
+    assert.equal(allRecent.length, 3, "Total recent events should be 3");
+    assert.equal(allRecent[0].runId, "run-beta", "Recent list should be DESC");
+  } finally {
+    cleanup();
+  }
+});
