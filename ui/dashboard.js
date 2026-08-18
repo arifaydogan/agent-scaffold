@@ -561,6 +561,16 @@ function readUrlState() {
   const issueParam = params.get("issue");
   const runParam = params.get("run");
 
+  // Reconcile parent selection state before view switching
+  if (parentParam) {
+    state.selectedParentKey = parentParam;
+  } else {
+    state.selectedParentKey = null;
+    const select = getElem("parent-select");
+    if (select) select.value = "";
+    clearParentDetail();
+  }
+
   // Reconcile view — absent means overview
   if (viewParam) {
     const targetView = `${viewParam}-view`;
@@ -572,14 +582,9 @@ function readUrlState() {
     switchView("overview-view", true);
   }
 
-  // Reconcile parent — absent clears stale selection
-  if (parentParam) {
-    state.selectedParentKey = parentParam;
-    if (state.currentView === "parents-view") {
-      fetchParentDetail(parentParam);
-    }
-  } else {
-    state.selectedParentKey = null;
+  // If on parents view and parent is specified, fetch it
+  if (parentParam && state.currentView === "parents-view") {
+    fetchParentDetail(parentParam);
   }
 
   // Reconcile issue — absent closes Decision Trace
@@ -640,10 +645,11 @@ function switchView(targetViewId, fromHistory = false) {
   });
 
   if (targetViewId === "parents-view") {
+    populateParentSelector();
     if (state.selectedParentKey) {
       fetchParentDetail(state.selectedParentKey);
     } else {
-      populateParentSelector();
+      clearParentDetail();
     }
   } else if (targetViewId === "observability-view") {
     fetchObservabilitySummary();
@@ -1244,9 +1250,37 @@ function renderDecisionTraceDetail(data) {
       const time = element("small", null, formatTime(item.timestamp || item.createdAt));
       const stage = element("strong", null, `${item.stage || item.state || "event"}: `);
       const label = item.label || item.message || "";
-      const actor = item.actor ? ` [${item.actor}]` : "";
-      const details = item.details ? (typeof item.details === "string" ? item.details : JSON.stringify(item.details)) : "";
-      const descText = [label, actor, details].filter(Boolean).join(" ") || "—";
+      let actorStr = "";
+      if (item.actor) {
+        if (typeof item.actor === "object") {
+          const type = item.actor.type || item.actor.role || "";
+          const id = item.actor.id || item.actor.name || item.actor.agentId || "";
+          if (type && id) actorStr = ` [${type} · ${id}]`;
+          else if (id) actorStr = ` [${id}]`;
+          else if (type) actorStr = ` [${type}]`;
+        } else {
+          actorStr = ` [${item.actor}]`;
+        }
+      }
+      let safeDetails = "";
+      if (item.details) {
+        if (typeof item.details === "string") {
+          safeDetails = item.details;
+        } else if (typeof item.details === "object") {
+          const clean = { ...item.details };
+          delete clean.rawPrompt;
+          delete clean.prompt;
+          delete clean.stdout;
+          delete clean.stderr;
+          delete clean.apiKey;
+          delete clean.token;
+          delete clean.secret;
+          delete clean.raw;
+          const s = JSON.stringify(clean);
+          if (s !== "{}") safeDetails = s;
+        }
+      }
+      const descText = [label, actorStr, safeDetails].filter(Boolean).join(" ") || "—";
       const desc = element("span", null, descText);
       content.appendChild(time);
       content.appendChild(stage);
@@ -1330,6 +1364,8 @@ async function submitApproval() {
         statusEl.className = "modal-status-msg is-error";
         statusEl.textContent = `409 Çakışma: Plan parmak izi değişmiş (${data.error || "Plan güncellendi"}). Çalışma alanı yenileniyor...`;
       }
+      if (confirmBtn) confirmBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = false;
       await fetchSnapshot();
       return;
     }
@@ -1413,6 +1449,18 @@ async function submitRejection() {
       })
     });
 
+    if (res.status === 409) {
+      const data = await res.json().catch(() => ({}));
+      if (statusEl) {
+        statusEl.className = "modal-status-msg is-error";
+        statusEl.textContent = `409 Çakışma: Plan parmak izi değişmiş (${data.error || "Plan güncellendi"}). Çalışma alanı yenileniyor...`;
+      }
+      if (confirmBtn) confirmBtn.disabled = false;
+      if (cancelBtn) cancelBtn.disabled = false;
+      await fetchSnapshot();
+      return;
+    }
+
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);
@@ -1439,6 +1487,37 @@ async function submitRejection() {
 }
 
 // Parent Orchestration & Child DAG
+function clearParentDetail() {
+  const keyBadge = getElem("parent-key-badge");
+  const summaryText = getElem("parent-summary-text");
+  const statePillEl = getElem("parent-state-pill");
+  const baseSha = getElem("parent-base-sha");
+  const intBranch = getElem("parent-int-branch");
+  const intHeadSha = getElem("parent-int-head-sha");
+  const graphFp = getElem("parent-graph-fp");
+  const blockersBox = getElem("parent-blockers-container");
+  const compCard = getElem("parent-human-approval-card");
+  const container = getElem("parent-dag-container");
+  const lane = getElem("parent-integration-lane");
+  const findings = getElem("parent-review-findings");
+
+  if (keyBadge) keyBadge.textContent = "—";
+  if (summaryText) summaryText.textContent = "Lütfen bir parent epik seçin";
+  if (statePillEl) {
+    statePillEl.textContent = "—";
+    statePillEl.className = "state-pill";
+  }
+  if (baseSha) baseSha.textContent = "—";
+  if (intBranch) intBranch.textContent = "—";
+  if (intHeadSha) intHeadSha.textContent = "—";
+  if (graphFp) graphFp.textContent = "—";
+  if (blockersBox) { blockersBox.hidden = true; blockersBox.innerHTML = ""; }
+  if (compCard) compCard.hidden = true;
+  if (container) container.innerHTML = '<div class="empty-state">Parent seçilmedi.</div>';
+  if (lane) lane.innerHTML = '<div class="empty-state">Parent seçilmedi.</div>';
+  if (findings) findings.innerHTML = "";
+}
+
 function populateParentSelector() {
   const select = getElem("parent-select");
   if (!select) return;
@@ -1467,11 +1546,10 @@ function populateParentSelector() {
     select.appendChild(opt);
   });
 
-  if (!state.selectedParentKey && parents.length > 0) {
-    const firstKey = parents[0].parentKey || parents[0].key;
-    state.selectedParentKey = firstKey;
-    select.value = firstKey;
-    fetchParentDetail(firstKey);
+  if (state.selectedParentKey) {
+    select.value = state.selectedParentKey;
+  } else {
+    select.value = "";
   }
 }
 
@@ -1488,7 +1566,7 @@ async function fetchParentDetail(parentKey) {
     const res = await fetch(`/api/pm/parents/${encodeURIComponent(parentKey)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    renderParentDetail(data);
+    renderParentDetail(data.parent || data);
   } catch (err) {
     const summaryText = getElem("parent-summary-text");
     if (summaryText) summaryText.textContent = `Parent yüklenemedi: ${err.message}`;
@@ -1496,11 +1574,12 @@ async function fetchParentDetail(parentKey) {
 }
 
 function renderParentDetail(data) {
-  const parent = data.parent || {};
-  const stateVal = data.state || "active";
-  const children = data.children || [];
-  const blockedReasons = data.blockedReasons || [];
-  const isWaitingHuman = Boolean(data.waitingHuman) || stateVal === "waiting_human" || stateVal === "human_approval";
+  const detail = (data && data.ok && data.parent) ? data.parent : (data || {});
+  const parent = detail.parent || {};
+  const stateVal = detail.state || "active";
+  const children = detail.children || [];
+  const blockedReasons = detail.blockedReasons || [];
+  const isWaitingHuman = Boolean(detail.waitingHuman) || stateVal === "waiting_human" || stateVal === "human_approval";
 
   const keyBadge = getElem("parent-key-badge");
   const summaryText = getElem("parent-summary-text");
@@ -1517,10 +1596,10 @@ function renderParentDetail(data) {
     statePillEl.textContent = STATUS_LABELS[stateVal] || stateVal.toUpperCase();
     statePillEl.className = `state-pill ${stateVal}`;
   }
-  if (baseSha) baseSha.textContent = data.baseSha ? `${data.baseRef || "develop"} @ ${data.baseSha.slice(0, 8)}` : (data.baseRef || "develop");
-  if (intBranch) intBranch.textContent = data.integrationBranch || "—";
-  if (intHeadSha) intHeadSha.textContent = data.integrationHeadSha ? data.integrationHeadSha.slice(0, 8) : "—";
-  if (graphFp) graphFp.textContent = data.graphFingerprint ? data.graphFingerprint.slice(0, 12) + "..." : "—";
+  if (baseSha) baseSha.textContent = detail.baseSha ? `${detail.baseRef || "develop"} @ ${detail.baseSha.slice(0, 8)}` : (detail.baseRef || "develop");
+  if (intBranch) intBranch.textContent = detail.integrationBranch || "—";
+  if (intHeadSha) intHeadSha.textContent = detail.integrationHeadSha ? detail.integrationHeadSha.slice(0, 8) : "—";
+  if (graphFp) graphFp.textContent = detail.graphFingerprint ? detail.graphFingerprint.slice(0, 12) + "..." : "—";
 
   if (blockersBox) {
     if (blockedReasons.length > 0) {
@@ -1541,18 +1620,18 @@ function renderParentDetail(data) {
       const cHead = getElem("comp-int-head");
       const cRev = getElem("comp-review-verdict");
 
-      if (cFp) cFp.textContent = data.graphFingerprint ? data.graphFingerprint.slice(0, 12) + "..." : "—";
-      if (cBase) cBase.textContent = data.baseSha ? data.baseSha.slice(0, 10) : "—";
-      if (cHead) cHead.textContent = data.integrationHeadSha ? data.integrationHeadSha.slice(0, 10) : "—";
-      if (cRev) cRev.textContent = data.integrationReview?.verdict || "CLEAN";
+      if (cFp) cFp.textContent = detail.graphFingerprint ? detail.graphFingerprint.slice(0, 12) + "..." : "—";
+      if (cBase) cBase.textContent = detail.baseSha ? detail.baseSha.slice(0, 10) : "—";
+      if (cHead) cHead.textContent = detail.integrationHeadSha ? detail.integrationHeadSha.slice(0, 10) : "—";
+      if (cRev) cRev.textContent = detail.integrationReview?.verdict || "CLEAN";
     } else {
       compCard.hidden = true;
     }
   }
 
   renderChildDag(children);
-  renderIntegrationLane(children, data.integrationBranch);
-  renderParentReviewFindings(data);
+  renderIntegrationLane(children, detail.integrationBranch);
+  renderParentReviewFindings(detail);
 }
 
 function renderChildDag(children = []) {
@@ -2020,8 +2099,22 @@ function renderAgentRegistry() {
     } else {
       events.slice(0, 20).forEach(ev => {
         const item = element("div", "usage-item");
-        item.appendChild(element("strong", null, ev.agentId || ev.taskAgent || "agent"));
-        item.appendChild(element("span", null, `${ev.tokens ? formatNumber(ev.tokens) : "—"} tok · ${formatTime(ev.createdAt)}`));
+        const title = ev.runId ? `Run: ${String(ev.runId).slice(0, 8)}` : (ev.agentId || ev.taskAgent || "agent");
+        item.appendChild(element("strong", null, `${title} (${ev.provider || "—"}/${ev.model || "—"})`));
+
+        let tokenText = "usage unavailable";
+        if (ev.inputTokens !== undefined && ev.inputTokens !== null && ev.outputTokens !== undefined && ev.outputTokens !== null) {
+          tokenText = `${formatNumber(ev.inputTokens)} in / ${formatNumber(ev.outputTokens)} out (${formatNumber(ev.inputTokens + ev.outputTokens)} tot)`;
+        } else if (ev.inputTokens !== undefined && ev.inputTokens !== null) {
+          tokenText = `${formatNumber(ev.inputTokens)} in`;
+        } else if (ev.outputTokens !== undefined && ev.outputTokens !== null) {
+          tokenText = `${formatNumber(ev.outputTokens)} out`;
+        } else if (ev.tokens !== undefined && ev.tokens !== null) {
+          tokenText = `${formatNumber(ev.tokens)} tok`;
+        }
+
+        const durText = (ev.durationMs !== undefined && ev.durationMs !== null && ev.durationMs > 0) ? ` · ${formatDurationMs(ev.durationMs)}` : "";
+        item.appendChild(element("span", null, `${tokenText}${durText} · ${formatTime(ev.createdAt)}`));
         usageEl.appendChild(item);
       });
     }
@@ -2041,6 +2134,12 @@ function createAgentCard(agent) {
   top.appendChild(titleBox);
   top.appendChild(badge);
 
+  const executor = agent.executor || {};
+  const executorProvider = executor.provider || agent.executorProvider;
+  const executorModel = executor.model || agent.executorModel;
+  const executorModelProfile = executor.modelProfile || agent.executorModelProfile || agent.modelProfile;
+  const reviewer = (agent.reviewer && typeof agent.reviewer === "object" ? (agent.reviewer.agentId || agent.reviewer.name) : agent.reviewer) || agent.reviewerAssignment || agent.reviewerAgent;
+
   const meta = element("div", "agent-def-meta");
   meta.appendChild(createTraceCell("Rol", agent.role));
   meta.appendChild(createTraceCell("Default Persona", agent.defaultPersona || "—"));
@@ -2048,14 +2147,10 @@ function createAgentCard(agent) {
   meta.appendChild(createTraceCell("Allowed Paths", Array.isArray(agent.allowedPaths) ? agent.allowedPaths.join(", ") : "—"));
   meta.appendChild(createTraceCell("Risk", agent.risk || "normal"));
   meta.appendChild(createTraceCell("Max Concurrency", String(agent.maxConcurrency || 1)));
-  if (agent.executorProvider || agent.executorModel) {
-    meta.appendChild(createTraceCell("Executor Provider", agent.executorProvider || "—"));
-    meta.appendChild(createTraceCell("Executor Model", agent.executorModel || "—"));
-    meta.appendChild(createTraceCell("Model Profile", agent.executorModelProfile || agent.modelProfile || "—"));
-  }
-  if (agent.reviewerAssignment || agent.reviewerAgent) {
-    meta.appendChild(createTraceCell("Reviewer", agent.reviewerAssignment || agent.reviewerAgent || "—"));
-  }
+  meta.appendChild(createTraceCell("Executor Provider", executorProvider || "—"));
+  meta.appendChild(createTraceCell("Executor Model", executorModel || "—"));
+  meta.appendChild(createTraceCell("Model Profile", executorModelProfile || "—"));
+  meta.appendChild(createTraceCell("Reviewer", reviewer ? String(reviewer) : "—"));
   if (agent.definitionHash) {
     meta.appendChild(createTraceCell("Definition Hash", agent.definitionHash.slice(0, 12) + "..."));
   }
@@ -2737,6 +2832,8 @@ if (typeof module !== "undefined" && module.exports) {
     renderOverview,
     renderPmWorkspace,
     renderParentDetail,
+    clearParentDetail,
+    populateParentSelector,
     renderObservability,
     renderConfigView,
     renderAgentRegistry,
