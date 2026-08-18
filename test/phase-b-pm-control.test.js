@@ -144,6 +144,11 @@ function createMockRuntime() {
       if (cmd === "git") {
         if (args && args.includes("worktree")) {
           gitWorktreeCalls.push({ cmd, args });
+          if (args.includes("list")) {
+            const adds = gitWorktreeCalls.filter(c => c.args.includes("add"));
+            const lines = adds.map(c => "worktree " + c.args[c.args.length - 2]);
+            return { status: 0, stdout: lines.join("\n") };
+          }
         }
         if (args && args.includes("status")) return { status: 0, stdout: "" };
         if (args && args.includes("rev-parse")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
@@ -152,7 +157,18 @@ function createMockRuntime() {
       }
       executions++;
       spawnedCommands.push({ type: "sync", cmd, args, command: [cmd, ...(args || [])] });
-      return { status: 0, stdout: "build success", stderr: "" };
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          status: "completed",
+          summary: "build success",
+          changed_files: [],
+          validation_commands: [],
+          blockers: [],
+          risks: []
+        }),
+        stderr: ""
+      };
     },
     spawn(cmd, args) {
       executions++;

@@ -708,7 +708,18 @@ test("Pre-Execution No-Write-Scope Guard: empty allowedPaths blocks implementati
       }
       if (cmd === "codex") {
         validWorkerSpawned = true;
-        return { status: 0, stdout: "Implementation completed successfully", stderr: "" };
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Implementation completed successfully",
+            changed_files: [],
+            validation_commands: [],
+            blockers: [],
+            risks: []
+          }),
+          stderr: ""
+        };
       }
       return { status: 0, stdout: "", stderr: "" };
     }

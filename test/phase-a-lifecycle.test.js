@@ -46,6 +46,8 @@ function createTestStore() {
   return new RunStore(dbPath);
 }
 
+let currentWorktreeRoot = null;
+
 function createSettings(overrides = {}) {
   const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "repo-"));
   fs.writeFileSync(path.join(repoPath, "AGENTS.md"), "test");
@@ -54,6 +56,7 @@ function createSettings(overrides = {}) {
   fs.mkdirSync(path.join(repoPath, ".agents", "rules"), { recursive: true });
   fs.writeFileSync(path.join(repoPath, ".agents", "rules", "orchestration-gates.md"), "test");
   const worktreeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "worktrees-"));
+  currentWorktreeRoot = worktreeRoot;
   const tempConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "config-"));
   fs.mkdirSync(path.join(tempConfigDir, ".agent-runtime"), { recursive: true });
 
@@ -107,10 +110,26 @@ const mockRuntime = {
       if (args.includes("status")) return { status: 0, stdout: "" };
       if (args.includes("rev-parse")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
       if (args.includes("commit-tree")) return { status: 0, stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n" };
+      if (args.includes("worktree") && args.includes("list")) {
+        const wtDirs = currentWorktreeRoot && fs.existsSync(currentWorktreeRoot) ? fs.readdirSync(currentWorktreeRoot) : [];
+        const lines = wtDirs.map(d => `worktree ${path.join(currentWorktreeRoot, d)}`).join("\n");
+        return { status: 0, stdout: lines };
+      }
       return { status: 0, stdout: "" };
     }
     builderExecutions++;
-    return { status: 0, stdout: "build successful", stderr: "" };
+    return {
+      status: 0,
+      stdout: JSON.stringify({
+        status: "completed",
+        summary: "build successful",
+        changed_files: [],
+        validation_commands: [],
+        blockers: [],
+        risks: []
+      }),
+      stderr: ""
+    };
   },
   spawn(cmd, args) {
     reviewerExecutions++;
@@ -146,9 +165,9 @@ const mockRuntime = {
   }
 };
 
-async function testRunIssueImpl(settings, issue, execute) {
+async function testRunIssueImpl(settings, issue, execute, runtime, options) {
   const { runIssue } = await import("../lib/runtime.js");
-  return runIssue(settings, issue, execute, mockRuntime);
+  return runIssue(settings, issue, execute, mockRuntime, options);
 }
 
 test("Phase A Lifecycle: ready -> in_progress -> review -> human_approval", async () => {
