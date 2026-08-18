@@ -5,6 +5,7 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 
 import { RunStore } from "../lib/store.js";
 import {
@@ -1199,5 +1200,130 @@ test("Phase I — M. Symmetrical Stale Rejection (HTTP 409 Concurrency Handling)
   } finally {
     server.close();
     cleanup();
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Test N: Legacy usage_events SQLite Migration (Safe, Idempotent, Nullable)
+// -----------------------------------------------------------------------------
+test("Phase I — N. Legacy usage_events SQLite Migration (Safe, Idempotent, Nullable)", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-scaffold-legacy-usage-"));
+  const dbPath = path.join(tmpDir, "legacy-state.db");
+
+  try {
+    // 1. Create a temporary SQLite DB manually with the OLD usage_events schema:
+    const rawDb = new DatabaseSync(dbPath);
+    rawDb.exec(`
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    // 2. Insert at least one historical row (and one row with real zero):
+    const now = new Date().toISOString();
+    rawDb.prepare(`
+      INSERT INTO usage_events (run_id, provider, model, input_tokens, output_tokens, duration_ms, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run("hist-run-1", "codex", "gpt-4", 500, 150, 1200, now);
+
+    rawDb.prepare(`
+      INSERT INTO usage_events (run_id, provider, model, input_tokens, output_tokens, duration_ms, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run("hist-run-2", "local", "llama", 0, 0, 0, now);
+
+    // 3. Close it
+    rawDb.close();
+
+    // 4. Open that SAME DB through the current RunStore constructor
+    const store = new RunStore(dbPath);
+
+    // 5. Assert migration succeeds & 6. Assert historical rows and IDs/data are unchanged
+    const usageList1 = store.listUsageEvents();
+    assert.equal(usageList1.length, 2);
+    const row1 = usageList1.find(r => r.runId === "hist-run-1");
+    const row0 = usageList1.find(r => r.runId === "hist-run-2");
+
+    assert.ok(row1, "Historical row 1 must exist");
+    assert.equal(row1.inputTokens, 500);
+    assert.equal(row1.outputTokens, 150);
+    assert.equal(row1.durationMs, 1200);
+
+    assert.ok(row0, "Historical zero row must exist");
+    assert.equal(row0.inputTokens, 0, "Historical 0 must stay 0");
+    assert.equal(row0.outputTokens, 0, "Historical 0 must stay 0");
+    assert.equal(row0.durationMs, 0, "Historical 0 must stay 0");
+
+    // 7. Assert PRAGMA table_info shows notnull == 0 for all three columns
+    const tableInfo = store.database.prepare("PRAGMA table_info(usage_events)").all();
+    const inCol = tableInfo.find(c => c.name === "input_tokens");
+    const outCol = tableInfo.find(c => c.name === "output_tokens");
+    const durCol = tableInfo.find(c => c.name === "duration_ms");
+
+    assert.ok(inCol, "input_tokens column must exist");
+    assert.equal(inCol.notnull, 0, "input_tokens must be nullable (notnull == 0)");
+    assert.ok(outCol, "output_tokens column must exist");
+    assert.equal(outCol.notnull, 0, "output_tokens must be nullable (notnull == 0)");
+    assert.ok(durCol, "duration_ms column must exist");
+    assert.equal(durCol.notnull, 0, "duration_ms must be nullable (notnull == 0)");
+
+    // 8. Record a new usage event with null/unknown usage
+    store.recordUsageEvent({
+      runId: "null-usage-run",
+      provider: "mock",
+      model: "mock-model",
+      inputTokens: null,
+      outputTokens: null,
+      durationMs: null
+    });
+
+    const nullRow = store.database.prepare("SELECT * FROM usage_events WHERE run_id = 'null-usage-run'").get();
+    assert.ok(nullRow, "Null usage row must exist in DB");
+    assert.equal(nullRow.input_tokens, null, "input_tokens in DB must be NULL");
+    assert.equal(nullRow.output_tokens, null, "output_tokens in DB must be NULL");
+    assert.equal(nullRow.duration_ms, null, "duration_ms in DB must be NULL");
+
+    // 9. Record a real zero
+    store.recordUsageEvent({
+      runId: "zero-usage-run",
+      provider: "local",
+      model: "tiny",
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: 0
+    });
+
+    const zeroRow = store.database.prepare("SELECT * FROM usage_events WHERE run_id = 'zero-usage-run'").get();
+    assert.ok(zeroRow, "Zero usage row must exist in DB");
+    assert.equal(zeroRow.input_tokens, 0, "Real 0 must remain 0");
+    assert.equal(zeroRow.output_tokens, 0, "Real 0 must remain 0");
+    assert.equal(zeroRow.duration_ms, 0, "Real 0 must remain 0");
+
+    // 10. Close and reopen RunStore again (idempotency check)
+    store.close();
+
+    const store2 = new RunStore(dbPath);
+    const usageList2 = store2.listUsageEvents();
+    assert.equal(usageList2.length, 4, "No duplicate rows after reopening");
+
+    const tableInfo2 = store2.database.prepare("PRAGMA table_info(usage_events)").all();
+    const inCol2 = tableInfo2.find(c => c.name === "input_tokens");
+    const outCol2 = tableInfo2.find(c => c.name === "output_tokens");
+    const durCol2 = tableInfo2.find(c => c.name === "duration_ms");
+    assert.equal(inCol2.notnull, 0);
+    assert.equal(outCol2.notnull, 0);
+    assert.equal(durCol2.notnull, 0);
+
+    store2.close();
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
   }
 });
