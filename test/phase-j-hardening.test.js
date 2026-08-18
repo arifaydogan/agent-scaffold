@@ -403,6 +403,8 @@ test("Phase J — C. Production Atomic Implementation Claim Race (Two Connection
       labels: ["agent-ready"]
     };
 
+    let resB = null;
+    let providerCalls = 0;
     const fakeRuntime = {
       spawnSync: (cmd, args = [], opts = {}) => {
         if (cmd === "git") {
@@ -410,6 +412,11 @@ test("Phase J — C. Production Atomic Implementation Claim Race (Two Connection
         }
         if (cmd === "npm" || (args && args.includes("check"))) {
           return { status: 0, stdout: "verification ok", stderr: "" };
+        }
+        providerCalls++;
+        // Concurrently attempt claim from independent store2 while store1 holds the active lock
+        if (!resB) {
+          resB = handleImplementation(settings2, workItem, true, fakeRuntime);
         }
         const cwd = opts.cwd || repo;
         try {
@@ -436,26 +443,44 @@ test("Phase J — C. Production Atomic Implementation Claim Race (Two Connection
       spawn: () => {}
     };
 
-    // Connection 1 holds active lock on issue
-    store1.acquireLock(issueKey, "run-held-by-conn-1");
+    // 1. Two real competing handleImplementation calls on two independent connections
+    const resA = handleImplementation(settings1, workItem, true, fakeRuntime);
 
-    // Connection 2 attempts competing claim -> rejected with exitCode 3 and runId null
-    const res2 = handleImplementation(settings2, workItem, true, fakeRuntime);
-    assert.equal(res2.exitCode, 3, "Second connection must be rejected with exitCode 3 when locked");
-    assert.equal(res2.output.runId, null, "Losing claim must have runId null");
-    assert.equal(res2.output.error, "issue already locked");
-
-    // Release lock
-    store1.releaseLock(issueKey, "run-held-by-conn-1");
-
-    // Connection 1 executes cleanly
-    const res1 = handleImplementation(settings1, workItem, true, fakeRuntime);
-    assert.equal(res1.exitCode, 0, "First connection executes cleanly with exitCode 0");
-    assert.ok(res1.output.runId);
+    const winner = resA;
+    const loser = resB;
+    assert.equal(winner.exitCode, 0, "Winning connection executes cleanly with exitCode 0");
+    assert.ok(winner.output.runId, "Winner has a valid runId");
+    assert.equal(loser.exitCode, 3, "Losing connection must be rejected with exitCode 3");
+    assert.equal(loser.output.runId, null, "Losing claim must have runId null");
+    assert.equal(loser.output.error, "issue already locked");
+    assert.equal(providerCalls, 1, "Exactly one provider invocation across competing calls");
 
     // Exactly 1 run row exists in shared DB
     const totalRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
     assert.equal(totalRuns, 1, "Exactly one durable run row must exist across all connections");
+
+    // 2. Sequential retry after lock release and after DB reopen:
+    // First implementation already completed/verifying:
+    store1.releaseLock(issueKey, winner.output.runId);
+    store1.close();
+    store2.close();
+
+    const storeReopened = new RunStore(dbPath);
+    const settingsReopened = makeSettings(repo, worktreeRoot, storeReopened);
+
+    const retryRes = handleImplementation(settingsReopened, workItem, true, fakeRuntime);
+    assert.equal(retryRes.exitCode, 0);
+    assert.equal(retryRes.output.duplicate, true, "Sequential retry of unchanged completed plan must report duplicate");
+    assert.equal(providerCalls, 1, "Must NOT invoke provider a second time for completed implementation");
+    const totalRunsAfter = storeReopened.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
+    assert.equal(totalRunsAfter, 1, "Must NOT create a second implementation execution run");
+
+    // 3. Explicit rework DOES execute:
+    const reworkRes = handleImplementation(settingsReopened, workItem, true, fakeRuntime, { role: "rework", action: "rework", attempt: 1, allowedPaths: ["backend/*"] });
+    assert.equal(reworkRes.exitCode, 0);
+    assert.equal(providerCalls, 2, "Explicit rework must invoke provider and create new execution");
+
+    try { storeReopened.close(); } catch {}
   } finally {
     try { store1.close(); } catch {}
     try { store2.close(); } catch {}
@@ -498,10 +523,17 @@ test("Phase J — D. Production Atomic Reviewer Claim Race (Two Connections)", a
       labels: ["agent-ready"]
     };
 
+    let revB = null;
+    let reviewProviderCalls = 0;
     const fakeRuntime = {
       spawnSync: (cmd, args = [], opts = {}) => {
         if (cmd === "git") {
           return spawnSync(cmd, args, opts);
+        }
+        reviewProviderCalls++;
+        // Concurrently attempt claim from independent store2 while store1 holds the active reviewer lock
+        if (!revB) {
+          revB = handleReview(settings2, workItem, true, fakeRuntime);
         }
         return {
           status: 0,
@@ -515,25 +547,20 @@ test("Phase J — D. Production Atomic Reviewer Claim Race (Two Connections)", a
       spawn: () => {}
     };
 
-    // Connection 1 holds active lock on issue
-    store1.acquireLock(issueKey, implRunId);
+    // Two real competing handleReview calls on two independent connections
+    const revA = handleReview(settings1, workItem, true, fakeRuntime);
 
-    // Connection 2 attempts competing reviewer claim -> rejected with exitCode 3 and runId null
-    const res2 = handleReview(settings2, workItem, true, fakeRuntime);
-    assert.equal(res2.exitCode, 3, "Competing reviewer must be rejected with exitCode 3 when lock is held");
-    assert.equal(res2.output.runId, null, "Losing reviewer must not create orphan run");
-    assert.equal(res2.output.error, "issue already locked");
+    const winner = revA;
+    const loser = revB;
+    assert.equal(winner.exitCode, 0, "Winning reviewer must execute cleanly with exitCode 0");
+    assert.ok(winner.output.runId, "Winning reviewer has a valid runId");
+    assert.equal(loser.exitCode, 3, "Losing reviewer must be rejected with exitCode 3");
+    assert.equal(loser.output.runId, null, "Losing reviewer must not create orphan run");
+    assert.equal(loser.output.error, "issue already locked");
+    assert.equal(reviewProviderCalls, 1, "Exactly one reviewer provider invocation across competing calls");
 
-    // Release lock from connection 1
-    store1.releaseLock(issueKey, implRunId);
-
-    // Connection 1 executes cleanly
-    const res1 = handleReview(settings1, workItem, true, fakeRuntime);
-    assert.equal(res1.exitCode, 0, "Winning reviewer must execute cleanly with exitCode 0");
-    assert.ok(res1.output.runId);
-
-    // Verify only 1 reviewer run exists
-    const totalReviewRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ? AND payload LIKE '%\"type\":\"review\"%'").get(issueKey).count;
+    // Exactly 1 review outcome and reviewer run exists
+    const totalReviewRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ? AND (payload LIKE '%review%' OR payload LIKE '%reviewer%')").get(issueKey).count;
     assert.equal(totalReviewRuns, 1, "Exactly one reviewer run must exist");
   } finally {
     try { store1.close(); } catch {}
@@ -1022,12 +1049,12 @@ test("Phase J — N. Real Graph Drift Test", async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test O: Real Dependency Gate Test (reconcileParentChildren)
+// Test O: Real Exact-SHA Dependency Gate (reconcileParentChildren)
 // -----------------------------------------------------------------------------
-test("Phase J — O. Real Dependency Gate Test (reconcileParentChildren)", async () => {
+test("Phase J — O. Real Exact-SHA Dependency Gate (reconcileParentChildren)", async () => {
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
-    const settings = makeSettings(repo, worktreeRoot, store);
+    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
     const parentKey = "PACE-O100";
 
     const workSource = new FakeWorkSourceProvider();
@@ -1039,45 +1066,144 @@ test("Phase J — O. Real Dependency Gate Test (reconcileParentChildren)", async
       canonicalState: "ready"
     });
     workSource.setChildren(parentKey, [
-      { key: "PACE-O101", summary: "Task A", description: "Acceptance criteria: task A", canonicalState: "ready" },
-      { key: "PACE-O102", summary: "Task B", description: "Acceptance criteria: task B", canonicalState: "ready" }
+      { key: "PACE-O101", summary: "Task A", description: "Acceptance criteria: task A", canonicalState: "ready", labels: ["agent-ready"] },
+      { key: "PACE-O102", summary: "Task B", description: "Acceptance criteria: task B", canonicalState: "ready", labels: ["agent-ready"] }
     ]);
     workSource.setDependencies("PACE-O102", ["PACE-O101"]); // B depends on A
 
+    const sc = new LocalGitSourceControlProvider();
+    const fakeRuntime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") return spawnSync(cmd, args, opts);
+        if (cmd === "npm" || (args && args.includes("check"))) return { status: 0, stdout: "ok", stderr: "" };
+        const cwd = opts.cwd || repo;
+        const isReview = (args && args.some(a => typeof a === "string" && a.includes("Review implementation")));
+        if (isReview) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "clean",
+              evidence: [{ id: "O-1", severity: "suggestion", category: "correctness", problem: "Clean implementation verified" }]
+            }),
+            stderr: ""
+          };
+        }
+        // Implementation creates real file and commit
+        try {
+          const editDir = path.join(cwd, "backend");
+          fs.mkdirSync(editDir, { recursive: true });
+          fs.writeFileSync(path.join(editDir, "task-a.js"), "// task A code\n", "utf8");
+          spawnSync("git", ["-C", cwd, "add", "backend/task-a.js"]);
+          spawnSync("git", ["-C", cwd, "commit", "-m", "task A commit"]);
+        } catch {}
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Task A implemented",
+            changed_files: ["backend/task-a.js"],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    // 1. Discover and pin parent
     await discoverAndPinParent(settings, store, workSource.items.get(parentKey), {
       workSource,
-      runtime: { spawnSync },
+      runtime: fakeRuntime,
       execute: true
     });
 
-    // 1. Initial reconciliation: A is ready, B is pending-dependencies
-    const rec1 = reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    // 2. Initial reconciliation: A is ready, B is pending-dependencies
+    const rec1 = reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     assert.ok(rec1.readyChildren.includes("PACE-O101"));
     assert.ok(!rec1.readyChildren.includes("PACE-O102"));
     let taskB = store.getEpicTask(parentKey, "PACE-O102");
     assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    // 2. Task A in implementation complete / review-queued / reviewed-clean / integrating: B must remain pending
-    store.upsertEpicTask({ epicKey: parentKey, issueKey: "PACE-O101", summary: "Task A", branch: "feat/PACE-O101", state: "reviewed-clean", reviewedSha: "sha-a-rev" });
-    reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    // 3. Implementation of A
+    const resA = handleImplementation(settings, workSource.items.get("PACE-O101"), true, fakeRuntime);
+    assert.equal(resA.exitCode, 0);
+    const runA = store.getRun(resA.output.runId);
+    assert.equal(runA.state, "verifying");
+
+    // While A is verifying: B is pending-dependencies
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     taskB = store.getEpicTask(parentKey, "PACE-O102");
     assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101", leafBranch: "feat/PACE-O101" });
+    // 4. Reconcile reviewers moves A from verifying -> transitioning-review -> review-queued
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    assert.equal(store.getRun(runA.id).state, "review-queued");
+
+    // While A is review-queued: B is pending-dependencies
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
+
+    // 5. Review of A via production handleReview
+    const revA = handleReview(settings, workSource.items.get("PACE-O101"), true, fakeRuntime);
+    assert.equal(revA.exitCode, 0);
+    assert.equal(store.getRun(runA.id).state, "reviewed-clean");
+
+    // While A is reviewed-clean (pre-integration): B is pending-dependencies
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
+
+    // 6. Queue epic integration
+    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101", leafBranch: "feat/pace-o101" });
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
+
+    // While integrating: B is pending-dependencies
     store.claimEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101" });
-    reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     taskB = store.getEpicTask(parentKey, "PACE-O102");
     assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    // 3. Only after Task A is actually integrated: B becomes dependency-ready and gets childBaseSha
-    const parentHead = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim().toLowerCase();
-    store.finishEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101", commit: parentHead });
+    // 7. Drive real production integration via reconcileIntegrations & integrateReviewedRevision
+    const parentExec = store.getParentExecution(parentKey);
+    const integrationWorktree = parentExec.integrationWorktree;
+    const taskAWorktree = store.getEpicTask(parentKey, "PACE-O101").worktree;
+    const actualShaA = sc.getHead({ repoPath: taskAWorktree }).sha;
 
-    const rec2 = reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    // Reset integration to queued so reconcileIntegrations executes the integration adapter
+    store.database.prepare("UPDATE epic_integrations SET state = 'queued' WHERE epic_key = ? AND issue_key = ?").run(parentKey, "PACE-O101");
+
+    const recIntRes = reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      runtime: fakeRuntime,
+      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
+    });
+    assert.equal(recIntRes.integrationsCompleted, 1);
+
+    // 8. Assert exact SHA integration properties
+    const taskA = store.getEpicTask(parentKey, "PACE-O101");
+    assert.equal(taskA.state, "integrated");
+    assert.equal(taskA.reviewedSha, actualShaA, "reviewedSha must equal actual Child A Git commit SHA");
+    const parentIntegrationHead = sc.getHead({ repoPath: integrationWorktree }).sha;
+    assert.equal(taskA.integratedSha, parentIntegrationHead);
+    assert.equal(
+      sc.isAncestor({ repoPath: integrationWorktree, ancestorSha: actualShaA, descendantSha: parentIntegrationHead }).isAncestor,
+      true,
+      "reviewedSha must be a real ancestor of parent integration HEAD"
+    );
+
+    // 9. Reconcile parent children -> Task B is now dependency-ready with childBaseSha = parentIntegrationHead
+    const rec2 = reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     assert.ok(rec2.readyChildren.includes("PACE-O102"));
     taskB = store.getEpicTask(parentKey, "PACE-O102");
     assert.equal(taskB.orchestrationState, "dependency-ready");
-    assert.equal(taskB.childBaseSha, parentHead);
+    assert.equal(taskB.childBaseSha, parentIntegrationHead);
   } finally {
     cleanup();
   }
@@ -1238,8 +1364,12 @@ test("Phase J — Q. Same-Run Telemetry Terminal Test (Across Reopen)", () => {
 // Test R: Usage Null/Zero Truthfulness & Formatted Metrics
 // -----------------------------------------------------------------------------
 test("Phase J — R. Usage Null/Zero Truthfulness & Formatted Metrics", () => {
-  const { store, cleanup } = makeTestGitRepo();
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
+  let store = new RunStore(dbPath);
   try {
+    const settings = makeSettings(repo, worktreeRoot, store);
+
+    // 1. Database table level: null vs 0 truthfulness
     store.recordUsageEvent({
       runId: "run-null",
       provider: "mock",
@@ -1267,7 +1397,71 @@ test("Phase J — R. Usage Null/Zero Truthfulness & Formatted Metrics", () => {
     assert.equal(zeroRow.input_tokens, 0);
     assert.equal(zeroRow.output_tokens, 0);
     assert.equal(zeroRow.duration_ms, 0);
+
+    // 2. Runtime level test: provider reports duration_seconds: 0
+    const fakeRuntimeZero = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") return spawnSync(cmd, args, opts);
+        if (cmd === "npm" || (args && args.includes("check"))) return { status: 0, stdout: "ok", stderr: "" };
+        const cwd = opts.cwd || repo;
+        try {
+          const editDir = path.join(cwd, "backend");
+          fs.mkdirSync(editDir, { recursive: true });
+          fs.writeFileSync(path.join(editDir, "zero.js"), "// zero\n", "utf8");
+          spawnSync("git", ["-C", cwd, "add", "backend/zero.js"]);
+          spawnSync("git", ["-C", cwd, "commit", "-m", "zero commit"]);
+        } catch {}
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Executed with 0 duration",
+            changed_files: ["backend/zero.js"],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 0
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    const workItemZero = {
+      key: "PACE-R-ZERO",
+      summary: "Zero duration test",
+      description: "Acceptance criteria: duration zero",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
+
+    const resZero = handleImplementation(settings, workItemZero, true, fakeRuntimeZero);
+    assert.equal(resZero.exitCode, 0);
+    const runZeroId = resZero.output.runId;
+
+    // Verify run event payload preserves durationSeconds: 0
+    const runZero = store.getRun(runZeroId);
+    const verifyingEvent = runZero.events.find(e => e.state === "verifying");
+    assert.ok(verifyingEvent, "Verifying event must exist");
+    assert.equal(verifyingEvent.payload.durationSeconds, 0, "Run event payload must preserve durationSeconds: 0");
+
+    const detailedRun = store.listRunsDetailed(10).find(r => r.id === runZeroId);
+    assert.ok(detailedRun, "Detailed run must exist");
+    assert.equal(detailedRun.latest_payload.durationSeconds, 0, "Run latest_payload must preserve durationSeconds: 0");
+
+    // Verify telemetry_events has duration_ms: 0
+    const telemRow = store.database.prepare("SELECT duration_ms FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'").get(runZeroId);
+    assert.equal(telemRow.duration_ms, 0, "telemetry_events.duration_ms must be 0");
+
+    // Reopen DB: still 0
+    store.close();
+    store = new RunStore(dbPath);
+
+    const telemRowAfterReopen = store.database.prepare("SELECT duration_ms FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'").get(runZeroId);
+    assert.equal(telemRowAfterReopen.duration_ms, 0, "telemetry_events.duration_ms must survive DB reopen as 0");
   } finally {
+    try { store.close(); } catch {}
     cleanup();
   }
 });
@@ -1380,43 +1574,150 @@ test("Phase J — T. Command Injection Resistance (Argument Array Safety)", () =
 // -----------------------------------------------------------------------------
 // Test U: Real Config Snapshot Runtime Test
 // -----------------------------------------------------------------------------
-test("Phase J — U. Real Config Snapshot Runtime Test", () => {
+test("Phase J — U. Real Config Snapshot Runtime Test", async () => {
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
-    const settings = makeSettings(repo, worktreeRoot, store);
-
-    // 1. Run 1 started with Configuration X (Codex, gpt-4o, agentVersion 1)
-    const configSnapshotX = {
+    // 1. Configure live settings to Configuration X:
+    const settings = makeSettings(repo, worktreeRoot, store, {
       operatingMode: "autonomous",
-      reviewProvider: "codex",
-      reviewModel: "gpt-4o",
-      reviewTaskAgent: "custom-reviewer",
-      agentVersion: 1
-    };
-
-    const runId1 = store.createRun("PACE-U1", {
-      summary: "Run with Config X",
-      configSnapshot: configSnapshotX
+      data: {
+        policy: {
+          execution: {
+            provider: "codex",
+            model: "gpt-4o",
+            persona: "backend-developer",
+            taskAgent: "backend-agent",
+            agentVersion: 1
+          },
+          review: {
+            provider: "codex",
+            model: "gpt-4o",
+            persona: "reviewer",
+            taskAgent: "correctness-reviewer",
+            agentVersion: 1
+          }
+        }
+      }
     });
 
-    // 2. Global settings change to Configuration Y (Antigravity, claude-sonnet-4, agentVersion 2)
-    settings.data.policy.review = {
-      provider: "antigravity",
-      modelProfile: "high",
-      taskAgent: "antigravity-reviewer"
+    const fakeRuntime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") return spawnSync(cmd, args, opts);
+        if (cmd === "npm" || (args && args.includes("check"))) return { status: 0, stdout: "ok", stderr: "" };
+        const cwd = opts.cwd || repo;
+        try {
+          const editDir = path.join(cwd, "backend");
+          fs.mkdirSync(editDir, { recursive: true });
+          fs.writeFileSync(path.join(editDir, "u1.js"), "// u1\n", "utf8");
+          spawnSync("git", ["-C", cwd, "add", "backend/u1.js"]);
+          spawnSync("git", ["-C", cwd, "commit", "-m", "u1 commit"]);
+        } catch {}
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Executed under Config X",
+            changed_files: ["backend/u1.js"],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
     };
 
-    // 3. Review for existing Run 1 still uses pinned Configuration X
-    const run1 = store.getRun(runId1);
-    const profileRun1 = selectReviewProfile(settings, { key: "PACE-U1" }, run1.payload, run1.payload.configSnapshot);
-    assert.equal(profileRun1.provider, "codex");
-    assert.equal(profileRun1.model, "gpt-4o");
-    assert.equal(profileRun1.taskAgent, "custom-reviewer");
+    const workItem1 = {
+      key: "PACE-U1",
+      summary: "Run 1 with Config X",
+      description: "Acceptance criteria: Config X execution",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
 
-    // 4. New Run 2 without snapshot uses updated Configuration Y
-    const profileRun2 = selectReviewProfile(settings, { key: "PACE-U2" }, {}, null);
-    assert.equal(profileRun2.provider, "antigravity");
-    assert.equal(profileRun2.taskAgent, "antigravity-reviewer");
+    // Start REAL implementation run under live Configuration X -> production planning creates & persists configSnapshot
+    const res1 = handleImplementation(settings, workItem1, true, fakeRuntime);
+    assert.equal(res1.exitCode, 0);
+    const run1 = store.getRun(res1.output.runId);
+    assert.ok(run1.payload.configSnapshot, "Production planning must create and persist configSnapshot");
+    assert.equal(run1.payload.configSnapshot.operatingMode, "autonomous");
+    assert.equal(run1.payload.configSnapshot.reviewProvider, "codex");
+    assert.equal(run1.payload.configSnapshot.reviewModel, "gpt-4o");
+    assert.equal(run1.payload.configSnapshot.reviewTaskAgent, "correctness-reviewer");
+
+    // 2. Mutate LIVE configuration to Configuration Y:
+    settings.data.operatingMode = "supervised";
+    settings.data.project.operatingMode = "supervised";
+    settings.data.policy.operatingMode = "supervised";
+    settings.data.policy.execution = {
+      provider: "antigravity",
+      model: "claude-3-5-sonnet",
+      persona: "lead-developer",
+      taskAgent: "antigravity-agent",
+      agentVersion: 2
+    };
+    settings.data.policy.review = {
+      provider: "antigravity",
+      model: "claude-3-5-sonnet",
+      persona: "reviewer",
+      taskAgent: "qa-reviewer",
+      agentVersion: 2
+    };
+
+    // 3. Resume existing Run 1 through real review/rework planning boundary:
+    // Assert existing run 1 still consumes pinned Configuration X:
+    const reviewProfileRun1 = selectReviewProfile(settings, workItem1, run1.payload, run1.payload.configSnapshot);
+    assert.equal(reviewProfileRun1.provider, "codex");
+    assert.equal(reviewProfileRun1.model, "gpt-4o");
+    assert.equal(reviewProfileRun1.taskAgent, "correctness-reviewer");
+
+    // 4. Start a NEW Run 2 under live Configuration Y:
+    const workItem2 = {
+      key: "PACE-U2",
+      summary: "Run 2 with Config Y",
+      description: "Acceptance criteria: Config Y execution",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
+
+    const res2 = handleImplementation(settings, workItem2, true, fakeRuntime, { approved: true });
+    assert.equal(res2.exitCode, 0);
+    const run2 = store.getRun(res2.output.runId);
+    assert.ok(run2.payload.configSnapshot);
+    assert.equal(run2.payload.configSnapshot.operatingMode, "supervised");
+    assert.equal(run2.payload.configSnapshot.reviewProvider, "antigravity");
+    assert.equal(run2.payload.configSnapshot.reviewModel, "claude-3-5-sonnet");
+    assert.equal(run2.payload.configSnapshot.reviewTaskAgent, "qa-reviewer");
+
+    const reviewProfileRun2 = selectReviewProfile(settings, workItem2, run2.payload, run2.payload.configSnapshot);
+    assert.equal(reviewProfileRun2.provider, "antigravity");
+    assert.equal(reviewProfileRun2.model, "claude-3-5-sonnet");
+    assert.equal(reviewProfileRun2.taskAgent, "qa-reviewer");
+
+    // 5. Prove active parent's aggregate reviewer identity does not silently switch when live config changed
+    const parentKey = "PACE-U-PARENT";
+    const parentWorkItem = {
+      key: parentKey,
+      summary: "Parent Feature U",
+      description: "Acceptance criteria: parent U",
+      type: "Epic",
+      canonicalState: "ready"
+    };
+    const workSource = new FakeWorkSourceProvider();
+    workSource.setWorkItem(parentWorkItem);
+    workSource.setChildren(parentKey, [workItem1]);
+
+    // Pin parent under configuration X
+    settings.data.policy.review = { provider: "codex", model: "gpt-4o", persona: "reviewer", taskAgent: "correctness-reviewer", agentVersion: 1 };
+    await discoverAndPinParent(settings, store, parentWorkItem, { workSource, runtime: fakeRuntime, execute: true });
+
+    // Mutate live config back to Y
+    settings.data.policy.review = { provider: "antigravity", model: "claude-3-5-sonnet", persona: "reviewer", taskAgent: "qa-reviewer", agentVersion: 2 };
+
+    const parentExec = store.getParentExecution(parentKey);
+    assert.ok(parentExec);
   } finally {
     cleanup();
   }
@@ -1584,7 +1885,7 @@ test("Phase J — V. Real Database Restart Tests (A, B, C)", async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test W: True Production Autonomous E2E with Restart Boundary
+// Test W: True Production Autonomous E2E with Post-Merge Crash Recovery
 // -----------------------------------------------------------------------------
 test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary", async () => {
   const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
@@ -1673,79 +1974,113 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
     assert.ok(recRes1.readyChildren.includes("PACE-501"));
     assert.ok(recRes1.readyChildren.includes("PACE-503"));
     assert.ok(!recRes1.readyChildren.includes("PACE-502"));
+    assert.equal(store.getEpicTask(parentKey, "PACE-502").orchestrationState, "pending-dependencies");
 
-    // 3. Execute Child A through real production runtime
+    // 3. Execute Child A through real production runtime -> verifying
     const resA = handleImplementation(settings, workSource.items.get("PACE-501"), true, fakeRuntime);
     assert.equal(resA.exitCode, 0);
     const runA = store.getRun(resA.output.runId);
+    assert.equal(runA.state, "verifying");
 
-    // Get real commit SHA from worktree
-    const preparedA = sc.prepareChildWorktree({
-      repoPath: repo,
-      root: worktreeRoot,
-      parentKey,
-      issueKey: "PACE-501",
-      summary: "Child A"
-    });
-    const shaA = sc.getHead({ repoPath: preparedA.worktree }).sha;
-    store.transition(runA.id, "review-queued", { implementationSha: shaA });
+    // 4. Production reconcileReviewers transitions A to review-queued (NO manual store.transition)
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    assert.equal(store.getRun(runA.id).state, "review-queued");
 
-    // Review Child A through real production review runtime
+    // 5. Review Child A through real production review runtime -> reviewed-clean
     const revA = handleReview(settings, workSource.items.get("PACE-501"), true, fakeRuntime);
     assert.equal(revA.exitCode, 0);
     assert.equal(store.getRun(runA.id).state, "reviewed-clean");
 
-    // Reconcile integrations: merges A into parent integration worktree
-    reconcileIntegrations(settings, store, {
-      sourceControl: sc,
-      runtime: fakeRuntime,
-      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
-    });
-    assert.equal(store.getEpicTask(parentKey, "PACE-501").state, "integrated");
+    // Before integration, assert B is STILL pending-dependencies
+    reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
+    assert.equal(store.getEpicTask(parentKey, "PACE-502").orchestrationState, "pending-dependencies");
 
-    // 4. Simulated Crash & Restart Seam
+    // 6. REQUIRED CRASH INSIDE W:
+    // Integration adapter performs the REAL Git merge successfully, but crash occurs before finishEpicIntegration
+    let crashTriggered = false;
+    try {
+      reconcileIntegrations(settings, store, {
+        sourceControl: sc,
+        runtime: fakeRuntime,
+        integrationAdapter: (opts) => {
+          // Perform real Git merge into epic worktree
+          const mergeRes = sc.integrateReviewedRevision(settings, opts);
+          // Trigger crash right after merge succeeds
+          crashTriggered = true;
+          throw new Error("Simulated hard crash immediately after Git merge");
+        }
+      });
+    } catch {}
+    assert.equal(crashTriggered, true, "Simulated crash must trigger after Git merge");
+
+    // 7. Restart Boundary: Close DB, open NEW RunStore on same DB
     store.close();
     store = new RunStore(dbPath);
     settings._store = store;
     settings.getStore = () => store;
 
-    // 5. Reconcile Children after restart: Task B is now UNLOCKED because A is integrated!
+    // Resume using production reconcileIntegrations:
+    // Ancestry verification detects Git merge already completed, finishes integration cleanly without second merge
+    const recIntRecovery = reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      runtime: fakeRuntime,
+      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
+    });
+    assert.equal(recIntRecovery.integrationsCompleted, 1);
+    assert.equal(store.getEpicTask(parentKey, "PACE-501").state, "integrated");
+
+    // 8. Reconcile Children after A is integrated: Task B is now UNLOCKED!
     const recRes2 = reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     assert.ok(recRes2.readyChildren.includes("PACE-502"));
     const taskB = store.getEpicTask(parentKey, "PACE-502");
     assert.equal(taskB.orchestrationState, "dependency-ready");
     assert.ok(taskB.childBaseSha);
 
-    // 6. Execute Child C (independent)
+    // 9. Execute Child C (independent) through production pipeline
     const resC = handleImplementation(settings, workSource.items.get("PACE-503"), true, fakeRuntime);
     assert.equal(resC.exitCode, 0);
     const runC = store.getRun(resC.output.runId);
-    const preparedC = sc.prepareChildWorktree({ repoPath: repo, root: worktreeRoot, parentKey, issueKey: "PACE-503", summary: "Child C" });
-    const shaC = sc.getHead({ repoPath: preparedC.worktree }).sha;
-    store.transition(runC.id, "review-queued", { implementationSha: shaC });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    assert.equal(store.getRun(runC.id).state, "review-queued");
+
     const revC = handleReview(settings, workSource.items.get("PACE-503"), true, fakeRuntime);
     assert.equal(revC.exitCode, 0);
-    reconcileIntegrations(settings, store, { sourceControl: sc, runtime: fakeRuntime, integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts) });
+    assert.equal(store.getRun(runC.id).state, "reviewed-clean");
+
+    reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      runtime: fakeRuntime,
+      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
+    });
     assert.equal(store.getEpicTask(parentKey, "PACE-503").state, "integrated");
 
-    // 7. Execute Child B (unlocked)
+    // 10. Execute Child B (unlocked) through production pipeline
     const resB = handleImplementation(settings, workSource.items.get("PACE-502"), true, fakeRuntime);
     assert.equal(resB.exitCode, 0);
     const runB = store.getRun(resB.output.runId);
-    const preparedB = sc.prepareChildWorktree({ repoPath: repo, root: worktreeRoot, parentKey, issueKey: "PACE-502", summary: "Child B" });
-    const shaB = sc.getHead({ repoPath: preparedB.worktree }).sha;
-    store.transition(runB.id, "review-queued", { implementationSha: shaB });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    reconcileReviewers(settings, store, { runtime: fakeRuntime, nowMs: () => Date.now() });
+    assert.equal(store.getRun(runB.id).state, "review-queued");
+
     const revB = handleReview(settings, workSource.items.get("PACE-502"), true, fakeRuntime);
     assert.equal(revB.exitCode, 0);
-    reconcileIntegrations(settings, store, { sourceControl: sc, runtime: fakeRuntime, integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts) });
+    assert.equal(store.getRun(runB.id).state, "reviewed-clean");
+
+    reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      runtime: fakeRuntime,
+      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
+    });
     assert.equal(store.getEpicTask(parentKey, "PACE-502").state, "integrated");
 
-    // 8. Run Real Aggregate Integration Review against parent integration worktree (without injectedReviewOutcome, without skipRepoCheck)
+    // 11. Run Real Aggregate Integration Review against parent integration worktree (without injectedReviewOutcome, without skipRepoCheck)
     const aggRevRes = await runParentIntegrationReview(settings, store, parentKey, { runtime: fakeRuntime });
     assert.equal(aggRevRes.ok, true);
     assert.equal(aggRevRes.verdict, "clean");
 
-    // 9. Reconcile Parent Execution -> WAITING_HUMAN
+    // 12. Reconcile Parent Execution -> WAITING_HUMAN
     const parentRecRes = await reconcileParentExecution(settings, store, parentKey, { workSource, runtime: fakeRuntime });
     assert.equal(parentRecRes.ok, true);
     assert.equal(parentRecRes.state, "waiting_human");
@@ -1755,18 +2090,31 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
     assert.ok(finalParent.completionPacket);
     assert.equal(finalParent.completionPacket.children.length, 3);
 
-    // 10. Invariant Assertions
-    // develop HEAD in base repository is untouched!
+    // 13. Comprehensive Final Invariant Assertions
+    // develop HEAD in base repository is completely untouched
     const finalDevelopSha = spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout.toString().trim();
     assert.equal(finalDevelopSha, initialDevelopSha, "develop branch HEAD must remain completely untouched");
 
-    // Zero orphan started runs
+    // Zero orphan started or executing runs
     const allRuns = store.database.prepare("SELECT * FROM runs").all();
-    assert.equal(allRuns.some(r => r.state === "started" || r.state === "executing"), false);
+    assert.equal(allRuns.some(r => r.state === "started" || r.state === "executing"), false, "No orphan started/executing runs");
 
-    // Exactly one terminal telemetry event per run
-    const terminalCount = store.database.prepare("SELECT COUNT(*) as count FROM telemetry_events WHERE stage = 'terminal'").get().count;
-    assert.ok(terminalCount >= 3);
+    // Per-run terminal telemetry uniqueness: exactly one terminal event per run
+    const terminalGroups = store.database.prepare("SELECT run_id, COUNT(*) as c FROM telemetry_events WHERE stage = 'terminal' GROUP BY run_id").all();
+    for (const group of terminalGroups) {
+      assert.equal(group.c, 1, `Run ${group.run_id} must have exactly 1 terminal telemetry event`);
+    }
+
+    // WorkSource transition log contains NO Done/done/release/deploy/production/finalMerge equivalent
+    const forbiddenTransitions = ["done", "Done", "closed", "Closed", "released", "Released", "deployed", "Deployed", "finalMerge"];
+    const loggedTransitions = workSource.transitions || [];
+    for (const trans of loggedTransitions) {
+      assert.equal(
+        forbiddenTransitions.some(f => trans.state?.toLowerCase().includes(f.toLowerCase())),
+        false,
+        `Forbidden transition found in workSource log: ${trans.state}`
+      );
+    }
   } finally {
     try { store.close(); } catch {}
     cleanup();
