@@ -329,11 +329,31 @@ test("Phase J — A. SQLite Legacy Upgrade & Reopening Idempotency", () => {
 test("Phase J — B. Multi-Table Transaction Rollback Safety", () => {
   const { store, cleanup } = makeTestGitRepo();
   try {
-    // 1. Attempt invalid run creation that fails mid-transaction
     const initialRunCount = store.database.prepare("SELECT COUNT(*) as count FROM runs").get().count;
     const initialEventCount = store.database.prepare("SELECT COUNT(*) as count FROM events").get().count;
 
-    // Trigger atomic error in finishEpicIntegration when no matching row exists
+    // 1. Explicit withTransaction rollback on thrown error
+    assert.throws(
+      () => {
+        store.withTransaction(() => {
+          store.database.prepare("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)").run(
+            "run-rolled-back",
+            "PACE-ROLL",
+            "discovered",
+            JSON.stringify({ summary: "Rolled back" }),
+            new Date().toISOString(),
+            new Date().toISOString()
+          );
+          throw new Error("Simulated mid-transaction failure");
+        });
+      },
+      /Simulated mid-transaction failure/
+    );
+
+    // Assert zero partial rows in runs or events
+    assert.equal(store.database.prepare("SELECT COUNT(*) as count FROM runs WHERE id = 'run-rolled-back'").get().count, 0);
+
+    // 2. Trigger atomic error in finishEpicIntegration when no matching row exists
     const finishRes = store.finishEpicIntegration({ epicKey: "NONEXISTENT", issueKey: "PACE-999" });
     assert.equal(finishRes.completed, false);
 
@@ -351,56 +371,58 @@ test("Phase J — B. Multi-Table Transaction Rollback Safety", () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test C: Duplicate Dispatch Idempotency (Fenced Issue Lock)
+// Test C: Duplicate Dispatch Idempotency (Two-Connection Race Test)
 // -----------------------------------------------------------------------------
-test("Phase J — C. Duplicate Dispatch Idempotency (Fenced Issue Lock)", async () => {
-  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+test("Phase J — C. Duplicate Dispatch Idempotency (Two-Connection Race Test)", async () => {
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
+  const store1 = new RunStore(dbPath);
+  const store2 = new RunStore(dbPath);
   try {
-    const settings = makeSettings(repo, worktreeRoot, store);
-    const workSource = new FakeWorkSourceProvider();
-    workSource.setWorkItem({
-      key: "PACE-10",
-      summary: "Implement login",
-      canonicalState: "ready",
-      labels: ["agent-ready"]
-    });
+    const issueKey = "PACE-10";
+    const payload = { summary: "Implement login", taskAgent: "backend-engineer" };
 
-    // First dispatch claims the issue and acquires lock
-    const runId1 = store.createRun("PACE-10", { summary: "Implement login" });
-    const lockAcquired = store.acquireLock("PACE-10", runId1);
-    assert.equal(lockAcquired, true);
+    // Two competing connections attempt to atomically claim the same issue
+    const claim1 = store1.createRunAndClaimIssue(issueKey, payload);
+    const claim2 = store2.createRunAndClaimIssue(issueKey, payload);
 
-    // Second competing dispatch attempts to claim same locked issue
-    const runId2 = store.createRun("PACE-10", { summary: "Implement login duplicate" });
-    const lockAcquired2 = store.acquireLock("PACE-10", runId2);
-    assert.equal(lockAcquired2, false, "Second lock acquisition must fail for same issueKey");
+    assert.equal(claim1.claimed, true, "First connection must successfully claim");
+    assert.ok(claim1.runId);
+    assert.equal(claim1.run.issue_key, issueKey);
 
-    // Only runId1 holds the lock
-    const locks = store.listLocks();
-    assert.equal(locks.length, 1);
-    assert.equal(locks[0].issue_key, "PACE-10");
-    assert.equal(locks[0].run_id, runId1);
+    assert.equal(claim2.claimed, false, "Second connection must be rejected with claimed: false");
+    assert.equal(claim2.runId, null, "Second connection must produce zero orphan loser runs");
+
+    // Verify exactly 1 run row exists in the shared database
+    const totalRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
+    assert.equal(totalRuns, 1, "Exactly one run row must exist across all connections");
+
+    const totalLocks = store1.database.prepare("SELECT COUNT(*) as count FROM issue_locks WHERE issue_key = ?").get(issueKey).count;
+    assert.equal(totalLocks, 1, "Exactly one lock row must exist");
   } finally {
+    try { store1.close(); } catch {}
+    try { store2.close(); } catch {}
     cleanup();
   }
 });
 
 // -----------------------------------------------------------------------------
-// Test D: Duplicate Reviewer Reconciliation Idempotency
+// Test D: Duplicate Reviewer Reconciliation (Two-Connection Race Test)
 // -----------------------------------------------------------------------------
-test("Phase J — D. Duplicate Reviewer Reconciliation Idempotency", () => {
-  const { store, cleanup } = makeTestGitRepo();
+test("Phase J — D. Duplicate Reviewer Reconciliation (Two-Connection Race Test)", () => {
+  const { dbPath, cleanup } = makeTestGitRepo();
+  const store1 = new RunStore(dbPath);
+  const store2 = new RunStore(dbPath);
   try {
     const sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-    const runId = store.createRun("PACE-20", { summary: "Review task" });
-    store.transition(runId, "review-queued", { implementationSha: sha });
+    const runId = store1.createRun("PACE-20", { summary: "Review task" });
+    store1.transition(runId, "review-queued", { implementationSha: sha });
 
     const evidence = [
       { id: "F-1", severity: "minor", category: "correctness", problem: "Clean review", file: "app.js", line: 1 }
     ];
 
-    // First record reviewer outcome
-    const res1 = recordReviewerOutcome(store, {
+    // First connection records outcome
+    const res1 = recordReviewerOutcome(store1, {
       runId,
       implementationSha: sha,
       reviewerId: "rev-1",
@@ -410,20 +432,22 @@ test("Phase J — D. Duplicate Reviewer Reconciliation Idempotency", () => {
     assert.equal(res1.recorded, true);
     assert.equal(res1.state, "reviewed-clean");
 
-    // Second duplicate outcome call for the same run
-    const res2 = recordReviewerOutcome(store, {
+    // Second connection concurrently attempts duplicate recording
+    const res2 = recordReviewerOutcome(store2, {
       runId,
       implementationSha: sha,
-      reviewerId: "rev-1",
+      reviewerId: "rev-2",
       verdict: "clean",
       evidence
     });
-    assert.equal(res2.recorded, false, "Duplicate outcome recording must return recorded: false");
+    assert.equal(res2.recorded, false, "Second concurrent outcome recording must return recorded: false");
 
     // Assert run is still in reviewed-clean and no duplicate events
-    const run = store.getRun(runId);
+    const run = store1.getRun(runId);
     assert.equal(run.state, "reviewed-clean");
   } finally {
+    try { store1.close(); } catch {}
+    try { store2.close(); } catch {}
     cleanup();
   }
 });
@@ -505,39 +529,67 @@ test("Phase J — F. Supervisor Lease Ownership, Fencing & Stale Reclaim", () =>
 });
 
 // -----------------------------------------------------------------------------
-// Test G: Concurrent Approval Mutation Race Safety
+// Test G: Concurrent Approval Mutation Race Safety (Two-Connection Race Test)
 // -----------------------------------------------------------------------------
-test("Phase J — G. Concurrent Approval Mutation Race Safety", () => {
-  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+test("Phase J — G. Concurrent Approval Mutation Race Safety (Two-Connection Race Test)", () => {
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
+  const store1 = new RunStore(dbPath);
+  const store2 = new RunStore(dbPath);
   try {
-    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "supervised" });
+    const settings = makeSettings(repo, worktreeRoot, store1, { operatingMode: "supervised" });
     const issueKey = "PACE-30";
 
     const plan = { issue: issueKey, summary: "Fix bug", allowedPaths: ["backend/**"], taskAgent: "backend-engineer" };
     const planFingerprint = computePlanFingerprint(plan);
 
-    store.addPmDecision(issueKey, "approval_requested", {
+    store1.addPmDecision(issueKey, "approval_requested", {
       action: "implementation",
       attempt: 0,
       planFingerprint,
       plan
     });
 
-    // First approval arrives
+    // Connection 1 submits approval
     const res1 = handlePmApproval(settings, issueKey, {
       action: "implementation",
       planFingerprint,
-      approver: "pm-lead"
-    }, { store });
+      approver: "pm-lead-1"
+    }, { store: store1 });
     assert.equal(res1.ok, true);
     assert.equal(res1.approved, true);
 
-    // Second approval check confirms durable state
-    const approvedState = store.hasExecutionApproval(issueKey, { action: "implementation", planFingerprint });
+    // Connection 2 attempts competing approval -> rejected with 409
+    assert.throws(
+      () => {
+        handlePmApproval(settings, issueKey, {
+          action: "implementation",
+          planFingerprint,
+          approver: "pm-lead-2"
+        }, { store: store2 });
+      },
+      (err) => err.statusCode === 409 || /already approved/i.test(err.message)
+    );
+
+    // Connection 2 attempts competing rejection -> rejected with 409
+    assert.throws(
+      () => {
+        handlePmRejection(settings, issueKey, {
+          action: "implementation",
+          planFingerprint,
+          approver: "pm-lead-2"
+        }, { store: store2 });
+      },
+      (err) => err.statusCode === 409 || /already approved/i.test(err.message)
+    );
+
+    // Durable state remains approved by pm-lead-1
+    const approvedState = store2.hasExecutionApproval(issueKey, { action: "implementation", planFingerprint });
     assert.ok(approvedState);
     assert.equal(approvedState.approved, true);
-    assert.equal(approvedState.approver, "pm-lead");
+    assert.equal(approvedState.approver, "pm-lead-1");
   } finally {
+    try { store1.close(); } catch {}
+    try { store2.close(); } catch {}
     cleanup();
   }
 });
@@ -549,31 +601,87 @@ test("Phase J — H. Stale Parent Approval & Fingerprint Rejection (HTTP 409)", 
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
     const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "supervised" });
-    const issueKey = "PACE-40";
+    const parentKey = "PACE-40";
 
-    const currentPlan = { issue: issueKey, summary: "Current plan", allowedPaths: ["backend/**"] };
-    const currentFingerprint = computePlanFingerprint(currentPlan);
+    // 1. Branch Creation Fingerprint Binding
+    const branchPlan = {
+      parentKey,
+      baseRef: "develop",
+      baseSha: "1111111111111111111111111111111111111111",
+      graphFingerprint: "graph-fp-v1",
+      integrationBranch: `epic/${parentKey.toLowerCase()}-feature`
+    };
+    const branchFingerprint = computeParentBranchFingerprint(branchPlan);
 
-    store.addPmDecision(issueKey, "approval_requested", {
-      action: "implementation",
+    store.addPmDecision(parentKey, "approval_requested", {
+      action: "branchCreation",
       attempt: 0,
-      planFingerprint: currentFingerprint,
-      plan: currentPlan
+      planFingerprint: branchFingerprint,
+      plan: branchPlan
     });
 
-    // Approval sent with an outdated fingerprint must be rejected
-    const staleFingerprint = "0000000000000000000000000000000000000000000000000000000000000000";
+    // Stale baseSha advances -> creates new fingerprint
+    const advancedBranchPlan = {
+      ...branchPlan,
+      baseSha: "2222222222222222222222222222222222222222"
+    };
+    const staleFingerprint = computeParentBranchFingerprint(advancedBranchPlan);
+
     assert.throws(
       () => {
-        handlePmApproval(settings, issueKey, {
-          action: "implementation",
+        handlePmApproval(settings, parentKey, {
+          action: "branchCreation",
           planFingerprint: staleFingerprint,
           approver: "pm"
         }, { store });
       },
-      (err) => {
-        return err.statusCode === 409 || err.message.includes("mismatch") || err.message.includes("fingerprint");
-      }
+      (err) => err.statusCode === 409 || /mismatch/i.test(err.message) || /fingerprint/i.test(err.message)
+    );
+
+    // Exact fingerprint succeeds
+    const approveRes = handlePmApproval(settings, parentKey, {
+      action: "branchCreation",
+      planFingerprint: branchFingerprint,
+      approver: "pm"
+    }, { store });
+    assert.equal(approveRes.ok, true);
+    assert.equal(approveRes.approved, true);
+
+    // 2. Integration Review Fingerprint Binding
+    const reviewPlan = {
+      parentKey,
+      parentBaseSha: "1111111111111111111111111111111111111111",
+      integrationHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      graphFingerprint: "graph-fp-v1",
+      reviewerAgentId: "reviewer",
+      reviewerVersion: 1,
+      reviewerHash: "rev-hash-v1"
+    };
+    const reviewFingerprint = computeParentReviewFingerprint(reviewPlan);
+
+    store.addPmDecision(parentKey, "approval_requested", {
+      action: "review",
+      attempt: 0,
+      planFingerprint: reviewFingerprint,
+      plan: reviewPlan
+    });
+
+    // Advancing integrationHeadSha invalidates review fingerprint
+    const advancedReviewPlan = {
+      ...reviewPlan,
+      integrationHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    };
+    const advancedReviewFingerprint = computeParentReviewFingerprint(advancedReviewPlan);
+
+    assert.throws(
+      () => {
+        handlePmApproval(settings, parentKey, {
+          action: "review",
+          planFingerprint: advancedReviewFingerprint,
+          approver: "pm"
+        }, { store });
+      },
+      (err) => err.statusCode === 409 || /mismatch/i.test(err.message)
     );
   } finally {
     cleanup();
