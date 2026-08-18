@@ -2696,15 +2696,18 @@ async function init() {
   readUrlState();
 
   if (typeof setInterval === "function") {
-    setInterval(() => {
+    const timer = setInterval(() => {
       if (typeof document === "undefined" || !document.hidden) {
         fetchSnapshot();
       }
     }, 3000);
+    if (timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
   }
 }
 
-if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+if (typeof module === "undefined" && typeof document !== "undefined" && typeof document.addEventListener === "function") {
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
@@ -2737,6 +2740,13 @@ if (typeof module !== "undefined" && module.exports) {
     renderObservability,
     renderConfigView,
     renderAgentRegistry,
+    createPmItemCard,
+    renderProviderSection,
+    renderDecisionTraceDetail,
+    renderParentReviewFindings,
+    switchView,
+    openDecisionTrace,
+    openTelemetryDrawer,
     openModal,
     closeModal,
     syncUrlState,

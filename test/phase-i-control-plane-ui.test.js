@@ -226,10 +226,261 @@ test("Phase I — B. CSP Compatibility & Static Check (Zero inline JS, strict sc
   }
 });
 
+function createMockEnvironment(initialUrl = "http://localhost:4319/") {
+  const elements = {};
+  const listeners = {};
+  const historyStack = [initialUrl];
+  let historyIndex = 0;
+  let pushStateCount = 0;
+  let replaceStateCount = 0;
+
+  const urlObj = new URL(initialUrl);
+
+  const window = {
+    location: {
+      get href() { return urlObj.href; },
+      set href(v) { urlObj.href = v; },
+      get search() { return urlObj.search; },
+      set search(v) { urlObj.search = v; },
+      get pathname() { return urlObj.pathname; },
+      set pathname(v) { urlObj.pathname = v; }
+    },
+    history: {
+      pushState(st, title, url) {
+        pushStateCount++;
+        const target = new URL(url, urlObj.origin);
+        urlObj.pathname = target.pathname;
+        urlObj.search = target.search;
+        historyStack.push(urlObj.href);
+        historyIndex = historyStack.length - 1;
+      },
+      replaceState(st, title, url) {
+        replaceStateCount++;
+        const target = new URL(url, urlObj.origin);
+        urlObj.pathname = target.pathname;
+        urlObj.search = target.search;
+        historyStack[historyIndex] = urlObj.href;
+      }
+    },
+    addEventListener(evt, fn) {
+      if (!listeners[evt]) listeners[evt] = [];
+      listeners[evt].push(fn);
+    },
+    dispatchEvent(evt) {
+      const fns = listeners[evt.type] || [];
+      for (const fn of fns) fn(evt);
+    }
+  };
+
+  function createElement(tag, className = "", textContent = "") {
+    const el = {
+      tag,
+      className,
+      textContent,
+      children: [],
+      dataset: {},
+      attributes: {},
+      style: {},
+      hidden: false,
+      value: "",
+      disabled: false,
+      appendChild(child) {
+        el.children.push(child);
+        return child;
+      },
+      append(...nodes) {
+        for (const n of nodes) {
+          if (typeof n === "string") el.children.push({ tag: "#text", textContent: n, children: [] });
+          else if (n) el.children.push(n);
+        }
+      },
+      replaceChildren(...nodes) {
+        el.children = [];
+        el.append(...nodes);
+      },
+      setAttribute(k, v) { el.attributes[k] = v; },
+      getAttribute(k) { return el.attributes[k]; },
+      querySelector(sel) {
+        return findInTree(el, sel);
+      },
+      querySelectorAll(sel) {
+        return findAllInTree(el, sel);
+      },
+      classList: {
+        add(c) {
+          const parts = (el.className || "").split(" ").filter(Boolean);
+          if (!parts.includes(c)) parts.push(c);
+          el.className = parts.join(" ");
+        },
+        remove(c) {
+          const parts = (el.className || "").split(" ").filter(Boolean);
+          el.className = parts.filter(p => p !== c).join(" ");
+        },
+        contains(c) {
+          return (el.className || "").split(" ").filter(Boolean).includes(c);
+        }
+      },
+      addEventListener() {}
+    };
+    return el;
+  }
+
+  function findInTree(node, sel) {
+    if (!node || !node.children) return null;
+    for (const child of node.children) {
+      if (matches(child, sel)) return child;
+      const found = findInTree(child, sel);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function findAllInTree(node, sel, acc = []) {
+    if (!node || !node.children) return acc;
+    for (const child of node.children) {
+      if (matches(child, sel)) acc.push(child);
+      findAllInTree(child, sel, acc);
+    }
+    return acc;
+  }
+
+  function matches(node, sel) {
+    if (!node || typeof node !== "object") return false;
+    if (sel.startsWith(".")) {
+      const cls = sel.slice(1);
+      return (node.className || "").split(" ").includes(cls);
+    }
+    if (sel.startsWith("#")) {
+      const id = sel.slice(1);
+      return node.id === id || node.attributes?.id === id;
+    }
+    return node.tag === sel.toLowerCase();
+  }
+
+  const document = {
+    createElement,
+    createTextNode(txt) { return { tag: "#text", textContent: txt, children: [] }; },
+    getElementById(id) {
+      if (!elements[id]) {
+        elements[id] = createElement("div");
+        elements[id].id = id;
+      }
+      return elements[id];
+    },
+    querySelector(sel) {
+      if (sel.startsWith("#")) {
+        return document.getElementById(sel.slice(1));
+      }
+      if (!elements[sel]) {
+        elements[sel] = createElement("div");
+      }
+      return elements[sel];
+    },
+    querySelectorAll() {
+      return [];
+    },
+    addEventListener() {}
+  };
+
+  const code = fs.readFileSync(path.join(rootDir, "ui", "dashboard.js"), "utf8");
+  const fn = new Function(
+    "window", "document", "Intl", "console", "Math", "Date", "String", "JSON", "setInterval", "module",
+    `${code}; return { state, elements, createPmItemCard, renderProviderSection, renderDecisionTraceDetail, renderParentReviewFindings, switchView, openDecisionTrace, openTelemetryDrawer, readUrlState, syncUrlState, getElem, renderAgentRegistry, createAgentCard };`
+  );
+
+  const exports = fn(window, document, global.Intl, global.console, global.Math, global.Date, global.String, global.JSON, () => {}, { exports: {} });
+
+  return {
+    window,
+    document,
+    elements,
+    exports,
+    urlObj,
+    get pushStateCount() { return pushStateCount; },
+    get replaceStateCount() { return replaceStateCount; },
+    triggerPopstate() {
+      window.dispatchEvent({ type: "popstate" });
+    }
+  };
+}
+
 // -----------------------------------------------------------------------------
-// Test C: PM Workspace Contract
+// Test A: DOM Selector Contract
 // -----------------------------------------------------------------------------
-test("Phase I — C. PM Workspace Contract (Real buildPmWorkspace shape & actions)", async () => {
+test("Phase I — A. DOM Selector Contract (Every JS ID exists in index.html)", () => {
+  const htmlPath = path.join(rootDir, "ui", "index.html");
+  const jsPath = path.join(rootDir, "ui", "dashboard.js");
+  const html = fs.readFileSync(htmlPath, "utf-8");
+  const js = fs.readFileSync(jsPath, "utf-8");
+
+  // Extract all getElem("..."), document.getElementById("..."), and document.querySelector("#...")
+  const idRegex = /(?:getElem\(\s*["']([^"']+)["']\s*\)|getElementById\(\s*["']([^"']+)["']\s*\)|querySelector\(\s*["']#([^"']+)["']\s*\))/g;
+  const queriedIds = new Set();
+  let match;
+  while ((match = idRegex.exec(js)) !== null) {
+    const id = match[1] || match[2] || match[3];
+    if (id && !id.includes("${")) {
+      queriedIds.add(id);
+    }
+  }
+
+  assert.ok(queriedIds.size >= 25, `Expected at least 25 queried IDs, found ${queriedIds.size}`);
+
+  const missingIds = [];
+  for (const id of queriedIds) {
+    const hasId = html.includes(`id="${id}"`) || html.includes(`id='${id}'`);
+    if (!hasId) {
+      missingIds.push(id);
+    }
+  }
+
+  assert.deepEqual(missingIds, [], `The following IDs queried in dashboard.js are missing from index.html: ${missingIds.join(", ")}`);
+});
+
+// -----------------------------------------------------------------------------
+// Test B: CSP Compatibility & Static Check
+// -----------------------------------------------------------------------------
+test("Phase I — B. CSP Compatibility & Static Check (Zero inline JS, strict script-src 'self')", async () => {
+  const htmlPath = path.join(rootDir, "ui", "index.html");
+  const jsPath = path.join(rootDir, "ui", "dashboard.js");
+  const html = fs.readFileSync(htmlPath, "utf-8");
+  const js = fs.readFileSync(jsPath, "utf-8");
+
+  // Verify no inline event handlers in HTML
+  assert.ok(!/onclick\s*=/i.test(html), "index.html must not contain inline onclick handlers");
+  assert.ok(!/onerror\s*=/i.test(html), "index.html must not contain inline onerror handlers");
+  assert.ok(!/onload\s*=/i.test(html), "index.html must not contain inline onload handlers");
+  assert.ok(!/href\s*=\s*["']javascript:/i.test(html), "index.html must not contain javascript: URLs");
+
+  // Verify no inline event handlers generated in JS template strings
+  assert.ok(!/onclick\s*=/i.test(js), "dashboard.js must not generate inline onclick handlers");
+  assert.ok(!/onerror\s*=/i.test(js), "dashboard.js must not generate inline onerror handlers");
+  assert.ok(!/onload\s*=/i.test(js), "dashboard.js must not generate inline onload handlers");
+  assert.ok(!/href\s*=\s*["']javascript:/i.test(js), "dashboard.js must not generate javascript: href URLs");
+
+  // Verify HTTP server CSP header
+  const { store, tmpDir, cleanup } = makeTempDb("csp-check");
+  const settings = makeSettings(tmpDir);
+  const server = createDashboardServer(settings, { store, port: 0 });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const res = await request(server, "/");
+    assert.equal(res.status, 200);
+    const csp = res.headers["content-security-policy"];
+    assert.ok(csp, "Server must return Content-Security-Policy header");
+    assert.ok(csp.includes("script-src 'self'"), "CSP must enforce script-src 'self'");
+    assert.ok(!csp.includes("'unsafe-inline'"), "script-src must NOT contain 'unsafe-inline'");
+  } finally {
+    server.close();
+    cleanup();
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Test C: PM Workspace Contract & Execution Approval Buttons Boundary (Fix 1)
+// -----------------------------------------------------------------------------
+test("Phase I — C. PM Workspace Contract & Execution Approval Buttons Boundary", async () => {
   const { store, tmpDir, cleanup } = makeTempDb("pm-workspace");
   const settings = makeSettings(tmpDir);
 
@@ -276,13 +527,62 @@ test("Phase I — C. PM Workspace Contract (Real buildPmWorkspace shape & action
   assert.equal(workspace.groups.awaitingApproval.length, 1);
   assert.equal(workspace.groups.awaitingApproval[0].issueKey, "PACE-102");
 
+  // UI Contract Regression: createPmItemCard renders Approve/Reject buttons ONLY for awaitingApproval
+  const env = createMockEnvironment();
+
+  // 1. humanApproval + action=finalMerge + humanActionRequired=true => NO approval/rejection buttons
+  const humanApprovalCard = env.exports.createPmItemCard({
+    issueKey: "PACE-500",
+    summary: "Parent Epic Waiting Human",
+    operationalGroup: "humanApproval",
+    action: "finalMerge",
+    humanActionRequired: true
+  }, "human");
+  assert.equal(humanApprovalCard.querySelector(".pm-btn-approve"), null, "humanApproval item must NOT have approve button");
+  assert.equal(humanApprovalCard.querySelector(".pm-btn-reject"), null, "humanApproval item must NOT have reject button");
+
+  // 2. awaitingApproval + branchCreation/review/implementation => buttons MUST exist
+  const awaitingCard1 = env.exports.createPmItemCard({
+    issueKey: "PACE-102",
+    summary: "Supervised implementation step",
+    operationalGroup: "awaitingApproval",
+    action: "implementation",
+    humanActionRequired: true,
+    planFingerprint: "fp-123"
+  }, "approval");
+  assert.ok(awaitingCard1.querySelector(".pm-btn-approve"), "awaitingApproval + implementation MUST have approve button");
+  assert.ok(awaitingCard1.querySelector(".pm-btn-reject"), "awaitingApproval + implementation MUST have reject button");
+
+  const awaitingCard2 = env.exports.createPmItemCard({
+    issueKey: "PACE-103",
+    summary: "Supervised branch creation",
+    operationalGroup: "awaitingApproval",
+    action: "branchCreation",
+    humanActionRequired: true
+  }, "approval");
+  assert.ok(awaitingCard2.querySelector(".pm-btn-approve"), "awaitingApproval + branchCreation MUST have approve button");
+  assert.ok(awaitingCard2.querySelector(".pm-btn-reject"), "awaitingApproval + branchCreation MUST have reject button");
+
+  // 3. blocked, executing, ready, inReview, needsRework => NO approval/rejection buttons
+  for (const group of ["blocked", "executing", "ready", "inReview", "needsRework"]) {
+    const card = env.exports.createPmItemCard({
+      issueKey: `PACE-${group}`,
+      summary: `Test for ${group}`,
+      operationalGroup: group,
+      action: "implementation",
+      humanActionRequired: false
+    }, "state");
+    assert.equal(card.querySelector(".pm-btn-approve"), null, `${group} item must NOT have approve button`);
+    assert.equal(card.querySelector(".pm-btn-reject"), null, `${group} item must NOT have reject button`);
+  }
+
   cleanup();
 });
 
 // -----------------------------------------------------------------------------
-// Test D: Decision Trace Contract
+// Test D: Decision Trace Contract & Trace Rendering (Fix 4)
 // -----------------------------------------------------------------------------
-test("Phase I — D. Decision Trace Contract (buildPmWorkItemDetail returns complete read model)", async () => {
+test("Phase I — D. Decision Trace Contract & Complete Trace Rendering", async () => {
   const { store, tmpDir, cleanup } = makeTempDb("decision-trace");
   const settings = makeSettings(tmpDir);
 
@@ -316,13 +616,121 @@ test("Phase I — D. Decision Trace Contract (buildPmWorkItemDetail returns comp
   assert.ok(detail.blockedInfo, "blockedInfo required");
   assert.ok(Array.isArray(detail.history), "history timeline required");
 
+  // UI Renderer Regression: renderDecisionTraceDetail renders all required fields
+  const env = createMockEnvironment();
+  const traceBody = env.document.getElementById("trace-drawer-body");
+
+  const fullTraceData = {
+    workItem: { key: "PACE-201", summary: "Refactor cache layer", canonicalState: "verifying", sourceProvider: "jira", autonomousEligible: true },
+    orchestratorDecision: { persona: "backend-engineer", taskAgent: "backend-engineer", risk: "low", planFingerprint: "fp-abcdef1234567890", allowedPaths: ["src/cache/**"], dependencies: [] },
+    agentIdentity: {
+      agentId: "backend-engineer",
+      agentVersion: 2,
+      agentHash: "be-hash-v2",
+      liveRegistryStatus: "enabled",
+      liveRegistryVersion: 2,
+      liveRegistryHash: "be-hash-v2",
+      isPinnedVersionCurrent: true
+    },
+    execution: {
+      provider: "codex",
+      model: "gpt-5",
+      modelProfile: "reasoning-high",
+      currentRunState: "verifying",
+      branch: "feat/pace-201",
+      worktree: "c:/worktrees/pace-201",
+      commit: "commit-sha-201",
+      attempt: 1,
+      maxAttempts: 3
+    },
+    review: {
+      reviewerTaskAgent: "qa-engineer",
+      reviewAgentVersion: 1,
+      reviewAgentHash: "qa-hash-v1",
+      reviewProvider: "anthropic",
+      reviewModel: "claude-3-7-sonnet",
+      reviewModelProfile: "strict-verifier",
+      verdict: "APPROVED",
+      latestImplementationSha: "commit-sha-201",
+      structuredFindings: [{ severity: "INFO", message: "All assertions valid" }]
+    },
+    humanControl: {
+      pendingAction: "none",
+      approvalState: "approved",
+      planFingerprint: "fp-abcdef1234567890",
+      operatingMode: "AUTONOMOUS"
+    },
+    blockedInfo: { isBlocked: false },
+    history: [
+      { timestamp: "2026-08-18T08:00:00Z", stage: "started", label: "Worker started", actor: "executor", details: "Allocated slot 1" }
+    ]
+  };
+
+  env.exports.renderDecisionTraceDetail(fullTraceData);
+
+  // Extract all text content from trace-drawer-body
+  function collectText(node) {
+    let t = node.textContent || "";
+    for (const c of (node.children || [])) {
+      t += " " + collectText(c);
+    }
+    return t;
+  }
+  const renderedText = collectText(traceBody);
+
+  // Assert Agent Identity fields are rendered
+  assert.ok(renderedText.includes("backend-engineer"), "Must render agentId");
+  assert.ok(renderedText.includes("be-hash-v2"), "Must render agentHash");
+  assert.ok(renderedText.includes("enabled"), "Must render liveRegistryStatus");
+  assert.ok(renderedText.includes("Evet"), "Must render isPinnedVersionCurrent=true as Evet");
+
+  // Assert Execution fields are rendered
+  assert.ok(renderedText.includes("codex"), "Must render provider");
+  assert.ok(renderedText.includes("gpt-5"), "Must render model");
+  assert.ok(renderedText.includes("reasoning-high"), "Must render modelProfile");
+  assert.ok(renderedText.includes("feat/pace-201"), "Must render branch");
+  assert.ok(renderedText.includes("1 / 3"), "Must render attempt / maxAttempts");
+
+  // Assert Review fields are rendered
+  assert.ok(renderedText.includes("qa-engineer"), "Must render reviewerTaskAgent");
+  assert.ok(renderedText.includes("strict-verifier"), "Must render reviewModelProfile");
+  assert.ok(renderedText.includes("claude-3-7-sonnet"), "Must render reviewModel");
+  assert.ok(renderedText.includes("APPROVED"), "Must render verdict");
+
+  // Assert Human Control fields are rendered
+  assert.ok(renderedText.includes("fp-abcdef123456"), "Must render planFingerprint prefix");
+  assert.ok(renderedText.includes("AUTONOMOUS"), "Must render operatingMode");
+
+  // Assert History Timeline uses label / actor / details
+  assert.ok(renderedText.includes("Worker started"), "Must render history label");
+  assert.ok(renderedText.includes("[executor]"), "Must render history actor");
+  assert.ok(renderedText.includes("Allocated slot 1"), "Must render history details");
+
+  // Assert Agent Registry card metadata rendering (executor provider/model/modelProfile, reviewer)
+  const agentCard = env.exports.createAgentCard({
+    id: "worker-agent",
+    displayName: "Worker Agent",
+    version: 2,
+    status: "enabled",
+    role: "implementation",
+    executorProvider: "codex",
+    executorModel: "gpt-5",
+    executorModelProfile: "reasoning-high",
+    reviewerAssignment: "reviewer-agent"
+  });
+  const agentCardText = collectText(agentCard);
+  assert.ok(agentCardText.includes("codex"), "Agent card must render executorProvider");
+  assert.ok(agentCardText.includes("gpt-5"), "Agent card must render executorModel");
+  assert.ok(agentCardText.includes("reasoning-high"), "Agent card must render modelProfile");
+  assert.ok(agentCardText.includes("reviewer-agent"), "Agent card must render reviewer assignment");
+
   cleanup();
 });
 
 // -----------------------------------------------------------------------------
-// Test E: Provider Configuration Contract
+// Test E: Provider Configuration Contract & Descriptor Rendering (Fix 2)
 // -----------------------------------------------------------------------------
-test("Phase I — E. Provider Configuration Contract (Top-level snapshot metadata & SourceControl read-only)", async () => {
+test("Phase I — E. Provider Configuration Contract & Descriptor Rendering", async () => {
   const { store, tmpDir, cleanup } = makeTempDb("config-contract");
   const settings = makeSettings(tmpDir);
 
@@ -339,6 +747,54 @@ test("Phase I — E. Provider Configuration Contract (Top-level snapshot metadat
   assert.ok(snapshot.config.selections, "config.selections required");
   assert.ok(Array.isArray(snapshot.config.mutableFields), "config.mutableFields required");
   assert.ok(!snapshot.config.mutableFields.includes("sourceControl"), "sourceControl must NOT be mutable");
+
+  // Renderer-level regression using ACTUAL buildDashboardSnapshot() provider arrays
+  const env = createMockEnvironment();
+
+  function collectText(node) {
+    let t = node.textContent || "";
+    for (const c of (node.children || [])) {
+      t += " " + collectText(c);
+    }
+    return t;
+  }
+
+  // 1. Work Source
+  env.exports.renderProviderSection("ws", "workSource", snapshot.providers.workSources, snapshot.config.selections.workSource, true);
+  const wsList = env.document.getElementById("cfg-ws-list");
+  const wsText = collectText(wsList);
+  assert.ok(wsText.includes("jira"), "workSource name 'jira' must render");
+  assert.ok(!wsText.includes("undefined"), "workSource must NOT render 'undefined'");
+
+  // 2. Orchestrator
+  env.exports.renderProviderSection("orch", "orchestrator", snapshot.providers.orchestrators, snapshot.config.selections.orchestrator, true);
+  const orchList = env.document.getElementById("cfg-orch-list");
+  const orchText = collectText(orchList);
+  assert.ok(orchText.includes("builtin"), "orchestrator name 'builtin' must render");
+  assert.ok(!orchText.includes("undefined"), "orchestrator must NOT render 'undefined'");
+
+  // 3. Executor
+  env.exports.renderProviderSection("exec", "executor", snapshot.providers.executors, snapshot.config.selections.executor, true);
+  const execList = env.document.getElementById("cfg-exec-list");
+  const execText = collectText(execList);
+  assert.ok(execText.includes("codex"), "executor name 'codex' must render");
+  assert.ok(execText.includes("local"), "executor name 'local' must render");
+  assert.ok(!execText.includes("undefined"), "executor must NOT render 'undefined'");
+
+  // 4. Code Intelligence
+  env.exports.renderProviderSection("ci", "codeIntelligence", snapshot.providers.codeIntelligence, snapshot.config.selections.codeIntelligence, true);
+  const ciList = env.document.getElementById("cfg-ci-list");
+  const ciText = collectText(ciList);
+  assert.ok(ciText.includes("builtin"), "codeIntelligence name 'builtin' must render");
+  assert.ok(!ciText.includes("undefined"), "codeIntelligence must NOT render 'undefined'");
+
+  // 5. Source Control ("local-git" read-only)
+  env.exports.renderProviderSection("sc", "sourceControl", snapshot.providers.sourceControl, snapshot.config.selections.sourceControl, false);
+  const scList = env.document.getElementById("cfg-sc-list");
+  const scText = collectText(scList);
+  assert.ok(scText.includes("local-git"), "sourceControl name 'local-git' must render");
+  assert.ok(!scText.includes("undefined"), "sourceControl must NOT render 'undefined'");
+  assert.equal(scList.querySelector(".pm-btn-view"), null, "sourceControl must NOT have mutation button (read-only)");
 
   cleanup();
 });
@@ -518,72 +974,127 @@ test("Phase I — I. Agent Registry Mutations & Versioning (Create -> Edit -> v2
 });
 
 // -----------------------------------------------------------------------------
-// Test J: Parent DAG & WAITING_HUMAN Completion Evidence
+// Test J: Parent DAG & Real Parent Execution Completion Packet (Fix 3)
 // -----------------------------------------------------------------------------
-test("Phase I — J. Parent DAG & WAITING_HUMAN Completion Evidence (NO auto-merge button)", () => {
+test("Phase I — J. Parent DAG & Real Parent Execution Completion Packet", () => {
   const { store, cleanup } = makeTempDb("parent-dag");
 
-  store.upsertEpic({
-    key: "PACE-500",
-    summary: "Video Analytics Pipeline",
-    branch: "epic/pace-500-pipeline",
-    baseBranch: "develop"
+  const completionPacket = {
+    parentKey: "PACE-1000",
+    graphFingerprint: "gfp-998877",
+    baseSha: "base-sha-12345",
+    integrationHeadSha: "head-sha-67890",
+    children: ["PACE-1001", "PACE-1002"],
+    reviewedShas: { "PACE-1001": "rev-sha-1", "PACE-1002": "rev-sha-2" },
+    integratedShas: { "PACE-1001": "int-sha-1", "PACE-1002": "int-sha-2" },
+    verification: {
+      command: "npm run check",
+      passed: true,
+      evidence: "All 350 test assertions passed"
+    },
+    integrationReview: {
+      reviewerAgentId: "lead-reviewer",
+      reviewerVersion: 2,
+      reviewerHash: "revhash-777",
+      provider: "anthropic",
+      modelProfile: "claude-3-7-sonnet",
+      verdict: "APPROVED",
+      findings: ["Clean integration", "Zero security issues"]
+    },
+    warnings: ["Non-blocking dependency advisory"],
+    collectedAt: "2026-08-18T08:30:00.000Z"
+  };
+
+  store.upsertParentExecution({
+    parentKey: "PACE-1000",
+    summary: "Autonomous Delivery Epic",
+    state: "waiting_human",
+    baseRef: "develop",
+    baseSha: "base-sha-12345",
+    integrationBranch: "epic/pace-1000",
+    integrationHeadSha: "head-sha-67890",
+    graphFingerprint: "gfp-998877",
+    completionPacket
   });
 
   store.upsertEpicTask({
-    epicKey: "PACE-500",
-    issueKey: "PACE-501",
-    summary: "Frame decoder",
-    branch: "feat/501",
+    epicKey: "PACE-1000",
+    issueKey: "PACE-1001",
+    summary: "Module A",
+    branch: "feat/1001",
     state: "integrated",
     dependencies: [],
-    reviewedSha: "sha1",
-    integratedSha: "sha1"
+    reviewedSha: "rev-sha-1",
+    integratedSha: "int-sha-1"
   });
 
   store.upsertEpicTask({
-    epicKey: "PACE-500",
-    issueKey: "PACE-502",
-    summary: "Inference engine",
-    branch: "feat/502",
+    epicKey: "PACE-1000",
+    issueKey: "PACE-1002",
+    summary: "Module B",
+    branch: "feat/1002",
     state: "integrated",
-    dependencies: ["PACE-501"],
-    reviewedSha: "sha2",
-    integratedSha: "sha2"
+    dependencies: ["PACE-1001"],
+    reviewedSha: "rev-sha-2",
+    integratedSha: "int-sha-2"
   });
 
-  store.queueEpicIntegration({
-    epicKey: "PACE-500",
-    issueKey: "PACE-501",
-    leafBranch: "feat/501"
-  });
-  store.finishEpicIntegration({
-    epicKey: "PACE-500",
-    issueKey: "PACE-501",
-    commit: "sha1"
-  });
-
-  store.queueEpicIntegration({
-    epicKey: "PACE-500",
-    issueKey: "PACE-502",
-    leafBranch: "feat/502"
-  });
-  store.finishEpicIntegration({
-    epicKey: "PACE-500",
-    issueKey: "PACE-502",
-    commit: "sha2"
-  });
-
-  // Transition epic to waiting_human
-  store.database.prepare("UPDATE epics SET state = 'waiting_human' WHERE epic_key = 'PACE-500'").run();
-
-  const detail = store.getNormalizedParentDetail("PACE-500");
-  assert.ok(detail);
+  const detail = store.getNormalizedParentDetail("PACE-1000");
+  assert.ok(detail, "detail must exist");
   assert.equal(detail.state, "waiting_human");
   assert.equal(detail.waitingHuman, true);
-  assert.equal(detail.children.length, 2);
-  assert.equal(detail.children[0].dependencyState, "ready");
-  assert.equal(detail.children[1].dependencyState, "satisfied");
+  assert.equal(detail.graphFingerprint, "gfp-998877");
+  assert.equal(detail.baseSha, "base-sha-12345");
+  assert.equal(detail.integrationHeadSha, "head-sha-67890");
+
+  // Assert safe normalized completion summary preserved in API read model
+  assert.ok(detail.completion, "completion summary must be preserved");
+  assert.equal(detail.completion.graphFingerprint, "gfp-998877");
+  assert.equal(detail.completion.baseSha, "base-sha-12345");
+  assert.equal(detail.completion.integrationHeadSha, "head-sha-67890");
+  assert.deepEqual(detail.completion.children, ["PACE-1001", "PACE-1002"]);
+  assert.deepEqual(detail.completion.reviewedShas, { "PACE-1001": "rev-sha-1", "PACE-1002": "rev-sha-2" });
+  assert.deepEqual(detail.completion.integratedShas, { "PACE-1001": "int-sha-1", "PACE-1002": "int-sha-2" });
+
+  // Verification evidence
+  assert.ok(detail.completion.verification, "verification must be preserved");
+  assert.equal(detail.completion.verification.command, "npm run check");
+  assert.equal(detail.completion.verification.passed, true);
+  assert.equal(detail.completion.verification.evidence, "All 350 test assertions passed");
+
+  // Integration review evidence
+  assert.ok(detail.completion.integrationReview, "integrationReview must be preserved");
+  assert.equal(detail.completion.integrationReview.reviewerAgentId, "lead-reviewer");
+  assert.equal(detail.completion.integrationReview.reviewerVersion, 2);
+  assert.equal(detail.completion.integrationReview.reviewerHash, "revhash-777");
+  assert.equal(detail.completion.integrationReview.provider, "anthropic");
+  assert.equal(detail.completion.integrationReview.modelProfile, "claude-3-7-sonnet");
+  assert.equal(detail.completion.integrationReview.verdict, "APPROVED");
+
+  // Warnings
+  assert.deepEqual(detail.completion.warnings, ["Non-blocking dependency advisory"]);
+
+  // Test UI Renderer: renderParentReviewFindings consumes REAL schema
+  const env = createMockEnvironment();
+  env.exports.renderParentReviewFindings(detail);
+
+  const findingsContainer = env.document.getElementById("parent-review-findings");
+  function collectText(node) {
+    let t = node.textContent || "";
+    for (const c of (node.children || [])) {
+      t += " " + collectText(c);
+    }
+    return t;
+  }
+  const findingsText = collectText(findingsContainer);
+
+  assert.ok(findingsText.includes("npm run check"), "Must render verification command");
+  assert.ok(findingsText.includes("Başarılı"), "Must render verification passed status");
+  assert.ok(findingsText.includes("All 350 test assertions passed"), "Must render verification evidence");
+  assert.ok(findingsText.includes("lead-reviewer"), "Must render reviewerAgentId");
+  assert.ok(findingsText.includes("claude-3-7-sonnet"), "Must render reviewer modelProfile");
+  assert.ok(findingsText.includes("APPROVED"), "Must render review verdict");
+  assert.ok(findingsText.includes("Non-blocking dependency advisory"), "Must render warnings");
 
   // Verify HTML does not contain any auto-merge/deploy buttons
   const htmlPath = path.join(rootDir, "ui", "index.html");
@@ -596,22 +1107,67 @@ test("Phase I — J. Parent DAG & WAITING_HUMAN Completion Evidence (NO auto-mer
 });
 
 // -----------------------------------------------------------------------------
-// Test K: Deep Links & URL Navigation Logic
+// Test K: Real Popstate Navigation State Reconciliation (Fix 5)
 // -----------------------------------------------------------------------------
-test("Phase I — K. Deep Links & URL State Navigation", () => {
-  const search = "?view=parents&parent=PACE-200&issue=PACE-214&run=run-42";
-  const params = new URLSearchParams(search);
+test("Phase I — K. Real Popstate Navigation State Reconciliation", () => {
+  const env = createMockEnvironment("http://localhost:4319/");
 
-  assert.equal(params.get("view"), "parents");
-  assert.equal(params.get("parent"), "PACE-200");
-  assert.equal(params.get("issue"), "PACE-214");
-  assert.equal(params.get("run"), "run-42");
+  // Step 1: Initial state is overview, no selection
+  assert.equal(env.exports.state.currentView, "overview-view");
+  assert.equal(env.exports.state.selectedParentKey, null);
+  assert.equal(env.exports.state.selectedWorkItemKey, null);
+  assert.equal(env.exports.state.selectedRunId, null);
 
-  // Verify removal of single parameter
-  params.delete("issue");
-  assert.equal(params.get("issue"), null);
-  assert.equal(params.get("parent"), "PACE-200");
-  assert.equal(params.toString(), "view=parents&parent=PACE-200&run=run-42");
+  // Step 2: Navigate to parents view
+  env.exports.switchView("parents-view", false);
+  assert.equal(env.exports.state.currentView, "parents-view");
+  assert.ok(env.urlObj.search.includes("view=parents"));
+
+  // Step 3: Select parent
+  env.exports.state.selectedParentKey = "PACE-500";
+  env.exports.syncUrlState(false);
+  assert.ok(env.urlObj.search.includes("parent=PACE-500"));
+
+  // Step 4: Open issue drawer
+  env.exports.openDecisionTrace("PACE-501", false);
+  assert.equal(env.exports.state.selectedWorkItemKey, "PACE-501");
+  assert.equal(env.elements["decision-trace-modal"].hidden, false);
+  assert.ok(env.urlObj.search.includes("issue=PACE-501"));
+
+  // Step 5: Open telemetry drawer
+  env.exports.openTelemetryDrawer("run-789", false);
+  assert.equal(env.exports.state.selectedRunId, "run-789");
+  assert.equal(env.elements["telemetry-drawer-modal"].hidden, false);
+  assert.ok(env.urlObj.search.includes("run=run-789"));
+
+  const pushCountBeforePop = env.pushStateCount;
+
+  // Step 6: Back removes run (simulate popstate to ?view=parents&parent=PACE-500&issue=PACE-501)
+  env.urlObj.search = "?view=parents&parent=PACE-500&issue=PACE-501";
+  env.exports.readUrlState();
+  assert.equal(env.exports.state.selectedRunId, null, "Back must clear selectedRunId");
+  assert.equal(env.elements["telemetry-drawer-modal"].hidden, true, "Telemetry drawer must close");
+  assert.equal(env.exports.state.selectedWorkItemKey, "PACE-501", "Issue drawer must remain open");
+  assert.equal(env.elements["decision-trace-modal"].hidden, false);
+  assert.equal(env.pushStateCount, pushCountBeforePop, "popstate must never call pushState");
+
+  // Step 7: Back removes issue (simulate popstate to ?view=parents&parent=PACE-500)
+  env.urlObj.search = "?view=parents&parent=PACE-500";
+  env.exports.readUrlState();
+  assert.equal(env.exports.state.selectedWorkItemKey, null, "Back must clear selectedWorkItemKey");
+  assert.equal(env.elements["decision-trace-modal"].hidden, true, "Decision Trace drawer must close");
+  assert.equal(env.exports.state.selectedParentKey, "PACE-500", "Parent selection must remain active");
+  assert.equal(env.exports.state.currentView, "parents-view");
+  assert.equal(env.pushStateCount, pushCountBeforePop, "popstate must never call pushState");
+
+  // Step 8: Back removes parent and view (simulate popstate to root /)
+  env.urlObj.search = "";
+  env.exports.readUrlState();
+  assert.equal(env.exports.state.selectedParentKey, null, "Absence of ?parent must clear stale selectedParentKey");
+  assert.equal(env.exports.state.currentView, "overview-view", "Absence of ?view must restore overview-view");
+  assert.equal(env.elements["overview-view"].hidden, false, "Overview view must be visible");
+  assert.equal(env.elements["parents-view"].hidden, true, "Parents view must be hidden");
+  assert.equal(env.pushStateCount, pushCountBeforePop, "popstate must never call pushState");
 });
 
 // -----------------------------------------------------------------------------
