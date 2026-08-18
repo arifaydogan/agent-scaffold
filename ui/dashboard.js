@@ -561,27 +561,45 @@ function readUrlState() {
   const issueParam = params.get("issue");
   const runParam = params.get("run");
 
+  // Reconcile view — absent means overview
   if (viewParam) {
     const targetView = `${viewParam}-view`;
     const viewEl = getElem(targetView);
     if (viewEl) {
       switchView(targetView, true);
     }
+  } else {
+    switchView("overview-view", true);
   }
 
+  // Reconcile parent — absent clears stale selection
   if (parentParam) {
     state.selectedParentKey = parentParam;
     if (state.currentView === "parents-view") {
       fetchParentDetail(parentParam);
     }
+  } else {
+    state.selectedParentKey = null;
   }
 
+  // Reconcile issue — absent closes Decision Trace
   if (issueParam) {
     openDecisionTrace(issueParam, true);
+  } else {
+    if (state.selectedWorkItemKey) {
+      closeModal("decision-trace-modal");
+      state.selectedWorkItemKey = null;
+    }
   }
 
+  // Reconcile run — absent closes Telemetry drawer
   if (runParam) {
     openTelemetryDrawer(runParam, true);
+  } else {
+    if (state.selectedRunId) {
+      closeModal("telemetry-drawer-modal");
+      state.selectedRunId = null;
+    }
   }
 }
 
@@ -992,7 +1010,7 @@ function createPmItemCard(item, styleClass, showActions = false) {
   }
   actions.appendChild(viewBtn);
 
-  if (item.humanActionRequired || item.action || showActions || item.operationalGroup === "awaitingApproval") {
+  if (item.operationalGroup === "awaitingApproval") {
     const approveBtn = element("button", "pm-btn pm-btn-approve", "✓ Onayla");
     approveBtn.type = "button";
     if (typeof approveBtn.addEventListener === "function") {
@@ -1103,6 +1121,7 @@ function renderDecisionTraceDetail(data) {
 
   const wi = data.workItem || {};
   const orch = data.orchestratorDecision || {};
+  const agentId = data.agentIdentity || {};
   const exec = data.execution || {};
   const rev = data.review || {};
   const human = data.humanControl || {};
@@ -1111,6 +1130,7 @@ function renderDecisionTraceDetail(data) {
 
   if (summaryEl) summaryEl.textContent = wi.summary || "Açıklama yok";
 
+  // 1. Work Item Summary
   const wiSection = element("div", "trace-section");
   wiSection.appendChild(element("h3", "trace-section-title", "1. Work Item Özeti"));
   const wiGrid = element("div", "trace-grid");
@@ -1121,6 +1141,7 @@ function renderDecisionTraceDetail(data) {
   wiSection.appendChild(wiGrid);
   body.appendChild(wiSection);
 
+  // 2. Orchestration Decision
   const orchSection = element("div", "trace-section");
   orchSection.appendChild(element("h3", "trace-section-title", "2. Orkestrasyon ve Planlama Kararı"));
   const orchGrid = element("div", "trace-grid");
@@ -1133,21 +1154,45 @@ function renderDecisionTraceDetail(data) {
   orchSection.appendChild(orchGrid);
   body.appendChild(orchSection);
 
+  // 3. Agent Identity
+  const aidSection = element("div", "trace-section");
+  aidSection.appendChild(element("h3", "trace-section-title", "3. Agent Kimliği (Registry)"));
+  const aidGrid = element("div", "trace-grid");
+  aidGrid.appendChild(createTraceCell("Agent ID", agentId.agentId || orch.taskAgent || "—"));
+  aidGrid.appendChild(createTraceCell("Agent Version", agentId.agentVersion ?? "—"));
+  aidGrid.appendChild(createTraceCell("Agent Hash", agentId.agentHash ? String(agentId.agentHash).slice(0, 12) + "..." : "—"));
+  aidGrid.appendChild(createTraceCell("Canlı Registry Durumu", agentId.liveRegistryStatus || "—"));
+  aidGrid.appendChild(createTraceCell("Canlı Registry Version", agentId.liveRegistryVersion ?? "—"));
+  aidGrid.appendChild(createTraceCell("Canlı Registry Hash", agentId.liveRegistryHash ? String(agentId.liveRegistryHash).slice(0, 12) + "..." : "—"));
+  aidGrid.appendChild(createTraceCell("Sabitlenmiş Sürüm Güncel", agentId.isPinnedVersionCurrent === true ? "Evet" : (agentId.isPinnedVersionCurrent === false ? "Hayır" : "—")));
+  aidSection.appendChild(aidGrid);
+  body.appendChild(aidSection);
+
+  // 4. Execution Engine & Worktree
   const execSection = element("div", "trace-section");
-  execSection.appendChild(element("h3", "trace-section-title", "3. Yürütme Motoru ve Worktree"));
+  execSection.appendChild(element("h3", "trace-section-title", "4. Yürütme Motoru ve Worktree"));
   const execGrid = element("div", "trace-grid");
-  execGrid.appendChild(createTraceCell("Provider / Model", `${exec.provider || "—"} / ${exec.model || "—"}`));
+  execGrid.appendChild(createTraceCell("Provider", exec.provider || "—"));
+  execGrid.appendChild(createTraceCell("Model", exec.model || "—"));
+  execGrid.appendChild(createTraceCell("Model Profile", exec.modelProfile || "—"));
+  execGrid.appendChild(createTraceCell("Çalışma Durumu", exec.currentRunState || "—"));
   execGrid.appendChild(createTraceCell("Branch", exec.branch || "—"));
   execGrid.appendChild(createTraceCell("Worktree", exec.worktree || "—"));
   execGrid.appendChild(createTraceCell("Commit SHA", exec.commit || "—"));
-  execGrid.appendChild(createTraceCell("Deneme (Attempt)", String(exec.attempt ?? "0")));
+  execGrid.appendChild(createTraceCell("Deneme", exec.attempt != null && exec.maxAttempts != null ? `${exec.attempt} / ${exec.maxAttempts}` : String(exec.attempt ?? "0")));
   execSection.appendChild(execGrid);
   body.appendChild(execSection);
 
+  // 5. Reviewer & Findings
   const revSection = element("div", "trace-section");
-  revSection.appendChild(element("h3", "trace-section-title", "4. Reviewer ve Doğrulama Bulguları"));
+  revSection.appendChild(element("h3", "trace-section-title", "5. Reviewer ve Doğrulama Bulguları"));
   const revGrid = element("div", "trace-grid");
   revGrid.appendChild(createTraceCell("Reviewer Agent", rev.reviewerTaskAgent || "—"));
+  revGrid.appendChild(createTraceCell("Review Agent Version", rev.reviewAgentVersion ?? "—"));
+  revGrid.appendChild(createTraceCell("Review Agent Hash", rev.reviewAgentHash ? String(rev.reviewAgentHash).slice(0, 12) + "..." : "—"));
+  revGrid.appendChild(createTraceCell("Review Provider", rev.reviewProvider || "—"));
+  revGrid.appendChild(createTraceCell("Review Model", rev.reviewModel || "—"));
+  revGrid.appendChild(createTraceCell("Review Model Profile", rev.reviewModelProfile || "—"));
   revGrid.appendChild(createTraceCell("Verdict", rev.verdict || "Henüz verilmedi"));
   revGrid.appendChild(createTraceCell("İncelenen SHA", rev.latestImplementationSha || "—"));
   revSection.appendChild(revGrid);
@@ -1162,16 +1207,18 @@ function renderDecisionTraceDetail(data) {
   }
   body.appendChild(revSection);
 
+  // 6. Human Control
   const humanSection = element("div", "trace-section");
-  humanSection.appendChild(element("h3", "trace-section-title", "5. İnsan Kontrol ve Onay Kapısı"));
+  humanSection.appendChild(element("h3", "trace-section-title", "6. İnsan Kontrol ve Onay Kapısı"));
   const humanGrid = element("div", "trace-grid");
-  humanGrid.appendChild(createTraceCell("İnsan Aksiyonu Gerekli", human.humanActionRequired ? "EVET" : "HAYIR"));
   humanGrid.appendChild(createTraceCell("Bekleyen Aksiyon", human.pendingAction || "Yok"));
   humanGrid.appendChild(createTraceCell("Onay Durumu", human.approvalState || "not_required"));
+  humanGrid.appendChild(createTraceCell("Plan Parmak İzi", human.planFingerprint ? String(human.planFingerprint).slice(0, 16) + "..." : "—"));
   humanGrid.appendChild(createTraceCell("Çalışma Modu", human.operatingMode || "AUTONOMOUS"));
   humanSection.appendChild(humanGrid);
   body.appendChild(humanSection);
 
+  // 7. Blocked Info
   if (blk.isBlocked) {
     const blkSection = element("div", "trace-section trace-blocked-box");
     blkSection.appendChild(element("h3", "trace-section-title", "🛑 Bloke Durumu ve Teşhis"));
@@ -1183,8 +1230,9 @@ function renderDecisionTraceDetail(data) {
     body.appendChild(blkSection);
   }
 
+  // 8. History Timeline — uses label/actor/details, not message/payload
   const histSection = element("div", "trace-section");
-  histSection.appendChild(element("h3", "trace-section-title", "6. Denetlenebilir Olay Zaman Çizelgesi"));
+  histSection.appendChild(element("h3", "trace-section-title", "7. Denetlenebilir Olay Zaman Çizelgesi"));
   if (history.length === 0) {
     histSection.appendChild(element("p", "empty-text", "Zaman çizelgesi boş."));
   } else {
@@ -1194,8 +1242,12 @@ function renderDecisionTraceDetail(data) {
       const dot = element("span", "timeline-dot");
       const content = element("div", "timeline-content");
       const time = element("small", null, formatTime(item.timestamp || item.createdAt));
-      const stage = element("strong", null, `${item.stage || item.state}: `);
-      const desc = element("span", null, item.message || JSON.stringify(item.payload || {}));
+      const stage = element("strong", null, `${item.stage || item.state || "event"}: `);
+      const label = item.label || item.message || "";
+      const actor = item.actor ? ` [${item.actor}]` : "";
+      const details = item.details ? (typeof item.details === "string" ? item.details : JSON.stringify(item.details)) : "";
+      const descText = [label, actor, details].filter(Boolean).join(" ") || "—";
+      const desc = element("span", null, descText);
       content.appendChild(time);
       content.appendChild(stage);
       content.appendChild(desc);
@@ -1624,19 +1676,25 @@ function renderParentReviewFindings(data) {
   container.innerHTML = "";
 
   const rev = data.integrationReview;
-  const repoVerif = data.repositoryVerification || data.completionPacket?.repositoryVerification;
+  const completion = data.completion || {};
+  const verification = completion.verification || data.verification;
 
-  if (!rev && !repoVerif) {
+  if (!rev && !verification) {
     container.appendChild(element("p", "empty-text", "Tüm child tasklar entegre edildiğinde aggregate review ve repo doğrulaması burada görüntülenecektir."));
     return;
   }
 
-  if (repoVerif) {
+  if (verification) {
     const verifBox = element("div", "finding-box");
-    verifBox.appendChild(element("h4", null, `Repository Verification (${repoVerif.command || "npm run check"})`));
-    verifBox.appendChild(element("p", null, `Durum: ${repoVerif.passed ? "✓ Başarılı" : "✕ Başarısız"}`));
-    if (repoVerif.output) {
-      const pre = element("pre", "code-block", repoVerif.output.slice(0, 500));
+    const verifLabel = verification.command || verification.check || "verification check";
+    verifBox.appendChild(element("h4", null, `Verification (${verifLabel})`));
+    const passed = verification.passed ?? verification.result;
+    verifBox.appendChild(element("p", null, `Durum: ${passed ? "✓ Başarılı" : (passed === false ? "✕ Başarısız" : "Bilinmiyor")}`));
+    if (verification.evidence) {
+      const pre = element("pre", "code-block", String(verification.evidence).slice(0, 500));
+      verifBox.appendChild(pre);
+    } else if (verification.output) {
+      const pre = element("pre", "code-block", String(verification.output).slice(0, 500));
       verifBox.appendChild(pre);
     }
     container.appendChild(verifBox);
@@ -1644,14 +1702,35 @@ function renderParentReviewFindings(data) {
 
   if (rev) {
     const revBox = element("div", "finding-box");
-    revBox.appendChild(element("h4", null, `Aggregate Integration Review (${rev.reviewer || "reviewer-agent"})`));
-    revBox.appendChild(element("p", null, `Verdict: ${rev.verdict || "CLEAN"}`));
+    const reviewerName = rev.reviewerAgentId || rev.reviewer || "reviewer-agent";
+    revBox.appendChild(element("h4", null, `Aggregate Integration Review (${reviewerName})`));
+
+    const revMeta = element("div", "trace-grid");
+    revMeta.appendChild(createTraceCell("Reviewer Agent", rev.reviewerAgentId || "—"));
+    revMeta.appendChild(createTraceCell("Reviewer Version", rev.reviewerVersion ?? "—"));
+    revMeta.appendChild(createTraceCell("Reviewer Hash", rev.reviewerHash ? String(rev.reviewerHash).slice(0, 12) + "..." : "—"));
+    revMeta.appendChild(createTraceCell("Provider", rev.provider || "—"));
+    revMeta.appendChild(createTraceCell("Model Profile", rev.modelProfile || "—"));
+    revMeta.appendChild(createTraceCell("Verdict", rev.verdict || "CLEAN"));
+    revBox.appendChild(revMeta);
+
     if (rev.findings && rev.findings.length > 0) {
       const ul = element("ul", null);
       rev.findings.forEach(f => ul.appendChild(element("li", null, typeof f === "string" ? f : JSON.stringify(f))));
       revBox.appendChild(ul);
     }
     container.appendChild(revBox);
+  }
+
+  // Render warnings if present
+  const warnings = completion.warnings || data.warnings;
+  if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+    const warnBox = element("div", "finding-box");
+    warnBox.appendChild(element("h4", null, "⚠️ Uyarılar (Warnings)"));
+    const warnList = element("ul", null);
+    warnings.forEach(w => warnList.appendChild(element("li", null, typeof w === "string" ? w : JSON.stringify(w))));
+    warnBox.appendChild(warnList);
+    container.appendChild(warnBox);
   }
 }
 
@@ -1969,6 +2048,14 @@ function createAgentCard(agent) {
   meta.appendChild(createTraceCell("Allowed Paths", Array.isArray(agent.allowedPaths) ? agent.allowedPaths.join(", ") : "—"));
   meta.appendChild(createTraceCell("Risk", agent.risk || "normal"));
   meta.appendChild(createTraceCell("Max Concurrency", String(agent.maxConcurrency || 1)));
+  if (agent.executorProvider || agent.executorModel) {
+    meta.appendChild(createTraceCell("Executor Provider", agent.executorProvider || "—"));
+    meta.appendChild(createTraceCell("Executor Model", agent.executorModel || "—"));
+    meta.appendChild(createTraceCell("Model Profile", agent.executorModelProfile || agent.modelProfile || "—"));
+  }
+  if (agent.reviewerAssignment || agent.reviewerAgent) {
+    meta.appendChild(createTraceCell("Reviewer", agent.reviewerAssignment || agent.reviewerAgent || "—"));
+  }
   if (agent.definitionHash) {
     meta.appendChild(createTraceCell("Definition Hash", agent.definitionHash.slice(0, 12) + "..."));
   }
@@ -2291,15 +2378,21 @@ function renderProviderSection(prefix, fieldName, providerList = [], selectedNam
   }
 
   providerList.forEach(p => {
-    const pName = typeof p === "string" ? p : (p.name || p.provider);
-    const isSelected = pName === selectedName;
+    const pName = typeof p === "string" ? p : (p.id || p.name || p.provider);
+    const isSelected = (typeof p === "object" && p.selected === true) || pName === selectedName;
 
     const item = element("div", `config-option-item ${isSelected ? "is-selected" : ""}`);
     const nameSpan = element("strong", null, pName);
     item.appendChild(nameSpan);
 
+    if (typeof p === "object" && p.type) {
+      item.appendChild(element("span", "badge", p.type));
+    }
+
     if (isSelected) {
       item.appendChild(element("span", "badge badge-enabled", "AKTİF"));
+    } else if (typeof p === "object" && p.enabled === false) {
+      item.appendChild(element("span", "badge", "Devre Dışı"));
     } else if (canMutate) {
       const selectBtn = element("button", "pm-btn pm-btn-view", "Seç");
       selectBtn.type = "button";
