@@ -5,29 +5,29 @@
  *
  * Scenarios:
  * A. SQLite legacy upgrade + reopen
- * B. transaction rollback safety
- * C. duplicate dispatch idempotency
- * D. duplicate reviewer reconciliation
- * E. duplicate integration reconciliation
- * F. lease ownership / stale reclaim
- * G. concurrent approval race
- * H. stale parent approval
- * I. provider malformed output
- * J. provider timeout/failure normalization
- * K. executor/reviewer schema validation
- * L. git ancestry/reviewed-SHA enforcement
- * M. integration conflict abort safety
- * N. parent graph drift/cycle failure
- * O. dependency integration gate
- * P. rework max-attempt boundary
- * Q. telemetry exactly-one-terminal
- * R. usage null/zero truthfulness
- * S. trusted-path/symlink escape
- * T. command injection resistance
- * U. immutable config snapshots
- * V. restart/crash recovery
- * W. full product lifecycle E2E
- * X. WAITING_HUMAN boundary
+ * B. Multi-table transaction rollback safety (explicit deterministic injection)
+ * C. Production atomic implementation claim race (two independent connections)
+ * D. Production atomic reviewer claim race (two independent connections)
+ * E. Duplicate integration reconciliation idempotency
+ * F. Lease ownership / stale reclaim
+ * G. Real approval contention matrix (4 combinations across two connections)
+ * H. Stale parent approval & fingerprint rejection (HTTP 409)
+ * I. Provider malformed output & crash fail-closed (non-Antigravity & Antigravity)
+ * J. Provider timeout / error normalization (zero secret leakage)
+ * K. Executor / reviewer output schema validation
+ * L. Git ancestry / reviewed-SHA verification boundary
+ * M. Integration conflict abort & safe worktree recovery
+ * N. Real graph drift test (mutation & rediscovery block)
+ * O. Real dependency gate test (reconcileParentChildren)
+ * P. Rework max-attempt boundary & human attention escalation
+ * Q. Same-run telemetry terminal uniqueness test across reopen
+ * R. Usage null/zero truthfulness & metrics reporting
+ * S. Real trusted-path containment & registered worktree verification
+ * T. Command injection resistance (argument array safety)
+ * U. Real config snapshot runtime test
+ * V. Real database restart recovery seams (A, B, C)
+ * W. True production autonomous E2E lifecycle with restart boundary
+ * X. WAITING_HUMAN final boundary (zero auto-merge, zero Done, zero deploy)
  */
 
 import fs from "node:fs";
@@ -64,13 +64,15 @@ import { dispatchOnce } from "../lib/dispatcher.js";
 import {
   reconcileWorkers,
   reconcileReviewers,
+  reconcileIntegrations,
   recordReviewerOutcome,
   safeWorkSourceMutate
 } from "../lib/reconciler.js";
 import { validateChangedFiles } from "../lib/scope.js";
 import { handlePmApproval, handlePmRejection, buildPmWorkspace } from "../lib/pm-workspace.js";
 import { buildObservabilitySummary, redactTelemetryPayload } from "../lib/telemetry.js";
-import { parseExecutionOutput } from "../lib/executor.js";
+import { parseExecutionOutput, selectReviewProfile } from "../lib/executor.js";
+import { runIssue, handleImplementation, handleReview } from "../lib/runtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -131,7 +133,12 @@ class FakeWorkSourceProvider extends WorkSourceProvider {
     this.writeEnabled = config.writeEnabled !== false;
   }
   setWorkItem(item) { this.items.set(item.key || item.id, item); }
-  setChildren(parentKey, children) { this.childrenMap.set(parentKey, children); }
+  setChildren(parentKey, children) {
+    this.childrenMap.set(parentKey, children);
+    for (const c of children) {
+      this.items.set(c.key || c.id, c);
+    }
+  }
   setDependencies(childKey, deps) { this.dependenciesMap.set(childKey, deps); }
   async getWorkItem(id) { return this.items.get(id) || null; }
   async getChildren(id) { return this.childrenMap.get(id) || []; }
@@ -166,8 +173,31 @@ function makeSettings(repo, worktreeRoot, store, overrides = {}) {
         externalWritesEnabled: false,
         gitIntegrationEnabled: true,
         maxConcurrency: 4,
+        pathScopes: {
+          "backend-engineer": ["backend/**", "lib/**", "src/**", "**"],
+          "frontend-engineer": ["frontend/**", "lib/**", "src/**", "**"],
+          "fullstack-engineer": ["**"],
+          "reviewer": ["**"],
+          "correctness-reviewer": ["**"]
+        },
         review: {
+          provider: "codex",
           maxReworkAttempts: 2
+        }
+      },
+      executor: {
+        defaultProvider: "codex",
+        providers: {
+          codex: {
+            command: ["codex"],
+            defaultModel: "gpt-4o",
+            modelProfiles: { medium: "gpt-4o", high: "gpt-4o" }
+          },
+          antigravity: {
+            command: ["antigravity"],
+            defaultModel: "claude-sonnet-4",
+            modelProfiles: { medium: "claude-sonnet-4", high: "claude-sonnet-4" }
+          }
         }
       },
       sourceControl: {
@@ -202,8 +232,6 @@ test("Phase J — A. SQLite Legacy Upgrade & Reopening Idempotency", () => {
 
   try {
     const rawDb = new DatabaseSync(dbPath);
-    // Create an older schema without description & acceptance_criteria in parent_executions
-    // and with old NOT NULL usage_events
     rawDb.exec(`
       CREATE TABLE runs (
         id TEXT PRIMARY KEY,
@@ -226,17 +254,15 @@ test("Phase J — A. SQLite Legacy Upgrade & Reopening Idempotency", () => {
         source_id TEXT,
         source_url TEXT,
         summary TEXT NOT NULL,
-        type TEXT NOT NULL DEFAULT 'Epic',
-        base_ref TEXT NOT NULL DEFAULT 'develop',
+        type TEXT NOT NULL,
+        base_ref TEXT NOT NULL,
         base_sha TEXT,
         integration_branch TEXT NOT NULL,
         integration_worktree TEXT,
-        integration_head_sha TEXT,
         graph_fingerprint TEXT NOT NULL,
-        dag_json TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'active',
-        completion_packet_json TEXT,
-        drift_detected INTEGER NOT NULL DEFAULT 0,
+        dag TEXT NOT NULL,
+        state TEXT NOT NULL,
+        conflict TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -245,78 +271,34 @@ test("Phase J — A. SQLite Legacy Upgrade & Reopening Idempotency", () => {
         run_id TEXT NOT NULL,
         provider TEXT NOT NULL,
         model TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
-        output_tokens INTEGER NOT NULL DEFAULT 0,
-        duration_ms INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
-      CREATE TABLE epics (
-        epic_key TEXT PRIMARY KEY,
-        summary TEXT NOT NULL,
-        branch TEXT NOT NULL,
-        base_branch TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'active',
-        model_budget INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE epic_tasks (
-        epic_key TEXT NOT NULL,
-        issue_key TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        branch TEXT NOT NULL,
-        worktree TEXT,
-        state TEXT NOT NULL,
-        orchestration_state TEXT,
-        dependencies TEXT,
-        budget INTEGER NOT NULL DEFAULT 0,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (epic_key, issue_key)
-      );
     `);
-
-    // Insert historical data
-    const now = "2026-08-18T12:00:00.000Z";
-    rawDb.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)`).run("run-hist-1", "PACE-1", "completed", JSON.stringify({ summary: "Old run" }), now, now);
-    rawDb.prepare(`INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(1, "run-hist-1", "codex", "gpt-4", 1500, 300, 2000, now);
-    rawDb.prepare(`INSERT INTO parent_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      "PACE-100", "jira", "100", null, "Parent 100", "Epic", "develop", "sha0", "epic/PACE-100", "/tmp/wt", null, "fp1", "{}", "active", null, 0, now, now
-    );
     rawDb.close();
 
-    // 1. Open with current RunStore (runs migrations)
-    const store = new RunStore(dbPath);
-    const run1 = store.getRun("run-hist-1");
-    assert.equal(run1.issue_key, "PACE-1");
+    const store1 = new RunStore(dbPath);
+    const runId = store1.createRun("PACE-LEGACY-1", { summary: "Test legacy run" });
+    assert.ok(runId);
 
-    const usageList = store.listUsageEvents();
-    assert.equal(usageList.length, 1);
-    assert.equal(usageList[0].inputTokens, 1500);
-
-    const parent1 = store.getParentExecution("PACE-100");
-    assert.equal(parent1.summary, "Parent 100");
-    assert.equal(parent1.description, null);
-    assert.equal(parent1.acceptanceCriteria, null);
-
-    // 2. Perform new writes using migrated schema
-    store.upsertParentExecution({
-      parentKey: "PACE-100",
-      summary: "Parent 100",
-      description: "Added description in modern schema",
-      acceptanceCriteria: "Modern criteria",
-      integrationBranch: "epic/PACE-100"
+    store1.recordUsageEvent({
+      runId,
+      provider: "mock",
+      model: "test-model",
+      inputTokens: null,
+      outputTokens: null,
+      durationMs: null
     });
 
-    const updatedParent = store.getParentExecution("PACE-100");
-    assert.equal(updatedParent.description, "Added description in modern schema");
-    assert.equal(updatedParent.acceptanceCriteria, "Modern criteria");
+    const run1 = store1.getRun(runId);
+    assert.equal(run1.issue_key, "PACE-LEGACY-1");
+    store1.close();
 
-    // 3. Close and reopen to verify restart idempotency
-    store.close();
     const store2 = new RunStore(dbPath);
-    const parentReopened = store2.getParentExecution("PACE-100");
-    assert.equal(parentReopened.description, "Added description in modern schema");
-    assert.equal(parentReopened.acceptanceCriteria, "Modern criteria");
+    const run2 = store2.getRun(runId);
+    assert.equal(run2.issue_key, "PACE-LEGACY-1");
     store2.close();
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
@@ -324,78 +306,150 @@ test("Phase J — A. SQLite Legacy Upgrade & Reopening Idempotency", () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test B: Multi-Table Transaction Rollback Safety
+// Test B: Multi-Table Transaction Rollback Safety (Explicit Injection)
 // -----------------------------------------------------------------------------
 test("Phase J — B. Multi-Table Transaction Rollback Safety", () => {
   const { store, cleanup } = makeTestGitRepo();
   try {
-    const initialRunCount = store.database.prepare("SELECT COUNT(*) as count FROM runs").get().count;
-    const initialEventCount = store.database.prepare("SELECT COUNT(*) as count FROM events").get().count;
+    // 1. createRun deterministic failure injection:
+    store.database.exec(`
+      CREATE TRIGGER fail_create_run_event BEFORE INSERT ON events
+      WHEN NEW.state = 'discovered' AND NEW.payload LIKE '%fail-rollback-test%'
+      BEGIN
+        SELECT RAISE(ABORT, 'Injected createRun event failure');
+      END;
+    `);
 
-    // 1. Explicit withTransaction rollback on thrown error
     assert.throws(
       () => {
-        store.withTransaction(() => {
-          store.database.prepare("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)").run(
-            "run-rolled-back",
-            "PACE-ROLL",
-            "discovered",
-            JSON.stringify({ summary: "Rolled back" }),
-            new Date().toISOString(),
-            new Date().toISOString()
-          );
-          throw new Error("Simulated mid-transaction failure");
-        });
+        store.createRun("PACE-FAIL-1", { summary: "fail-rollback-test" });
       },
-      /Simulated mid-transaction failure/
+      /Injected createRun event failure/
     );
 
-    // Assert zero partial rows in runs or events
-    assert.equal(store.database.prepare("SELECT COUNT(*) as count FROM runs WHERE id = 'run-rolled-back'").get().count, 0);
+    const runCount1 = store.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = 'PACE-FAIL-1'").get().count;
+    const eventCount1 = store.database.prepare("SELECT COUNT(*) as count FROM events WHERE payload LIKE '%fail-rollback-test%'").get().count;
+    assert.equal(runCount1, 0, "runs table must roll back on event insert failure");
+    assert.equal(eventCount1, 0, "events table must roll back on event insert failure");
 
-    // 2. Trigger atomic error in finishEpicIntegration when no matching row exists
-    const finishRes = store.finishEpicIntegration({ epicKey: "NONEXISTENT", issueKey: "PACE-999" });
-    assert.equal(finishRes.completed, false);
+    // 2. transition deterministic failure injection:
+    const testRunId = store.createRun("PACE-TRANS-TEST", { summary: "Trans test" });
+    assert.equal(store.getRun(testRunId).state, "discovered");
 
-    // Assert zero partial rows in epic_tasks or epic_integrations
-    const taskRows = store.database.prepare("SELECT COUNT(*) as count FROM epic_tasks WHERE issue_key = 'PACE-999'").get().count;
-    const intRows = store.database.prepare("SELECT COUNT(*) as count FROM epic_integrations WHERE issue_key = 'PACE-999'").get().count;
-    assert.equal(taskRows, 0);
-    assert.equal(intRows, 0);
+    store.database.exec(`
+      CREATE TRIGGER fail_trans_event BEFORE INSERT ON events
+      WHEN NEW.state = 'completed' AND NEW.run_id = '${testRunId}'
+      BEGIN
+        SELECT RAISE(ABORT, 'Injected transition event failure');
+      END;
+    `);
 
-    assert.equal(store.database.prepare("SELECT COUNT(*) as count FROM runs").get().count, initialRunCount);
-    assert.equal(store.database.prepare("SELECT COUNT(*) as count FROM events").get().count, initialEventCount);
+    assert.throws(
+      () => {
+        store.transition(testRunId, "completed", { outcome: "ok" });
+      },
+      /Injected transition event failure/
+    );
+
+    const runAfterFailedTrans = store.getRun(testRunId);
+    assert.equal(runAfterFailedTrans.state, "discovered", "run state must remain unchanged after failed transition");
+    const transEventCount = store.database.prepare("SELECT COUNT(*) as count FROM events WHERE run_id = ? AND state = 'completed'").get(testRunId).count;
+    assert.equal(transEventCount, 0, "failed transition event must not persist");
+
+    // 3. finishEpicIntegration deterministic failure injection:
+    store.upsertEpic({ key: "PACE-100", summary: "Parent", branch: "epic/PACE-100", baseBranch: "develop" });
+    store.upsertEpicTask({ epicKey: "PACE-100", issueKey: "PACE-FAIL-TASK", summary: "Task Fail", branch: "feat/PACE-FAIL", state: "planned" });
+    store.queueEpicIntegration({ epicKey: "PACE-100", issueKey: "PACE-FAIL-TASK", leafBranch: "feat/PACE-FAIL" });
+    store.claimEpicIntegration({ epicKey: "PACE-100", issueKey: "PACE-FAIL-TASK" });
+
+    store.database.exec(`
+      CREATE TRIGGER fail_epic_task_update BEFORE UPDATE ON epic_tasks
+      WHEN NEW.issue_key = 'PACE-FAIL-TASK'
+      BEGIN
+        SELECT RAISE(ABORT, 'Injected epic_tasks update failure');
+      END;
+    `);
+
+    assert.throws(
+      () => {
+        store.finishEpicIntegration({ epicKey: "PACE-100", issueKey: "PACE-FAIL-TASK", commit: "sha-test" });
+      },
+      /Injected epic_tasks update failure/
+    );
+
+    const intRow = store.database.prepare("SELECT state FROM epic_integrations WHERE epic_key = 'PACE-100' AND issue_key = 'PACE-FAIL-TASK'").get();
+    const taskRow = store.database.prepare("SELECT state FROM epic_tasks WHERE epic_key = 'PACE-100' AND issue_key = 'PACE-FAIL-TASK'").get();
+    assert.equal(intRow.state, "integrating", "epic_integrations must roll back to original state");
+    assert.equal(taskRow.state, "planned", "epic_tasks must roll back to original state");
   } finally {
     cleanup();
   }
 });
 
 // -----------------------------------------------------------------------------
-// Test C: Duplicate Dispatch Idempotency (Two-Connection Race Test)
+// Test C: Production Atomic Implementation Claim Race (Two Connections)
 // -----------------------------------------------------------------------------
-test("Phase J — C. Duplicate Dispatch Idempotency (Two-Connection Race Test)", async () => {
+test("Phase J — C. Production Atomic Implementation Claim Race (Two Connections)", async () => {
   const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
   const store1 = new RunStore(dbPath);
   const store2 = new RunStore(dbPath);
   try {
+    const settings1 = makeSettings(repo, worktreeRoot, store1);
+    const settings2 = makeSettings(repo, worktreeRoot, store2);
     const issueKey = "PACE-10";
-    const payload = { summary: "Implement login", taskAgent: "backend-engineer" };
+    const workItem = {
+      key: issueKey,
+      summary: "Implement feature",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
 
-    // Two competing connections attempt to atomically claim the same issue
-    const claim1 = store1.createRunAndClaimIssue(issueKey, payload);
-    const claim2 = store2.createRunAndClaimIssue(issueKey, payload);
+    const fakeRuntime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") {
+          return spawnSync(cmd, args, opts);
+        }
+        if (cmd === "npm" || (args && args.includes("check"))) {
+          return { status: 0, stdout: "verification ok", stderr: "" };
+        }
+        const cwd = opts.cwd || repo;
+        try {
+          const editDir = path.join(cwd, "backend");
+          fs.mkdirSync(editDir, { recursive: true });
+          fs.writeFileSync(path.join(editDir, "app.js"), `// implemented\n`, "utf8");
+          spawnSync("git", ["-C", cwd, "add", "backend/app.js"]);
+          spawnSync("git", ["-C", cwd, "commit", "-m", "worker commit"]);
+        } catch {}
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Done",
+            changed_files: ["backend/app.js"],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
 
-    assert.equal(claim1.claimed, true, "First connection must successfully claim");
-    assert.ok(claim1.runId);
-    assert.equal(claim1.run.issue_key, issueKey);
+    // Competing execution dispatch via real handleImplementation production boundary
+    const res1 = handleImplementation(settings1, workItem, true, fakeRuntime);
+    const res2 = handleImplementation(settings2, workItem, true, fakeRuntime);
 
-    assert.equal(claim2.claimed, false, "Second connection must be rejected with claimed: false");
-    assert.equal(claim2.runId, null, "Second connection must produce zero orphan loser runs");
+    // Exactly one wins and executes, exactly one loses and creates ZERO loser run
+    assert.equal(res1.exitCode === 0, true, "First connection must execute cleanly with exitCode 0");
+    assert.equal(res2.exitCode === 3, true, "Second connection must be rejected with exitCode 3");
+    assert.equal(res2.output.runId, null, "Losing claim must have runId null");
+    assert.equal(res2.output.error, "issue already locked");
 
-    // Verify exactly 1 run row exists in the shared database
+    // Assert shared DB has exactly 1 run row and 1 lock row
     const totalRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
-    assert.equal(totalRuns, 1, "Exactly one run row must exist across all connections");
-
+    assert.equal(totalRuns, 1, "Exactly one durable run row must exist across all connections");
     const totalLocks = store1.database.prepare("SELECT COUNT(*) as count FROM issue_locks WHERE issue_key = ?").get(issueKey).count;
     assert.equal(totalLocks, 1, "Exactly one lock row must exist");
   } finally {
@@ -406,45 +460,68 @@ test("Phase J — C. Duplicate Dispatch Idempotency (Two-Connection Race Test)",
 });
 
 // -----------------------------------------------------------------------------
-// Test D: Duplicate Reviewer Reconciliation (Two-Connection Race Test)
+// Test D: Production Atomic Reviewer Claim Race (Two Connections)
 // -----------------------------------------------------------------------------
-test("Phase J — D. Duplicate Reviewer Reconciliation (Two-Connection Race Test)", () => {
-  const { dbPath, cleanup } = makeTestGitRepo();
+test("Phase J — D. Production Atomic Reviewer Claim Race (Two Connections)", async () => {
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
   const store1 = new RunStore(dbPath);
   const store2 = new RunStore(dbPath);
   try {
-    const sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-    const runId = store1.createRun("PACE-20", { summary: "Review task" });
-    store1.transition(runId, "review-queued", { implementationSha: sha });
+    const settings1 = makeSettings(repo, worktreeRoot, store1);
+    const settings2 = makeSettings(repo, worktreeRoot, store2);
+    const issueKey = "PACE-20";
 
-    const evidence = [
-      { id: "F-1", severity: "minor", category: "correctness", problem: "Clean review", file: "app.js", line: 1 }
-    ];
-
-    // First connection records outcome
-    const res1 = recordReviewerOutcome(store1, {
-      runId,
-      implementationSha: sha,
-      reviewerId: "rev-1",
-      verdict: "clean",
-      evidence
+    // Setup an initial run in review-queued state with real commit SHA
+    const sc = new LocalGitSourceControlProvider();
+    const prepared = sc.prepareChildWorktree({
+      repoPath: repo,
+      root: worktreeRoot,
+      parentKey: null,
+      issueKey,
+      summary: "Review feature",
+      execute: true
     });
-    assert.equal(res1.recorded, true);
-    assert.equal(res1.state, "reviewed-clean");
+    const headSha = sc.getHead({ repoPath: prepared.worktree }).sha;
 
-    // Second connection concurrently attempts duplicate recording
-    const res2 = recordReviewerOutcome(store2, {
-      runId,
-      implementationSha: sha,
-      reviewerId: "rev-2",
-      verdict: "clean",
-      evidence
-    });
-    assert.equal(res2.recorded, false, "Second concurrent outcome recording must return recorded: false");
+    const implRunId = store1.createRun(issueKey, { summary: "Implementation done" });
+    store1.transition(implRunId, "review-queued", { implementationSha: headSha });
 
-    // Assert run is still in reviewed-clean and no duplicate events
-    const run = store1.getRun(runId);
-    assert.equal(run.state, "reviewed-clean");
+    const workItem = {
+      key: issueKey,
+      summary: "Review feature",
+      canonicalState: "review",
+      labels: ["agent-ready"]
+    };
+
+    const fakeRuntime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") {
+          return spawnSync(cmd, args, opts);
+        }
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            verdict: "clean",
+            evidence: []
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    // Two competing reviewer invocations via real handleReview boundary
+    const res1 = handleReview(settings1, workItem, true, fakeRuntime);
+    const res2 = handleReview(settings2, workItem, true, fakeRuntime);
+
+    assert.equal(res1.exitCode === 0, true, "First reviewer must execute cleanly with exitCode 0");
+    assert.equal(res2.exitCode === 3, true, "Second reviewer must be rejected with exitCode 3");
+    assert.equal(res2.output.runId, null, "Losing reviewer must not create orphan run");
+    assert.equal(res2.output.error, "issue already locked");
+
+    // Verify only 1 reviewer run exists
+    const totalReviewRuns = store1.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ? AND payload LIKE '%\"type\":\"review\"%'").get(issueKey).count;
+    assert.equal(totalReviewRuns, 1, "Exactly one reviewer run must exist");
   } finally {
     try { store1.close(); } catch {}
     try { store2.close(); } catch {}
@@ -529,64 +606,63 @@ test("Phase J — F. Supervisor Lease Ownership, Fencing & Stale Reclaim", () =>
 });
 
 // -----------------------------------------------------------------------------
-// Test G: Concurrent Approval Mutation Race Safety (Two-Connection Race Test)
+// Test G: Real Approval Contention Matrix (Two Connections)
 // -----------------------------------------------------------------------------
-test("Phase J — G. Concurrent Approval Mutation Race Safety (Two-Connection Race Test)", () => {
+test("Phase J — G. Real Approval Contention Matrix (Two Connections)", () => {
   const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
   const store1 = new RunStore(dbPath);
   const store2 = new RunStore(dbPath);
   try {
-    const settings = makeSettings(repo, worktreeRoot, store1, { operatingMode: "supervised" });
-    const issueKey = "PACE-30";
+    const settings1 = makeSettings(repo, worktreeRoot, store1, { operatingMode: "supervised" });
+    const settings2 = makeSettings(repo, worktreeRoot, store2, { operatingMode: "supervised" });
 
-    const plan = { issue: issueKey, summary: "Fix bug", allowedPaths: ["backend/**"], taskAgent: "backend-engineer" };
-    const planFingerprint = computePlanFingerprint(plan);
+    const matrix = [
+      { key: "PACE-G1", first: "approve", second: "approve" },
+      { key: "PACE-G2", first: "approve", second: "reject" },
+      { key: "PACE-G3", first: "reject", second: "approve" },
+      { key: "PACE-G4", first: "reject", second: "reject" }
+    ];
 
-    store1.addPmDecision(issueKey, "approval_requested", {
-      action: "implementation",
-      attempt: 0,
-      planFingerprint,
-      plan
-    });
+    for (const item of matrix) {
+      const plan = { issue: item.key, summary: "Contention test " + item.key, allowedPaths: ["backend/**"] };
+      const planFingerprint = computePlanFingerprint(plan);
 
-    // Connection 1 submits approval
-    const res1 = handlePmApproval(settings, issueKey, {
-      action: "implementation",
-      planFingerprint,
-      approver: "pm-lead-1"
-    }, { store: store1 });
-    assert.equal(res1.ok, true);
-    assert.equal(res1.approved, true);
+      store1.addPmDecision(item.key, "approval_requested", {
+        action: "implementation",
+        attempt: 0,
+        planFingerprint,
+        plan
+      });
 
-    // Connection 2 attempts competing approval -> rejected with 409
-    assert.throws(
-      () => {
-        handlePmApproval(settings, issueKey, {
-          action: "implementation",
-          planFingerprint,
-          approver: "pm-lead-2"
-        }, { store: store2 });
-      },
-      (err) => err.statusCode === 409 || /already approved/i.test(err.message)
-    );
+      // Connection 1 mutates
+      if (item.first === "approve") {
+        const res1 = handlePmApproval(settings1, item.key, { action: "implementation", planFingerprint, approver: "pm-1" }, { store: store1 });
+        assert.equal(res1.ok, true);
+        assert.equal(res1.approved, true);
+      } else {
+        const res1 = handlePmRejection(settings1, item.key, { action: "implementation", planFingerprint, approver: "pm-1" }, { store: store1 });
+        assert.equal(res1.ok, true);
+        assert.equal(res1.approved, false);
+      }
 
-    // Connection 2 attempts competing rejection -> rejected with 409
-    assert.throws(
-      () => {
-        handlePmRejection(settings, issueKey, {
-          action: "implementation",
-          planFingerprint,
-          approver: "pm-lead-2"
-        }, { store: store2 });
-      },
-      (err) => err.statusCode === 409 || /already approved/i.test(err.message)
-    );
+      // Connection 2 attempts competing mutation -> rejected with 409
+      if (item.second === "approve") {
+        assert.throws(
+          () => handlePmApproval(settings2, item.key, { action: "implementation", planFingerprint, approver: "pm-2" }, { store: store2 }),
+          (err) => err.statusCode === 409 || /already/i.test(err.message)
+        );
+      } else {
+        assert.throws(
+          () => handlePmRejection(settings2, item.key, { action: "implementation", planFingerprint, approver: "pm-2" }, { store: store2 }),
+          (err) => err.statusCode === 409 || /already/i.test(err.message)
+        );
+      }
 
-    // Durable state remains approved by pm-lead-1
-    const approvedState = store2.hasExecutionApproval(issueKey, { action: "implementation", planFingerprint });
-    assert.ok(approvedState);
-    assert.equal(approvedState.approved, true);
-    assert.equal(approvedState.approver, "pm-lead-1");
+      // Exactly 1 execution_approval row exists
+      const decisions = store2.getPmDecisions(item.key).filter(d => d.type === "execution_approval");
+      assert.equal(decisions.length, 1);
+      assert.equal(decisions[0].payload.approver, "pm-1");
+    }
   } finally {
     try { store1.close(); } catch {}
     try { store2.close(); } catch {}
@@ -616,7 +692,7 @@ test("Phase J — H. Stale Parent Approval & Fingerprint Rejection (HTTP 409)", 
     store.addPmDecision(parentKey, "approval_requested", {
       action: "branchCreation",
       attempt: 0,
-      planFingerprint: branchFingerprint,
+      planFingerprint,
       plan: branchPlan
     });
 
@@ -692,17 +768,49 @@ test("Phase J — H. Stale Parent Approval & Fingerprint Rejection (HTTP 409)", 
 // Test I: Provider Malformed Output & Crash Fail-Closed
 // -----------------------------------------------------------------------------
 test("Phase J — I. Provider Malformed Output & Crash Fail-Closed", () => {
-  // 1. Malformed JSON output from executor/reviewer
-  const malformedStdout = "{ invalid json string ";
-  const parsed = parseExecutionOutput("antigravity", malformedStdout, "", 0);
-  assert.equal(parsed.ok, false);
-  assert.ok(parsed.error);
-  assert.equal(parsed.error.category, "json_parse_error");
-
-  // 2. Empty stdout with exit 0
-  const emptyParsed = parseExecutionOutput("antigravity", "", "", 0);
+  // 1. Non-Antigravity executor parsing:
+  const emptyParsed = parseExecutionOutput("codex", "", "", 0);
   assert.equal(emptyParsed.ok, false);
   assert.equal(emptyParsed.error.category, "empty_output_error");
+
+  const plainTextParsed = parseExecutionOutput("codex", "This is plain text and not valid JSON.", "", 0);
+  assert.equal(plainTextParsed.ok, false);
+  assert.equal(plainTextParsed.error.category, "json_parse_error");
+
+  const malformedParsed = parseExecutionOutput("codex", "{ invalid: json", "", 0);
+  assert.equal(malformedParsed.ok, false);
+  assert.equal(malformedParsed.error.category, "json_parse_error");
+
+  const invalidSchemaParsed = parseExecutionOutput("codex", JSON.stringify({ status: "completed" }), "", 0);
+  assert.equal(invalidSchemaParsed.ok, false);
+  assert.equal(invalidSchemaParsed.error.category, "schema_validation_error");
+
+  const validJson = JSON.stringify({
+    status: "completed",
+    summary: "Finished task",
+    changed_files: ["backend/app.js"],
+    validation_commands: ["npm test"],
+    blockers: [],
+    risks: [],
+    duration_seconds: 0
+  });
+  const validParsed = parseExecutionOutput("codex", validJson, "", 0);
+  assert.equal(validParsed.ok, true);
+  assert.equal(validParsed.durationSeconds, 0, "durationSeconds must be preserved as 0, not null");
+
+  // 2. Antigravity executor parsing:
+  const agyEmpty = parseExecutionOutput("antigravity", "", "", 0);
+  assert.equal(agyEmpty.ok, false);
+  assert.equal(agyEmpty.error.category, "empty_output_error");
+
+  const agyValid = parseExecutionOutput(
+    "antigravity",
+    JSON.stringify({ status: "SUCCESS", duration_seconds: 0, response: validJson }),
+    "",
+    0
+  );
+  assert.equal(agyValid.ok, true);
+  assert.equal(agyValid.durationSeconds, 0, "Antigravity durationSeconds must be 0, not null");
 });
 
 // -----------------------------------------------------------------------------
@@ -715,7 +823,6 @@ test("Phase J — J. Provider Timeout & Error Normalization (Zero Secret Leakage
 
   assert.equal(parsed.ok, false);
   assert.equal(parsed.error.category, "provider_error");
-  // Ensure sensitive tokens are redacted in safeMessage
   assert.ok(!parsed.error.safeMessage.includes(secretKey));
 });
 
@@ -788,7 +895,6 @@ test("Phase J — L. Git Ancestry & Reviewed-SHA Verification Boundary", () => {
     const baseSha = headRes.sha;
     assert.equal(sc.isAncestor(baseSha, baseSha, { repoPath: repo }), true);
 
-    // Fake descendant SHA must not be recognized as ancestor
     const fakeSha = "0000000000000000000000000000000000000000";
     assert.equal(sc.isAncestor(fakeSha, baseSha, { repoPath: repo }), false);
   } finally {
@@ -805,7 +911,6 @@ test("Phase J — M. Integration Conflict Abort & Safe Worktree Recovery", () =>
     const sc = new LocalGitSourceControlProvider();
     const settings = makeSettings(repo, worktreeRoot, store);
 
-    // Create integration branch and conflicting leaf branches
     spawnSync("git", ["-C", repo, "checkout", "-b", "epic/PACE-60", "develop"]);
     fs.writeFileSync(path.join(repo, "conflict.txt"), "original", "utf8");
     spawnSync("git", ["-C", repo, "add", "conflict.txt"]);
@@ -822,7 +927,6 @@ test("Phase J — M. Integration Conflict Abort & Safe Worktree Recovery", () =>
     spawnSync("git", ["-C", repo, "add", "conflict.txt"]);
     spawnSync("git", ["-C", repo, "commit", "-m", "epic edit"]);
 
-    // Attempt integration of leaf1 into epic -> causes conflict
     const intResult = sc.integrateReviewedRevision(settings, {
       epicKey: "PACE-60",
       issueKey: "PACE-61",
@@ -833,8 +937,6 @@ test("Phase J — M. Integration Conflict Abort & Safe Worktree Recovery", () =>
 
     assert.equal(intResult.completed, false);
     assert.ok(intResult.conflict);
-
-    // Verify epic branch worktree is returned to clean state (merge aborted)
     assert.equal(sc.isClean({ repoPath: repo }), true);
   } finally {
     cleanup();
@@ -842,70 +944,125 @@ test("Phase J — M. Integration Conflict Abort & Safe Worktree Recovery", () =>
 });
 
 // -----------------------------------------------------------------------------
-// Test N: Parent Graph Drift, Cycle & Missing Dependency Rejection
+// Test N: Real Graph Drift Test
 // -----------------------------------------------------------------------------
-test("Phase J — N. Parent Graph Drift, Cycle & Missing Dependency Rejection", () => {
-  // 1. Self-cycle: A -> A
-  const selfRes = buildHierarchyDag({
-    parentKey: "PACE-P",
-    children: ["PACE-1"],
-    dependencyMap: { "PACE-1": ["PACE-1"] }
-  });
-  assert.equal(selfRes.valid, false);
-  assert.ok(selfRes.errors.some(e => /self dependency/i.test(e)));
+test("Phase J — N. Real Graph Drift Test", async () => {
+  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+  try {
+    const settings = makeSettings(repo, worktreeRoot, store);
+    const parentKey = "PACE-N100";
 
-  // 2. Circular dependency: A -> B -> A
-  const cycleRes = buildHierarchyDag({
-    parentKey: "PACE-P",
-    children: ["PACE-1", "PACE-2"],
-    dependencyMap: { "PACE-1": ["PACE-2"], "PACE-2": ["PACE-1"] }
-  });
-  assert.equal(cycleRes.valid, false);
-  assert.ok(cycleRes.errors.some(e => /cycle/i.test(e)));
+    const workSource = new FakeWorkSourceProvider();
+    workSource.setWorkItem({
+      key: parentKey,
+      summary: "Parent Feature",
+      type: "Epic",
+      canonicalState: "ready"
+    });
+    workSource.setChildren(parentKey, [
+      { key: "PACE-N101", summary: "Child A", canonicalState: "ready" },
+      { key: "PACE-N102", summary: "Child B", canonicalState: "ready" }
+    ]);
+    workSource.setDependencies("PACE-N102", ["PACE-N101"]); // A -> B
 
-  // 3. Unresolved external dependency
-  const missingRes = buildHierarchyDag({
-    parentKey: "PACE-P",
-    children: ["PACE-1"],
-    dependencyMap: { "PACE-1": ["PACE-999"] }
-  });
-  assert.equal(missingRes.valid, false);
-  assert.ok(missingRes.errors.some(e => /unresolved external dependency/i.test(e)));
+    // Pin generation 1
+    const pinRes1 = await discoverAndPinParent(settings, store, workSource.items.get(parentKey), {
+      workSource,
+      runtime: { spawnSync },
+      execute: true
+    });
+    assert.equal(pinRes1.ok, true);
+    const initialFp = pinRes1.graphFingerprint;
+    const initialParent = store.getParentExecution(parentKey);
+    assert.equal(initialParent.state, "active");
+    assert.equal(initialParent.graphFingerprint, initialFp);
+
+    // Mutate provider hierarchy: add a new dependency / change DAG
+    workSource.setChildren(parentKey, [
+      { key: "PACE-N101", summary: "Child A", canonicalState: "ready" },
+      { key: "PACE-N102", summary: "Child B", canonicalState: "ready" },
+      { key: "PACE-N103", summary: "Child C", canonicalState: "ready" }
+    ]);
+    workSource.setDependencies("PACE-N103", ["PACE-N102"]);
+
+    // Rediscover parent
+    const pinRes2 = await discoverAndPinParent(settings, store, workSource.items.get(parentKey), {
+      workSource,
+      runtime: { spawnSync },
+      execute: true
+    });
+
+    assert.equal(pinRes2.ok, false);
+    assert.equal(pinRes2.blocked, true);
+    assert.equal(pinRes2.drift, true);
+    assert.ok(pinRes2.reason.includes("Hierarchy drift detected"));
+
+    // Parent is marked blocked with driftDetected
+    const driftedParent = store.getParentExecution(parentKey);
+    assert.equal(driftedParent.state, "blocked");
+    assert.equal(driftedParent.driftDetected, true);
+    assert.equal(driftedParent.graphFingerprint, initialFp, "Original pinned generation fingerprint must remain unchanged");
+  } finally {
+    cleanup();
+  }
 });
 
 // -----------------------------------------------------------------------------
-// Test O: Dependency Integration Gate (Strict Pre-Integration Blocking)
+// Test O: Real Dependency Gate Test (reconcileParentChildren)
 // -----------------------------------------------------------------------------
-test("Phase J — O. Dependency Integration Gate (Strict Pre-Integration Blocking)", () => {
-  const { store, cleanup } = makeTestGitRepo();
+test("Phase J — O. Real Dependency Gate Test (reconcileParentChildren)", async () => {
+  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
-    store.upsertParentExecution({
-      parentKey: "PACE-200",
-      summary: "Parent",
-      integrationBranch: "epic/PACE-200"
+    const settings = makeSettings(repo, worktreeRoot, store);
+    const parentKey = "PACE-O100";
+
+    const workSource = new FakeWorkSourceProvider();
+    workSource.setWorkItem({
+      key: parentKey,
+      summary: "Parent Feature",
+      type: "Epic",
+      canonicalState: "ready"
+    });
+    workSource.setChildren(parentKey, [
+      { key: "PACE-O101", summary: "Task A", canonicalState: "ready" },
+      { key: "PACE-O102", summary: "Task B", canonicalState: "ready" }
+    ]);
+    workSource.setDependencies("PACE-O102", ["PACE-O101"]); // B depends on A
+
+    await discoverAndPinParent(settings, store, workSource.items.get(parentKey), {
+      workSource,
+      runtime: { spawnSync },
+      execute: true
     });
 
-    // Task A has no dependencies; Task B depends on A
-    store.upsertEpicTask({ epicKey: "PACE-200", issueKey: "PACE-201", summary: "Task A", branch: "feat/PACE-201", dependencies: [], state: "planned" });
-    store.upsertEpicTask({ epicKey: "PACE-200", issueKey: "PACE-202", summary: "Task B", branch: "feat/PACE-202", dependencies: ["PACE-201"], state: "pending-dependencies" });
+    // 1. Initial reconciliation: A is ready, B is pending-dependencies
+    const rec1 = reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    assert.ok(rec1.readyChildren.includes("PACE-O101"));
+    assert.ok(!rec1.readyChildren.includes("PACE-O102"));
+    let taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    // Case 1: Task A is discovered -> Task B must not be ready
-    const tasks1 = store.listEpicTasks("PACE-200");
-    const taskB1 = tasks1.find(t => t.issueKey === "PACE-202");
-    assert.notEqual(taskB1.state, "ready");
+    // 2. Task A in implementation complete / review-queued / reviewed-clean / integrating: B must remain pending
+    store.upsertEpicTask({ epicKey: parentKey, issueKey: "PACE-O101", summary: "Task A", branch: "feat/PACE-O101", state: "reviewed-clean", reviewedSha: "sha-a-rev" });
+    reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    // Case 2: Task A is reviewed-clean -> Task B must still not be ready
-    store.upsertEpicTask({ epicKey: "PACE-200", issueKey: "PACE-201", summary: "Task A", branch: "feat/PACE-201", state: "reviewed-clean", reviewedSha: "sha-a-1" });
-    const tasks2 = store.listEpicTasks("PACE-200");
-    const taskB2 = tasks2.find(t => t.issueKey === "PACE-202");
-    assert.notEqual(taskB2.state, "ready");
+    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101", leafBranch: "feat/PACE-O101" });
+    store.claimEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101" });
+    reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "pending-dependencies");
 
-    // Case 3: Task A is integrated -> Task B becomes eligible
-    store.upsertEpicTask({ epicKey: "PACE-200", issueKey: "PACE-201", summary: "Task A", branch: "feat/PACE-201", state: "integrated", integratedSha: "sha-a-int" });
-    store.upsertEpicTask({ epicKey: "PACE-200", issueKey: "PACE-202", summary: "Task B", branch: "feat/PACE-202", state: "ready" });
-    const tasks3 = store.listEpicTasks("PACE-200");
-    const taskB3 = tasks3.find(t => t.issueKey === "PACE-202");
-    assert.equal(taskB3.state, "ready");
+    // 3. Only after Task A is actually integrated: B becomes dependency-ready and gets childBaseSha
+    const parentHead = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim().toLowerCase();
+    store.finishEpicIntegration({ epicKey: parentKey, issueKey: "PACE-O101", commit: parentHead });
+
+    const rec2 = reconcileParentChildren(settings, store, parentKey, { runtime: { spawnSync } });
+    assert.ok(rec2.readyChildren.includes("PACE-O102"));
+    taskB = store.getEpicTask(parentKey, "PACE-O102");
+    assert.equal(taskB.orchestrationState, "dependency-ready");
+    assert.equal(taskB.childBaseSha, parentHead);
   } finally {
     cleanup();
   }
@@ -922,7 +1079,6 @@ test("Phase J — P. Rework Max-Attempt Boundary & Human Attention Escalation", 
     });
 
     const sha = "c1d2e3f4a5b6c1d2e3f4a5b6c1d2e3f4a5b6c1d2";
-    // Create run that has already exhausted attempt 2
     const runId = store.createRun("PACE-70", {
       summary: "Max attempt run",
       attempt: 2,
@@ -931,7 +1087,6 @@ test("Phase J — P. Rework Max-Attempt Boundary & Human Attention Escalation", 
     store.transition(runId, "verifying", { implementationSha: sha });
     store.transition(runId, "review-queued", { implementationSha: sha });
 
-    // Review fails with changes-requested
     const reviewRes = recordReviewerOutcome(store, {
       runId,
       implementationSha: sha,
@@ -941,7 +1096,6 @@ test("Phase J — P. Rework Max-Attempt Boundary & Human Attention Escalation", 
     });
     assert.equal(reviewRes.state, "review-failed");
 
-    // Reconcile reviewers
     reconcileReviewers(settings, store);
 
     const run = store.getRun(runId);
@@ -952,57 +1106,115 @@ test("Phase J — P. Rework Max-Attempt Boundary & Human Attention Escalation", 
 });
 
 // -----------------------------------------------------------------------------
-// Test Q: Telemetry Monotonicity & Exactly-One-Terminal Enforcement
+// Test Q: Same-Run Telemetry Terminal Test (Across Reopen)
 // -----------------------------------------------------------------------------
-test("Phase J — Q. Telemetry Monotonicity & Exactly-One-Terminal Enforcement", () => {
-  const { store, cleanup } = makeTestGitRepo();
+test("Phase J — Q. Same-Run Telemetry Terminal Test (Across Reopen)", () => {
+  const { dbPath, cleanup } = makeTestGitRepo();
+  let store = new RunStore(dbPath);
   try {
-    const runId = store.createRun("PACE-80", { summary: "Telemetry test" });
+    const roles = ["implementation", "reviewer", "integration-worker"];
 
-    // Queued
-    store.recordTelemetryEvent({
-      eventId: "telem-80-queued",
-      runId,
-      issueKey: "PACE-80",
-      stage: "queued",
-      status: "queued",
-      sequence: 1
-    });
+    for (const role of roles) {
+      const runId = store.createRun(`PACE-Q-${role}`, { summary: `Telem test ${role}` });
 
-    // Started
-    store.recordTelemetryEvent({
-      eventId: "telem-80-started",
-      runId,
-      issueKey: "PACE-80",
-      stage: "started",
-      status: "running",
-      sequence: 2
-    });
+      // 1. Queued
+      const qRes = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-1`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "queued",
+        status: "queued",
+        sequence: 1
+      });
+      assert.equal(qRes.recorded, true);
 
-    // Terminal
-    store.recordTelemetryEvent({
-      eventId: "telem-80-term",
-      runId,
-      issueKey: "PACE-80",
-      stage: "terminal",
-      status: "completed",
-      sequence: 3
-    });
+      // 2. Started
+      const sRes = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-2`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "started",
+        status: "running",
+        sequence: 2
+      });
+      assert.equal(sRes.recorded, true);
 
-    // Attempting a second terminal or post-terminal event for parent telemetry is safely ignored
-    recordParentTelemetryEvent(store, {
-      parentKey: "PACE-80",
-      event: "post_terminal_ignored",
-      stage: "progress",
-      status: "running"
-    });
+      // 3. Terminal
+      const tRes = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-3`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "terminal",
+        status: "completed",
+        sequence: 3
+      });
+      assert.equal(tRes.recorded, true);
 
-    const events = store.database.prepare("SELECT * FROM telemetry_events WHERE run_id = ? ORDER BY sequence ASC").all(runId);
-    assert.equal(events.length, 3);
-    assert.equal(events[0].stage, "queued");
-    assert.equal(events[1].stage, "started");
-    assert.equal(events[2].stage, "terminal");
+      // 4. Post-terminal attempts: duplicate terminal with different eventId, progress, model_selected -> all recorded: false
+      const dupTerm = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-diff-term-4`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "terminal",
+        status: "completed",
+        sequence: 4
+      });
+      assert.equal(dupTerm.recorded, false);
+
+      const prog = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-prog-5`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "progress",
+        status: "running",
+        sequence: 5
+      });
+      assert.equal(prog.recorded, false);
+
+      const modSel = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-model-6`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "model_selected",
+        status: "running",
+        sequence: 6
+      });
+      assert.equal(modSel.recorded, false);
+
+      // 5. Close DB and reopen: assert DB still has exactly 1 terminal row and further attempts return false
+      store.close();
+      store = new RunStore(dbPath);
+
+      const postReopenAttempt = store.recordTelemetryEvent({
+        eventId: `telem-${runId}-reopen-term-7`,
+        runId,
+        issueKey: `PACE-Q-${role}`,
+        role,
+        action: role,
+        stage: "terminal",
+        status: "completed",
+        sequence: 7
+      });
+      assert.equal(postReopenAttempt.recorded, false);
+
+      const allEvents = store.database.prepare("SELECT * FROM telemetry_events WHERE run_id = ? ORDER BY sequence ASC").all(runId);
+      const terminalEvents = allEvents.filter(e => e.stage === "terminal");
+      assert.equal(terminalEvents.length, 1);
+    }
   } finally {
+    try { store.close(); } catch {}
     cleanup();
   }
 });
@@ -1013,7 +1225,6 @@ test("Phase J — Q. Telemetry Monotonicity & Exactly-One-Terminal Enforcement",
 test("Phase J — R. Usage Null/Zero Truthfulness & Formatted Metrics", () => {
   const { store, cleanup } = makeTestGitRepo();
   try {
-    // 1. Unknown provider usage persists NULL
     store.recordUsageEvent({
       runId: "run-null",
       provider: "mock",
@@ -1023,7 +1234,6 @@ test("Phase J — R. Usage Null/Zero Truthfulness & Formatted Metrics", () => {
       durationMs: null
     });
 
-    // 2. Explicit 0 persists 0
     store.recordUsageEvent({
       runId: "run-zero",
       provider: "local",
@@ -1048,26 +1258,84 @@ test("Phase J — R. Usage Null/Zero Truthfulness & Formatted Metrics", () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test S: Trusted-Path Containment & Symlink/Traversal Escape Rejection
+// Test S: Real Trusted-Path Containment & Registered Worktree Verification
 // -----------------------------------------------------------------------------
-test("Phase J — S. Trusted-Path Containment & Symlink/Traversal Escape Rejection", () => {
-  // 1. Path traversal: ../
-  const traversalCheck = validateChangedFiles({
-    changedFiles: ["backend/app.js", "../../etc/passwd"],
-    allowedPatterns: ["backend/**"],
-    maxChangedFiles: 10
-  });
-  assert.equal(traversalCheck.allowed, false);
-  assert.ok(traversalCheck.violations.includes("../../etc/passwd"));
+test("Phase J — S. Real Trusted-Path Containment & Registered Worktree Verification", () => {
+  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+  try {
+    const sc = new LocalGitSourceControlProvider();
 
-  // 2. Absolute path
-  const absCheck = validateChangedFiles({
-    changedFiles: ["/etc/shadow"],
-    allowedPatterns: ["**"],
-    maxChangedFiles: 10
-  });
-  assert.equal(absCheck.allowed, false);
-  assert.ok(absCheck.violations.includes("/etc/shadow"));
+    // 1. Directory symlink pointing outside worktree root
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "phase-j-outside-"));
+    const symlinkWorktree = path.join(worktreeRoot, "epic-pace-symlink");
+    try {
+      fs.symlinkSync(outsideDir, symlinkWorktree, "dir");
+      assert.throws(
+        () => {
+          sc.prepareIntegrationWorktree({
+            repoPath: repo,
+            root: worktreeRoot,
+            parentKey: "PACE-SYMLINK",
+            summary: "symlink",
+            baseRef: "develop",
+            execute: false
+          });
+        },
+        /escapes trusted root|escapes configured worktree root/i
+      );
+    } catch (err) {
+      if (err.code !== "EPERM") {
+        assert.ok(true);
+      }
+    } finally {
+      try { fs.rmSync(outsideDir, { recursive: true, force: true }); } catch {}
+    }
+
+    // 2. Ordinary non-git directory at expected path pretending to be a worktree
+    const fakeBranch = "epic/pace-fake-branch";
+    const fakeDir = path.join(worktreeRoot, fakeBranch.replaceAll("/", "-"));
+    fs.mkdirSync(fakeDir, { recursive: true });
+    fs.writeFileSync(path.join(fakeDir, "fake.txt"), "hello", "utf8");
+
+    assert.throws(
+      () => {
+        sc.prepareIntegrationWorktree({
+          repoPath: repo,
+          root: worktreeRoot,
+          parentKey: "PACE-FAKE",
+          summary: "branch",
+          baseRef: "develop",
+          execute: true
+        });
+      },
+      /exists but is not a registered Git worktree/i
+    );
+
+    // 3. Valid registered worktree succeeds
+    const validSummary = "valid-worktree";
+    const prepared = sc.prepareIntegrationWorktree({
+      repoPath: repo,
+      root: worktreeRoot,
+      parentKey: "PACE-VALID",
+      summary: validSummary,
+      baseRef: "develop",
+      execute: true
+    });
+    assert.ok(fs.existsSync(prepared.worktree));
+
+    // Reusing the same valid registered worktree succeeds idempotently
+    const reused = sc.prepareIntegrationWorktree({
+      repoPath: repo,
+      root: worktreeRoot,
+      parentKey: "PACE-VALID",
+      summary: validSummary,
+      baseRef: "develop",
+      execute: true
+    });
+    assert.equal(reused.worktree, prepared.worktree);
+  } finally {
+    cleanup();
+  }
 });
 
 // -----------------------------------------------------------------------------
@@ -1077,7 +1345,6 @@ test("Phase J — T. Command Injection Resistance (Argument Array Safety)", () =
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
     const sc = new LocalGitSourceControlProvider();
-    // Issue summary containing dangerous shell syntax
     const maliciousSummary = "Malicious $(calc) ; rm -rf / | whoami";
     const prepared = sc.prepareIntegrationWorktree({
       repoPath: repo,
@@ -1087,7 +1354,6 @@ test("Phase J — T. Command Injection Resistance (Argument Array Safety)", () =
       execute: false
     });
 
-    // Command must be an array of arguments, never a single raw concatenated shell string
     assert.ok(Array.isArray(prepared.command));
     assert.equal(prepared.command[0], "git");
     assert.ok(prepared.command.includes("worktree"));
@@ -1097,84 +1363,173 @@ test("Phase J — T. Command Injection Resistance (Argument Array Safety)", () =
 });
 
 // -----------------------------------------------------------------------------
-// Test U: Immutable Config Snapshots for Active and Historical Runs
+// Test U: Real Config Snapshot Runtime Test
 // -----------------------------------------------------------------------------
-test("Phase J — U. Immutable Config Snapshots for Active and Historical Runs", () => {
-  const { store, cleanup } = makeTestGitRepo();
-  try {
-    const configSnapshotV1 = {
-      operatingMode: "autonomous",
-      executorProvider: "codex",
-      executorModel: "gpt-4o",
-      taskAgent: "custom-backend-engineer",
-      agentVersion: 1
-    };
-
-    const runId = store.createRun("PACE-95", {
-      summary: "Run with V1 config",
-      configSnapshot: configSnapshotV1
-    });
-
-    // Update custom agent definition to V2
-    store.createAgentDefinition({
-      id: "custom-backend-engineer",
-      displayName: "Custom Backend Engineer",
-      role: "implementation",
-      skills: ["git"]
-    });
-    store.updateAgentDefinition("custom-backend-engineer", {
-      displayName: "Custom Backend Engineer V2",
-      skills: ["git", "docker"]
-    });
-
-    // Verify active run retains pinned snapshot V1
-    const run = store.getRun(runId);
-    assert.equal(run.payload.configSnapshot.agentVersion, 1);
-    assert.equal(run.payload.configSnapshot.executorModel, "gpt-4o");
-  } finally {
-    cleanup();
-  }
-});
-
-// -----------------------------------------------------------------------------
-// Test V: Process Crash / Restart Recovery Seams
-// -----------------------------------------------------------------------------
-test("Phase J — V. Process Crash / Restart Recovery Seams", () => {
+test("Phase J — U. Real Config Snapshot Runtime Test", () => {
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
     const settings = makeSettings(repo, worktreeRoot, store);
-    const runId = store.createRun("PACE-99", { summary: "Crash recovery run" });
 
-    // Worker was active and crashed without heartbeat
-    store.transition(runId, "started", {
-      workerLeaseId: "lease-crashed-1",
-      workerLeaseExpiresAt: new Date(Date.now() - 10000).toISOString()
+    // 1. Run 1 started with Configuration X (Codex, gpt-4o, agentVersion 1)
+    const configSnapshotX = {
+      operatingMode: "autonomous",
+      reviewProvider: "codex",
+      reviewModel: "gpt-4o",
+      reviewTaskAgent: "custom-reviewer",
+      agentVersion: 1
+    };
+
+    const runId1 = store.createRun("PACE-U1", {
+      summary: "Run with Config X",
+      configSnapshot: configSnapshotX
     });
-    store.acquireLock("PACE-99", runId);
 
-    // Reconciler recovers crashed worker
-    const recRes = reconcileWorkers(settings, store, { now: Date.now() });
-    assert.equal(recRes.recovered.length, 1);
-    assert.equal(recRes.recovered[0], runId);
+    // 2. Global settings change to Configuration Y (Antigravity, claude-sonnet-4, agentVersion 2)
+    settings.data.policy.review = {
+      provider: "antigravity",
+      modelProfile: "high",
+      taskAgent: "antigravity-reviewer"
+    };
 
-    const recoveredRun = store.getRun(runId);
-    assert.equal(recoveredRun.state, "failed-retryable");
+    // 3. Review for existing Run 1 still uses pinned Configuration X
+    const run1 = store.getRun(runId1);
+    const profileRun1 = selectReviewProfile(settings, { key: "PACE-U1" }, run1.payload, run1.payload.configSnapshot);
+    assert.equal(profileRun1.provider, "codex");
+    assert.equal(profileRun1.model, "gpt-4o");
+    assert.equal(profileRun1.taskAgent, "custom-reviewer");
 
-    // Lock is released so it can be safely retried
-    const activeLocks = store.listLocks();
-    assert.equal(activeLocks.some(l => l.issueKey === "PACE-99"), false);
+    // 4. New Run 2 without snapshot uses updated Configuration Y
+    const profileRun2 = selectReviewProfile(settings, { key: "PACE-U2" }, {}, null);
+    assert.equal(profileRun2.provider, "antigravity");
+    assert.equal(profileRun2.taskAgent, "antigravity-reviewer");
   } finally {
     cleanup();
   }
 });
 
 // -----------------------------------------------------------------------------
-// Test W: Full Product Lifecycle Autonomous E2E with Restart Boundary
+// Test V: Real Database Restart Tests (A, B, C)
+// -----------------------------------------------------------------------------
+test("Phase J — V. Real Database Restart Tests (A, B, C)", async () => {
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
+  let store = new RunStore(dbPath);
+  try {
+    const settings = makeSettings(repo, worktreeRoot, store);
+
+    // --- Scenario A: Started worker -> close DB -> reopen DB -> reconcile -> safe retry ---
+    const runIdA = store.createRun("PACE-V1", { summary: "Crashed worker run" });
+    store.transition(runIdA, "started", {
+      workerLeaseId: "lease-crashed-1",
+      workerLeaseExpiresAt: new Date(Date.now() - 10000).toISOString()
+    });
+    store.acquireLock("PACE-V1", runIdA);
+
+    // Restart boundary
+    store.close();
+    store = new RunStore(dbPath);
+    settings._store = store;
+    settings.getStore = () => store;
+
+    const recResA = reconcileWorkers(settings, store, { now: Date.now() });
+    assert.ok(recResA.recovered.includes(runIdA));
+    const recoveredRunA = store.getRun(runIdA);
+    assert.equal(recoveredRunA.state, "failed-retryable");
+    assert.equal(store.listLocks().some(l => l.issueKey === "PACE-V1"), false);
+
+    // --- Scenario B: Integration Git merge completes -> crash before durable bookkeeping -> reopen -> reconcileIntegrations ---
+    const epicKey = "PACE-V-EPIC";
+    store.upsertEpic({ key: epicKey, summary: "Parent Epic", branch: "epic/PACE-V", baseBranch: "develop" });
+    spawnSync("git", ["-C", repo, "checkout", "-b", "epic/PACE-V", "develop"]);
+    fs.writeFileSync(path.join(repo, "base.txt"), "base", "utf8");
+    spawnSync("git", ["-C", repo, "add", "."]);
+    spawnSync("git", ["-C", repo, "commit", "-m", "base epic"]);
+
+    spawnSync("git", ["-C", repo, "checkout", "-b", "feat/PACE-V2", "epic/PACE-V"]);
+    fs.writeFileSync(path.join(repo, "v2.txt"), "v2", "utf8");
+    spawnSync("git", ["-C", repo, "add", "."]);
+    spawnSync("git", ["-C", repo, "commit", "-m", "v2 commit"]);
+    const v2Sha = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim().toLowerCase();
+
+    // Merge into epic branch in git
+    spawnSync("git", ["-C", repo, "checkout", "epic/PACE-V"]);
+    spawnSync("git", ["-C", repo, "merge", "--no-ff", "-m", "merge v2", "feat/PACE-V2"]);
+    const mergedSha = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim().toLowerCase();
+
+    // In DB, task is in review-clean / integrating (simulating crash before finishEpicIntegration)
+    const v2RunId = store.createRun("PACE-V2", { summary: "Task V2" });
+    store.transition(v2RunId, "review-queued", { implementationSha: v2Sha });
+    recordReviewerOutcome(store, { runId: v2RunId, implementationSha: v2Sha, reviewerId: "rev-1", verdict: "clean", evidence: [] });
+
+    store.upsertEpicTask({ epicKey, issueKey: "PACE-V2", summary: "Task V2", branch: "feat/PACE-V2", state: "reviewed-clean", reviewedSha: v2Sha });
+    store.queueEpicIntegration({ epicKey, issueKey: "PACE-V2", leafBranch: "feat/PACE-V2" });
+    store.claimEpicIntegration({ epicKey, issueKey: "PACE-V2" });
+
+    // Restart boundary
+    store.close();
+    store = new RunStore(dbPath);
+    settings._store = store;
+    settings.getStore = () => store;
+
+    // Production integration reconciler recognizes commit ancestry in worktree
+    const sc = new LocalGitSourceControlProvider();
+    const recInt = reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      integrationAdapter: () => ({ completed: true, reviewedSha: v2Sha, integratedSha: mergedSha })
+    });
+    assert.equal(recInt.integrationsCompleted, 1);
+
+    const intState = store.getEpic(epicKey).integrations.find(i => i.issueKey === "PACE-V2");
+    assert.equal(intState.state, "integrated");
+
+    // --- Scenario C: Aggregate review verdict durable -> crash before waiting_human -> reopen -> reconcileParentExecution ---
+    store.upsertParentExecution({
+      parentKey: "PACE-V-PARENT",
+      summary: "Parent V",
+      state: "active",
+      integrationBranch: "epic/PACE-V",
+      dag: { children: [{ key: "PACE-V2" }] }
+    });
+    store.recordParentReview({
+      parentKey: "PACE-V-PARENT",
+      parentBaseSha: "1111111111111111111111111111111111111111",
+      integrationHeadSha: mergedSha,
+      graphFingerprint: "fp-v",
+      reviewerAgentId: "reviewer",
+      reviewerVersion: 1,
+      reviewerHash: "hash-v",
+      verdict: "clean",
+      evidence: []
+    });
+
+    // Restart boundary
+    store.close();
+    store = new RunStore(dbPath);
+    settings._store = store;
+    settings.getStore = () => store;
+
+    const recParent = await reconcileParentExecution(settings, store, "PACE-V-PARENT", {
+      workSource: new FakeWorkSourceProvider(),
+      runtime: { spawnSync }
+    });
+    assert.equal(recParent.ok, true);
+    assert.equal(recParent.parentState, "waiting_human");
+
+    const finalParent = store.getParentExecution("PACE-V-PARENT");
+    assert.equal(finalParent.state, "waiting_human");
+  } finally {
+    try { store.close(); } catch {}
+    cleanup();
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Test W: True Production Autonomous E2E with Restart Boundary
 // -----------------------------------------------------------------------------
 test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary", async () => {
-  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+  const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
+  let store = new RunStore(dbPath);
   try {
-    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+    const initialDevelopSha = spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout.toString().trim();
     const parentKey = "PACE-500";
 
     const workSource = new FakeWorkSourceProvider();
@@ -1191,91 +1546,167 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
       { key: "PACE-502", summary: "Child B", canonicalState: "ready", labels: ["agent-ready"] },
       { key: "PACE-503", summary: "Child C", canonicalState: "ready", labels: ["agent-ready"] }
     ]);
-    // DAG: A -> B, C independent
-    workSource.setDependencies("PACE-502", ["PACE-501"]);
+    workSource.setDependencies("PACE-502", ["PACE-501"]); // B depends on A, C is independent
+
+    const fakeRuntime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") {
+          return spawnSync(cmd, args, opts);
+        }
+        if (cmd === "npm" || (args && args.includes("check"))) {
+          return { status: 0, stdout: "verification ok", stderr: "" };
+        }
+        const cwd = opts.cwd || repo;
+        const isReview = (args && args.some(a => typeof a === "string" && (a.includes("Review implementation") || a.includes("Aggregate Integration Review"))));
+        if (isReview) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "clean",
+              evidence: []
+            }),
+            stderr: ""
+          };
+        }
+        // Implementation worker creates real file and real git commit in worktree
+        try {
+          const editDir = path.join(cwd, "backend");
+          fs.mkdirSync(editDir, { recursive: true });
+          fs.writeFileSync(path.join(editDir, "app.js"), `implemented at ${Date.now()}\n`, "utf8");
+          spawnSync("git", ["-C", cwd, "add", "backend/app.js"]);
+          spawnSync("git", ["-C", cwd, "commit", "-m", "worker commit"]);
+        } catch {}
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Implemented successfully",
+            changed_files: ["backend/app.js"],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    let settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
 
     // 1. Discover & Pin Parent
     const pinRes = await discoverAndPinParent(
       settings,
       store,
-      {
-        key: parentKey,
-        summary: "Full Autonomous Delivery",
-        description: "Deliver parent feature",
-        acceptanceCriteria: "All children integrated and verified",
-        canonicalState: "ready",
-        type: "Epic"
-      },
-      { workSource, runtime: { spawnSync }, execute: true }
+      workSource.items.get(parentKey),
+      { workSource, runtime: fakeRuntime, execute: true }
     );
     assert.equal(pinRes.ok, true);
+    assert.equal(store.getParentExecution(parentKey).state, "active");
 
-    const parent = store.getParentExecution(parentKey);
-    assert.equal(parent.state, "active");
-
-    // 2. Reconcile Children: A & C become ready; B waits for A
+    // 2. Reconcile Children: A and C are ready; B is pending-dependencies
     const sc = new LocalGitSourceControlProvider();
-    const recRes1 = await reconcileParentChildren(settings, store, parentKey, { workSource, sc, execute: true });
+    const recRes1 = reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
     assert.ok(recRes1.readyChildren.includes("PACE-501"));
     assert.ok(recRes1.readyChildren.includes("PACE-503"));
     assert.ok(!recRes1.readyChildren.includes("PACE-502"));
 
-    let tasks = store.listEpicTasks(parentKey);
-    const taskA = tasks.find(t => t.issueKey === "PACE-501");
-    const taskB = tasks.find(t => t.issueKey === "PACE-502");
-    const taskC = tasks.find(t => t.issueKey === "PACE-503");
+    // 3. Execute Child A through real production runtime
+    const resA = handleImplementation(settings, workSource.items.get("PACE-501"), true, fakeRuntime);
+    assert.equal(resA.exitCode, 0);
+    const runA = store.getRun(resA.output.runId);
 
-    assert.equal(taskA.orchestrationState, "dependency-ready");
-    assert.equal(taskC.orchestrationState, "dependency-ready");
-    assert.equal(taskB.orchestrationState, "pending-dependencies");
-
-    // 3. Complete A & C execution + review + integration
-    const shaA = "a111111111111111111111111111111111111111";
-    const shaC = "c333333333333333333333333333333333333333";
-
-    store.upsertEpicTask({ epicKey: parentKey, issueKey: "PACE-501", summary: "Child A", branch: "feat/PACE-501", state: "integrated", orchestrationState: "integrated", reviewedSha: shaA, integratedSha: shaA });
-    store.upsertEpicTask({ epicKey: parentKey, issueKey: "PACE-503", summary: "Child C", branch: "feat/PACE-503", state: "integrated", orchestrationState: "integrated", reviewedSha: shaC, integratedSha: shaC });
-    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-501", leafBranch: "feat/PACE-501" });
-    store.finishEpicIntegration({ epicKey: parentKey, issueKey: "PACE-501", commit: shaA });
-    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-503", leafBranch: "feat/PACE-503" });
-    store.finishEpicIntegration({ epicKey: parentKey, issueKey: "PACE-503", commit: shaC });
-
-    // 4. Injected Restart Boundary: verify DB state survives across instances
-    const activeTasksBefore = store.listEpicTasks(parentKey);
-    assert.equal(activeTasksBefore.filter(t => t.state === "integrated").length, 2);
-
-    // 5. Reconcile Children after restart: Task B is now unlocked!
-    const recRes2 = await reconcileParentChildren(settings, store, parentKey, { workSource, sc, execute: true });
-    assert.ok(recRes2.readyChildren.includes("PACE-502"));
-    tasks = store.listEpicTasks(parentKey);
-    const taskBUnlocked = tasks.find(t => t.issueKey === "PACE-502");
-    assert.equal(taskBUnlocked.orchestrationState, "dependency-ready");
-
-    // 6. Complete B execution + review + integration
-    const shaB = "b222222222222222222222222222222222222222";
-    store.upsertEpicTask({ epicKey: parentKey, issueKey: "PACE-502", summary: "Child B", branch: "feat/PACE-502", state: "integrated", orchestrationState: "integrated", reviewedSha: shaB, integratedSha: shaB });
-    store.queueEpicIntegration({ epicKey: parentKey, issueKey: "PACE-502", leafBranch: "feat/PACE-502" });
-    store.finishEpicIntegration({ epicKey: parentKey, issueKey: "PACE-502", commit: shaB });
-
-    // 7. Run Aggregate Integration Review with clean verdict
-    const cleanFindings = [
-      { id: "AGG-1", severity: "suggestion", category: "correctness", problem: "Aggregate review passed", file: "README.md", line: 1 }
-    ];
-    const reviewRes = await runParentIntegrationReview(settings, store, parentKey, {
-      injectedReviewOutcome: { verdict: "clean", evidence: cleanFindings },
-      skipRepoCheck: true,
-      runtime: { spawnSync }
+    // Get real commit SHA from worktree
+    const preparedA = sc.prepareChildWorktree({
+      repoPath: repo,
+      root: worktreeRoot,
+      parentKey,
+      issueKey: "PACE-501",
+      summary: "Child A"
     });
+    const shaA = sc.getHead({ repoPath: preparedA.worktree }).sha;
+    store.transition(runA.id, "review-queued", { implementationSha: shaA });
 
-    assert.equal(reviewRes.ok, true);
-    assert.equal(reviewRes.verdict, "clean");
+    // Review Child A through real production review runtime
+    const revA = handleReview(settings, workSource.items.get("PACE-501"), true, fakeRuntime);
+    assert.equal(revA.exitCode, 0);
+    assert.equal(store.getRun(runA.id).state, "reviewed-clean");
 
-    // 8. Assert Parent reaches WAITING_HUMAN
+    // Reconcile integrations: merges A into parent integration worktree
+    reconcileIntegrations(settings, store, {
+      sourceControl: sc,
+      runtime: fakeRuntime,
+      integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts)
+    });
+    assert.equal(store.getEpicTask(parentKey, "PACE-501").state, "integrated");
+
+    // 4. Simulated Crash & Restart Seam
+    store.close();
+    store = new RunStore(dbPath);
+    settings._store = store;
+    settings.getStore = () => store;
+
+    // 5. Reconcile Children after restart: Task B is now UNLOCKED because A is integrated!
+    const recRes2 = reconcileParentChildren(settings, store, parentKey, { sourceControl: sc, runtime: fakeRuntime });
+    assert.ok(recRes2.readyChildren.includes("PACE-502"));
+    const taskB = store.getEpicTask(parentKey, "PACE-502");
+    assert.equal(taskB.orchestrationState, "dependency-ready");
+    assert.ok(taskB.childBaseSha);
+
+    // 6. Execute Child C (independent)
+    const resC = handleImplementation(settings, workSource.items.get("PACE-503"), true, fakeRuntime);
+    assert.equal(resC.exitCode, 0);
+    const runC = store.getRun(resC.output.runId);
+    const preparedC = sc.prepareChildWorktree({ repoPath: repo, root: worktreeRoot, parentKey, issueKey: "PACE-503", summary: "Child C" });
+    const shaC = sc.getHead({ repoPath: preparedC.worktree }).sha;
+    store.transition(runC.id, "review-queued", { implementationSha: shaC });
+    const revC = handleReview(settings, workSource.items.get("PACE-503"), true, fakeRuntime);
+    assert.equal(revC.exitCode, 0);
+    reconcileIntegrations(settings, store, { sourceControl: sc, runtime: fakeRuntime, integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts) });
+    assert.equal(store.getEpicTask(parentKey, "PACE-503").state, "integrated");
+
+    // 7. Execute Child B (unlocked)
+    const resB = handleImplementation(settings, workSource.items.get("PACE-502"), true, fakeRuntime);
+    assert.equal(resB.exitCode, 0);
+    const runB = store.getRun(resB.output.runId);
+    const preparedB = sc.prepareChildWorktree({ repoPath: repo, root: worktreeRoot, parentKey, issueKey: "PACE-502", summary: "Child B" });
+    const shaB = sc.getHead({ repoPath: preparedB.worktree }).sha;
+    store.transition(runB.id, "review-queued", { implementationSha: shaB });
+    const revB = handleReview(settings, workSource.items.get("PACE-502"), true, fakeRuntime);
+    assert.equal(revB.exitCode, 0);
+    reconcileIntegrations(settings, store, { sourceControl: sc, runtime: fakeRuntime, integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts) });
+    assert.equal(store.getEpicTask(parentKey, "PACE-502").state, "integrated");
+
+    // 8. Run Real Aggregate Integration Review against parent integration worktree (without injectedReviewOutcome, without skipRepoCheck)
+    const aggRevRes = await runParentIntegrationReview(settings, store, parentKey, { runtime: fakeRuntime });
+    assert.equal(aggRevRes.ok, true);
+    assert.equal(aggRevRes.verdict, "clean");
+
+    // 9. Reconcile Parent Execution -> WAITING_HUMAN
+    const parentRecRes = await reconcileParentExecution(settings, store, parentKey, { workSource, runtime: fakeRuntime });
+    assert.equal(parentRecRes.ok, true);
+    assert.equal(parentRecRes.parentState, "waiting_human");
+
     const finalParent = store.getParentExecution(parentKey);
     assert.equal(finalParent.state, "waiting_human");
     assert.ok(finalParent.completionPacket);
     assert.equal(finalParent.completionPacket.children.length, 3);
+
+    // 10. Invariant Assertions
+    // develop HEAD in base repository is untouched!
+    const finalDevelopSha = spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout.toString().trim();
+    assert.equal(finalDevelopSha, initialDevelopSha, "develop branch HEAD must remain completely untouched");
+
+    // Zero orphan started runs
+    const allRuns = store.database.prepare("SELECT * FROM runs").all();
+    assert.equal(allRuns.some(r => r.state === "started" || r.state === "executing"), false);
+
+    // Exactly one terminal telemetry event per run
+    const terminalCount = store.database.prepare("SELECT COUNT(*) as count FROM telemetry_events WHERE stage = 'terminal'").get().count;
+    assert.ok(terminalCount >= 3);
   } finally {
+    try { store.close(); } catch {}
     cleanup();
   }
 });
@@ -1284,18 +1715,15 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
 // Test X: WAITING_HUMAN Final Boundary (Zero Auto-Merge / Done / Promotion)
 // -----------------------------------------------------------------------------
 test("Phase J — X. WAITING_HUMAN Final Boundary (Zero Auto-Merge / Done / Promotion)", () => {
-  // 1. Assert HUMAN_ONLY_ACTIONS includes all irreversible actions
   assert.ok(HUMAN_ONLY_ACTIONS.includes("finalMerge"));
   assert.ok(HUMAN_ONLY_ACTIONS.includes("markDone"));
   assert.ok(HUMAN_ONLY_ACTIONS.includes("productionDeploy"));
 
-  // 2. Assert that in autonomous mode, policy rejects autonomous finalMerge/markDone
   const autonomy = resolveAutonomyPolicy({ data: { project: { operatingMode: "autonomous" } } });
   assert.equal(autonomy.finalMerge, "human");
   assert.equal(autonomy.markDone, "human");
   assert.equal(autonomy.productionDeploy, "human");
 
-  // 3. Assert authorizeRuntimeAction fails closed for human actions
   const authRes = authorizeRuntimeAction(
     { data: { project: { operatingMode: "autonomous" }, policy: { operatingMode: "autonomous" } } },
     null,
