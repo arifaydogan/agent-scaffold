@@ -10,292 +10,223 @@
   </head>
   <body>
     <a class="skip-link" href="#main-content">Ana içeriğe geç</a>
-    <div class="ambient ambient-one" aria-hidden="true"></div>
-    <div class="ambient ambient-two" aria-hidden="true"></div>
 
-    <header class="topbar">
-      <div class="brand-lockup">
-        <div class="brand-mark" aria-hidden="true">
-          <span>PB</span>
-          <i></i>
+    <div class="app-shell">
+      <!-- ─── Top Status Bar ──────────────────────────────────────────── -->
+      <header class="topbar" role="banner">
+        <div class="topbar-brand">
+          <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Menüyü aç/kapat" aria-expanded="false">
+            <svg viewBox="0 0 24 24"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+          </button>
+          <span class="brand-icon" aria-hidden="true">PB</span>
+          <span><span id="project-key">PACE</span> · Kontrol Merkezi</span><span class="sr-only">Agent Operations</span>
         </div>
-        <div>
-          <p class="eyebrow">PaceBuild control plane</p>
-          <h1>Agent Operations Console</h1>
-        </div>
-      </div>
-      <div class="topbar-actions">
-        <div id="operating-mode-pill" class="mode-pill mode-autonomous" title="Çalışma Modu">
-          <span class="mode-dot"></span>
-          <span id="operating-mode-label">AUTONOMOUS</span>
-        </div>
-        <div id="supervisor-card" class="supervisor-card" role="status" aria-live="polite" hidden>
-          <div class="supervisor-header">
-            <span id="supervisor-dot" class="supervisor-dot"></span>
-            <span class="eyebrow" style="margin:0; font-size:0.65rem;">Supervisor</span>
-            <strong id="supervisor-status-text" class="supervisor-status-badge">—</strong>
+        <div class="topbar-status">
+          <div id="operating-mode-pill" class="mode-pill mode-autonomous" title="Çalışma Modu">
+            <span class="mode-dot"></span>
+            <span id="operating-mode-label">AUTONOMOUS</span>
           </div>
-          <div id="supervisor-meta" class="supervisor-meta">
-            <span>PID <strong id="supervisor-pid">—</strong></span>
-            <span><strong id="supervisor-mode">—</strong></span>
-            <span><strong id="supervisor-cycles">—</strong> döngü</span>
-            <span><strong id="supervisor-heartbeat">—</strong></span>
+          <div id="supervisor-card" class="supervisor-card" role="status" aria-live="polite" hidden>
+            <div class="supervisor-header">
+              <span id="supervisor-dot" class="supervisor-dot"></span>
+              <span style="font-size:0.6rem;color:var(--muted);font-weight:800;letter-spacing:0.1em;text-transform:uppercase;">SUP</span>
+              <strong id="supervisor-status-text" class="supervisor-status-badge">—</strong>
+            </div>
+            <div id="supervisor-meta" class="supervisor-meta">
+              <span>PID <strong id="supervisor-pid">—</strong></span>
+              <span><strong id="supervisor-mode">—</strong></span>
+              <span><strong id="supervisor-cycles">—</strong> döngü</span>
+              <span><strong id="supervisor-heartbeat">—</strong></span>
+            </div>
           </div>
+          <div class="connection-pill" role="status" aria-live="polite">
+            <span id="connection-dot" class="connection-dot"></span>
+            <span id="connection-label">Bağlanıyor</span>
+          </div>
+          <div class="sync-copy">
+            <span>Son senkronizasyon</span>
+            <strong id="sync-time">—</strong>
+          </div>
+          <span id="demo-badge" class="demo-badge" hidden>Demo verisi</span>
         </div>
-        <span id="demo-badge" class="demo-badge" hidden>Demo verisi</span>
-        <div class="connection-pill" role="status" aria-live="polite">
-          <span id="connection-dot" class="connection-dot"></span>
-          <span id="connection-label">Bağlanıyor</span>
-        </div>
-        <div class="sync-copy">
-          <span>Son senkronizasyon</span>
-          <strong id="sync-time">—</strong>
-        </div>
-      </div>
-    </header>
+      </header>
 
-    <main id="main-content" class="page-shell">
-      <section class="hero" aria-labelledby="fleet-heading">
-        <div>
-          <p class="eyebrow"><span id="project-key">PACE</span> · Control Plane Konsolu</p>
-          <h2 id="fleet-heading">Otonom ve denetimli yazılım teslimat platformu.</h2>
-          <p class="hero-copy">
-            Canlı worker yürütmelerini, Parent-Child DAG dependency grafiğini, entegrasyon kuyruğunu,
-            onay kapılarını ve telemetri metriklerini tek ekrandan yönetin.
-          </p>
-        </div>
-        <div class="hero-orbit" aria-hidden="true">
-          <span class="orbit-core">AI</span>
-          <span class="orbit-node node-one"></span>
-          <span class="orbit-node node-two"></span>
-          <span class="orbit-node node-three"></span>
-        </div>
-      </section>
-
-      <div id="error-banner" class="error-banner" role="alert" hidden>
-        <strong>Canlı bağlantı kesildi.</strong>
-        <span>Son başarılı veri gösteriliyor; yeniden bağlanmayı deniyoruz.</span>
-      </div>
-
-      <!-- Navigation Tabs (6 Main Concerns) -->
-      <nav class="main-tabs" aria-label="Ana Navigasyon">
-        <button class="tab-button is-active" data-target="overview-view">Genel Bakış (Overview)</button>
-        <button class="tab-button" data-target="pm-view">İş Kuyruğu / PM (Work)</button>
-        <button class="tab-button" data-target="parents-view">Parent Orkestrasyon (DAG)</button>
-        <button class="tab-button" data-target="observability-view">Gözlemlenebilirlik (Observability)</button>
-        <button class="tab-button" data-target="agents-view">Agent Yönetimi (Registry)</button>
-        <button class="tab-button" data-target="config-view">Sağlayıcı Yapılandırması (Config)</button>
+      <!-- ─── Sidebar Navigation ──────────────────────────────────────── -->
+      <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+      <nav class="app-sidebar" id="app-sidebar" aria-label="Ana Navigasyon">
+        <button class="nav-item is-active" data-target="overview-view">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Genel Bakış
+        </button>
+        <button class="nav-item" data-target="pm-view">
+          <svg viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg>
+          İşler
+        </button>
+        <button class="nav-item" data-target="parents-view">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M12 7v4M8 17l4-6 4 6"/></svg>
+          Parentlar
+        </button>
+        <button class="nav-item" data-target="observability-view">
+          <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Gözlem
+        </button>
+        <button class="nav-item" data-target="agents-view">
+          <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          Agentlar
+        </button>
+        <button class="nav-item" data-target="config-view">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          Sağlayıcılar
+        </button>
       </nav>
 
-      <!-- TAB 1: OVERVIEW -->
-      <div id="overview-view" class="tab-content is-active">
-        <!-- Authoritative Control Plane Metrics Grid -->
-        <section class="metrics" aria-label="Çalışma özeti">
-          <article class="metric-card metric-active">
-            <span class="metric-icon" aria-hidden="true">⚡</span>
-            <p>Çalışan Worker</p>
-            <strong id="metric-active">—</strong>
-            <small id="metric-capacity">Kapasite hesaplanıyor</small>
-          </article>
-          <article class="metric-card metric-queued">
-            <span class="metric-icon" aria-hidden="true">⏳</span>
-            <p>Kuyruktaki Worker</p>
-            <strong id="metric-queued">—</strong>
-            <small>Yürütme bekleyen</small>
-          </article>
-          <article class="metric-card metric-review">
-            <span class="metric-icon" aria-hidden="true">👁</span>
-            <p>Review Aşamasında</p>
-            <strong id="metric-review">—</strong>
-            <small>Doğruluk incelemesi</small>
-          </article>
-          <article class="metric-card metric-rework">
-            <span class="metric-icon" aria-hidden="true">🔄</span>
-            <p>Rework Bekleyen</p>
-            <strong id="metric-rework">—</strong>
-            <small>Düzeltme turunda</small>
-          </article>
-          <article class="metric-card metric-blocked">
-            <span class="metric-icon" aria-hidden="true">🛑</span>
-            <p>Bloke / İlgi</p>
-            <strong id="metric-blocked">—</strong>
-            <small>Müdahale gereken</small>
-          </article>
-          <article class="metric-card metric-approval">
-            <span class="metric-icon" aria-hidden="true">🛡</span>
-            <p>Onay Bekleyen</p>
-            <strong id="metric-awaiting-approval">—</strong>
-            <small>Plan parmak izi korumalı</small>
-          </article>
-          <article class="metric-card metric-human">
-            <span class="metric-icon" aria-hidden="true">🏁</span>
-            <p>İnsan Onay Kapısı</p>
-            <strong id="metric-human-approval">—</strong>
-            <small>Hazır / Final PR</small>
-          </article>
-          <article class="metric-card metric-parent">
-            <span class="metric-icon" aria-hidden="true">🌳</span>
-            <p>Aktif Parent Epik</p>
-            <strong id="metric-active-parents">—</strong>
-            <small id="metric-parent-conflicts">0 çatışma</small>
-          </article>
-          <article class="metric-card metric-token">
-            <span class="metric-icon" aria-hidden="true">◇</span>
-            <p>Toplam Token</p>
-            <strong id="metric-tokens">—</strong>
-            <small>Durable kullanım</small>
-          </article>
-        </section>
+      <!-- ─── Main Content Area ───────────────────────────────────────── -->
+      <main id="main-content" class="main-content">
 
-        <!-- Operating Mode Banner -->
-        <section class="panel mode-explanation-panel">
-          <div class="panel-heading compact-heading">
+        <div id="error-banner" class="error-banner" role="alert" hidden>
+          <strong>Canlı bağlantı kesildi.</strong>
+          <span>Son başarılı veri gösteriliyor; yeniden bağlanmayı deniyoruz.</span>
+        </div>
+
+        <!-- ════ TAB 1: OVERVIEW ══════════════════════════════════════════ -->
+        <div id="overview-view" class="tab-content is-active">
+          <div class="page-header">
             <div>
-              <p class="eyebrow">Çalışma Modu Protokolü</p>
-              <h3 id="overview-mode-title">Otonom ve Denetimli Teslimat</h3>
+              <h2>Genel Bakış</h2>
+              <p id="overview-mode-desc">Sistem durumunu, aktif işleri ve dikkat gerektiren öğeleri izleyin.</p>
             </div>
             <span id="overview-mode-badge" class="mode-badge">AUTONOMOUS</span>
           </div>
-          <p id="overview-mode-desc" class="mode-desc-text">
-            <strong>AUTONOMOUS:</strong> Ready işler otonom yürütülür, review ve parent entegrasyonu otomatik işletilir; nihai Develop merge ve Done geçişi insan kontrolündedir.
-          </p>
-        </section>
 
-        <div class="workspace-grid">
-          <section class="panel fleet-panel" aria-labelledby="overview-tasks-heading">
-            <div class="panel-heading fleet-toolbar">
-              <div>
-                <p class="eyebrow">Task görünümü</p>
-                <h2 id="overview-tasks-heading">Son Runlar ve Durumlar</h2>
-              </div>
-              <label class="search-box">
-                <span class="sr-only">Task veya persona ara</span>
-                <span aria-hidden="true">⌕</span>
-                <input id="run-search" type="search" placeholder="Task, persona veya skill ara" />
-              </label>
-            </div>
-            <nav class="filters" aria-label="Agent durum filtreleri">
-              <button class="filter-button is-selected" type="button" data-filter="all" aria-pressed="true">Tümü</button>
-              <button class="filter-button" type="button" data-filter="active" aria-pressed="false">Aktif</button>
-              <button class="filter-button" type="button" data-filter="review" aria-pressed="false">Review</button>
-              <button class="filter-button" type="button" data-filter="blocked" aria-pressed="false">İlgi gerekiyor</button>
-            </nav>
-            <div id="agent-grid" class="agent-grid" aria-live="polite" aria-busy="true">
-              <div class="skeleton-card"></div>
-              <div class="skeleton-card"></div>
-            </div>
-            <div id="empty-state" class="empty-state" hidden>
-              <span aria-hidden="true">◎</span>
-              <h3>Bu görünümde run yok</h3>
-              <p>Filtreyi değiştirin veya bir `agent-ready` task dispatch edin.</p>
-            </div>
+          <!-- 4 Primary KPIs -->
+          <section class="kpi-strip" aria-label="Temel metrikler">
+            <article class="kpi-card kpi-active">
+              <p>Aktif İşler</p>
+              <strong id="metric-active">—</strong>
+              <small id="metric-capacity">Kapasite hesaplanıyor</small>
+            </article>
+            <article class="kpi-card kpi-attention">
+              <p>İlgi Gereken</p>
+              <strong id="metric-blocked">—</strong>
+              <small>Müdahale gereken</small>
+            </article>
+            <article class="kpi-card kpi-approval">
+              <p>Onay Bekleyen</p>
+              <strong id="metric-awaiting-approval">—</strong>
+              <small>Plan parmak izi korumalı</small>
+            </article>
+            <article class="kpi-card kpi-human">
+              <p>İnsan İçin Hazır</p>
+              <strong id="metric-human-approval">—</strong>
+              <small>Hazır / Final PR</small>
+            </article>
           </section>
 
-          <aside class="side-stack" aria-label="Kapasite ve durum bilgileri">
-            <section class="panel capacity-panel" aria-labelledby="capacity-heading">
-              <div class="panel-heading compact-heading">
+          <!-- Two-Column: Active Work + Needs Attention -->
+          <div class="two-col">
+            <section class="panel" aria-labelledby="active-work-heading">
+              <div class="panel-heading">
                 <div>
-                  <p class="eyebrow">Worker pool</p>
-                  <h2 id="capacity-heading">Provider kapasitesi</h2>
+                  <p class="eyebrow">Aktif İşler</p>
+                  <h3 id="active-work-heading">Çalışan ve Kuyruktaki İşler</h3>
                 </div>
-                <span id="capacity-total" class="capacity-total">—</span>
+                <label class="search-box">
+                  <span class="sr-only">Task veya persona ara</span>
+                  <span aria-hidden="true">⌕</span>
+                  <input id="run-search" type="search" placeholder="Task, persona veya skill ara" />
+                </label>
               </div>
-              <div id="provider-list" class="provider-list"></div>
+              <nav class="filter-bar" aria-label="Agent durum filtreleri">
+                <button class="filter-btn is-active" type="button" data-filter="all" aria-pressed="true">Tümü</button>
+                <button class="filter-btn" type="button" data-filter="active" aria-pressed="false">Aktif</button>
+                <button class="filter-btn" type="button" data-filter="review" aria-pressed="false">Review</button>
+                <button class="filter-btn" type="button" data-filter="blocked" aria-pressed="false">İlgi gerekiyor</button>
+              </nav>
+              <div class="table-wrap">
+                <table id="active-work-table" aria-live="polite" aria-busy="true">
+                  <thead>
+                    <tr>
+                      <th>Issue</th>
+                      <th>Durum</th>
+                      <th>Agent</th>
+                      <th>Provider / Model</th>
+                      <th>Süre</th>
+                      <th>Son Aktivite</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="active-work-tbody"></tbody>
+                </table>
+              </div>
+              <div id="empty-state" class="empty-state" hidden>
+                <span aria-hidden="true">◎</span>
+                <h3>Bu görünümde run yok</h3>
+                <p>Filtreyi değiştirin veya bir <code>agent-ready</code> task dispatch edin.</p>
+              </div>
+              <!-- Hidden grid for test compatibility -->
+              <div id="agent-grid" class="agent-grid" aria-live="polite" aria-busy="true"></div>
             </section>
 
-            <section class="panel flow-panel" aria-labelledby="flow-heading">
-              <div class="panel-heading compact-heading">
-                <div>
-                  <p class="eyebrow">Orchestration</p>
-                  <h2 id="flow-heading">Çalışma akışı</h2>
+            <aside aria-label="Dikkat gerektiren öğeler">
+              <section class="panel" aria-labelledby="attention-heading" style="margin-bottom: var(--sp-4);">
+                <div class="panel-heading">
+                  <h3 id="attention-heading">İlgi Gerekenler</h3>
                 </div>
+                <div id="attention-list" class="attention-list">
+                  <p class="empty-text">Dikkat gerektiren öğe yok.</p>
+                </div>
+              </section>
+            </aside>
+          </div>
+
+          <!-- Activity Feed -->
+          <section class="panel activity-panel" aria-labelledby="activity-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Runtime journal</p>
+                <h3 id="activity-heading">Son hareketler</h3>
               </div>
-              <ol class="flow-list">
-                <li><span>1</span><div><strong>Claim & DAG Pin</strong><small>Work item + dependency DAG</small></div></li>
-                <li><span>2</span><div><strong>Execute</strong><small>Persona + task agent + model</small></div></li>
-                <li><span>3</span><div><strong>Verify & Review</strong><small>Scope check + reviewer agent</small></div></li>
-                <li><span>4</span><div><strong>Integration</strong><small>Parent worktree merge</small></div></li>
-                <li><span>5</span><div><strong>Human Gate</strong><small>Final PR, merge ve Done</small></div></li>
-              </ol>
-            </section>
-          </aside>
+              <span class="read-only-badge">Salt okunur</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Zaman</th><th>Task</th><th>Olay</th><th>Durum</th></tr></thead>
+                <tbody id="activity-body"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
 
-        <section class="panel activity-panel" aria-labelledby="activity-heading">
-          <div class="panel-heading activity-heading">
+        <!-- ════ TAB 2: WORK / PM ═════════════════════════════════════════ -->
+        <div id="pm-view" class="tab-content" hidden>
+          <div class="page-header">
             <div>
-              <p class="eyebrow">Runtime journal</p>
-              <h2 id="activity-heading">Son hareketler</h2>
-            </div>
-            <span class="read-only-badge">Salt okunur</span>
-          </div>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Zaman</th><th>Task</th><th>Olay</th><th>Durum</th></tr></thead>
-              <tbody id="activity-body"></tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-
-      <!-- TAB 2: WORK / PM -->
-      <div id="pm-view" class="tab-content" hidden>
-        <section class="panel pm-panel">
-          <div class="panel-heading fleet-toolbar">
-            <div>
-              <p class="eyebrow">PaceBuild PM Operations</p>
-              <h2>PM Operational Workspace</h2>
-            </div>
-            <div class="pm-sub-nav">
-              <button class="pm-filter-btn is-active" data-pm-filter="inbox">Tüm Kuyruk (Inbox)</button>
-              <button class="pm-filter-btn" data-pm-filter="attention">İlgi Gerekenler <span id="pm-badge-attention" class="badge-count">0</span></button>
-              <button class="pm-filter-btn" data-pm-filter="approvals">Onay Bekleyenler <span id="pm-badge-approvals" class="badge-count">0</span></button>
-              <button class="pm-filter-btn" data-pm-filter="journal">Decision Journal & Chat</button>
+              <h2>İşler</h2>
+              <p>Operasyonel iş kuyruğu, onaylar ve karar günlüğü.</p>
             </div>
           </div>
 
-          <!-- PM Metrics Summary Bar -->
-          <div class="pm-summary-bar">
-            <div class="pm-stat" data-group="awaitingApproval">
-              <span class="pm-stat-label">Onay Bekleyen</span>
-              <strong id="pm-stat-approvals">0</strong>
-            </div>
-            <div class="pm-stat" data-group="blocked">
-              <span class="pm-stat-label">Bloke / İlgi</span>
-              <strong id="pm-stat-blocked">0</strong>
-            </div>
-            <div class="pm-stat" data-group="executing">
-              <span class="pm-stat-label">Yürütülüyor</span>
-              <strong id="pm-stat-executing">0</strong>
-            </div>
-            <div class="pm-stat" data-group="inReview">
-              <span class="pm-stat-label">Review Aşamasında</span>
-              <strong id="pm-stat-review">0</strong>
-            </div>
-            <div class="pm-stat" data-group="needsRework">
-              <span class="pm-stat-label">Rework Gerekli</span>
-              <strong id="pm-stat-rework">0</strong>
-            </div>
-            <div class="pm-stat" data-group="ready">
-              <span class="pm-stat-label">Agent Ready</span>
-              <strong id="pm-stat-ready">0</strong>
-            </div>
-            <div class="pm-stat" data-group="humanApproval">
-              <span class="pm-stat-label">İnsan Onayı (Done)</span>
-              <strong id="pm-stat-human-approval">0</strong>
-            </div>
-          </div>
+          <nav class="filter-bar pm-sub-nav" aria-label="İş kuyruğu filtreleri">
+            <button class="pm-filter-btn is-active" data-pm-filter="inbox">Tümü</button>
+            <button class="pm-filter-btn" data-pm-filter="attention">İlgi Gereken <span id="pm-badge-attention" class="badge-count">0</span></button>
+            <button class="pm-filter-btn" data-pm-filter="approvals">Onaylar <span id="pm-badge-approvals" class="badge-count">0</span></button>
+            <button class="pm-filter-btn" data-pm-filter="review">Review</button>
+            <button class="pm-filter-btn" data-pm-filter="rework">Rework</button>
+            <button class="pm-filter-btn" data-pm-filter="ready">Hazır</button>
+            <button class="pm-filter-btn" data-pm-filter="human">İnsan Onayı</button>
+          </nav>
 
-          <!-- Section 1: PM Work Queue / Inbox -->
           <div id="pm-inbox-section" class="pm-section">
-            <div class="pm-section-header">
-              <h3>Operasyonel İş Kuyruğu</h3>
-              <p class="section-desc">Kanonik çalışma durumuna ve yerel çalışma geçmişine göre gruplandırılmış iş paketleri.</p>
+            <div class="panel work-queue-panel">
+              <div class="table-wrap">
+                <table aria-label="İş kuyruğu">
+                  <thead><tr><th>Issue</th><th>Özet</th><th>Kanonik durum</th><th>Yerel durum</th><th>Agent</th><th>Risk</th><th>Güncelleme</th><th></th></tr></thead>
+                  <tbody id="pm-queue-container"></tbody>
+                </table>
+              </div>
             </div>
-            <div id="pm-queue-container" class="pm-queue-container"></div>
           </div>
 
-          <!-- Section 2: Dedicated Approvals View -->
           <div id="pm-approvals-section" class="pm-section" hidden>
             <div class="pm-section-header">
               <h3>Bekleyen Onay Talepleri</h3>
@@ -304,16 +235,14 @@
             <div id="pm-approvals-list" class="pm-approvals-list"></div>
           </div>
 
-          <!-- Section 3: Consolidated Needs Attention Surface -->
           <div id="pm-attention-section" class="pm-section" hidden>
             <div class="pm-section-header">
-              <h3>Müdahale Gerektiren Durumlar (Human Attention)</h3>
-              <p class="section-desc">Bloke workerlar, tükenmiş rework denemeleri, scope ihlalleri, DAG döngüleri ve entegrasyon çatışmaları.</p>
+              <h3>Müdahale Gerektiren Durumlar</h3>
+              <p class="section-desc">Bloke workerlar, tükenmiş rework denemeleri, scope ihlalleri ve entegrasyon çatışmaları.</p>
             </div>
             <div id="pm-attention-list" class="pm-attention-list"></div>
           </div>
 
-          <!-- Section 4: Decision Journal & Chat -->
           <div id="pm-journal-section" class="pm-section" hidden>
             <div class="pm-layout">
               <div class="pm-conversation">
@@ -321,7 +250,7 @@
                 <div id="pm-messages" class="pm-messages-list"></div>
                 <form id="pm-form" class="pm-form">
                   <input type="text" id="pm-input" placeholder="Enter message to PM..." required />
-                  <button type="submit">Gönder</button>
+                  <button type="submit" class="pm-btn">Gönder</button>
                 </form>
               </div>
               <div class="pm-journal">
@@ -330,27 +259,36 @@
               </div>
             </div>
           </div>
-        </section>
-      </div>
 
-      <!-- TAB 3: PARENT ORCHESTRATION -->
-      <div id="parents-view" class="tab-content" hidden>
-        <section class="panel parent-panel">
-          <div class="panel-heading fleet-toolbar">
+          <!-- Hidden stats for JS compatibility -->
+          <div hidden>
+            <strong id="pm-stat-approvals">0</strong>
+            <strong id="pm-stat-blocked">0</strong>
+            <strong id="pm-stat-executing">0</strong>
+            <strong id="pm-stat-review">0</strong>
+            <strong id="pm-stat-rework">0</strong>
+            <strong id="pm-stat-ready">0</strong>
+            <strong id="pm-stat-human-approval">0</strong>
+          </div>
+        </div>
+
+        <!-- ════ TAB 3: PARENT ORCHESTRATION ══════════════════════════════ -->
+        <div id="parents-view" class="tab-content" hidden>
+          <div class="page-header">
             <div>
-              <p class="eyebrow">Hierarchical Delivery & Integration</p>
-              <h2>Parent Orchestration & Child DAG</h2>
+              <h2>Parentlar</h2>
+              <p>Hiyerarşik teslimat, child DAG ve entegrasyon hattı.</p>
             </div>
             <div class="parent-picker-container">
               <label for="parent-select" class="sr-only">Parent Epik Seçin</label>
               <select id="parent-select" class="parent-select-input">
                 <option value="">Parent Epik Yükleniyor...</option>
               </select>
-              <button id="parent-refresh-btn" class="pm-btn pm-btn-view" title="Yenile">⟳ Yenile</button>
+              <button id="parent-refresh-btn" class="pm-btn pm-btn-view" title="Yenile">⟳</button>
             </div>
           </div>
 
-          <!-- Parent Summary Header Card -->
+          <!-- Parent Summary -->
           <div id="parent-detail-header" class="parent-summary-card">
             <div class="parent-header-top">
               <div class="parent-title-box">
@@ -359,26 +297,31 @@
               </div>
               <span id="parent-state-pill" class="state-pill active">—</span>
             </div>
+            <div id="parent-blockers-container" class="parent-blockers-box" hidden></div>
+          </div>
+
+          <!-- Collapsible Technical Details -->
+          <details class="tech-details" id="parent-tech-details">
+            <summary>Teknik Detaylar</summary>
             <div class="parent-meta-grid">
               <div class="parent-meta-cell"><span>Base Ref / SHA</span><strong id="parent-base-sha">—</strong></div>
               <div class="parent-meta-cell"><span>Integration Branch</span><strong id="parent-int-branch">—</strong></div>
               <div class="parent-meta-cell"><span>Integration Head SHA</span><strong id="parent-int-head-sha">—</strong></div>
               <div class="parent-meta-cell"><span>Graph Fingerprint</span><strong id="parent-graph-fp">—</strong></div>
             </div>
-            <div id="parent-blockers-container" class="parent-blockers-box" hidden></div>
-          </div>
+          </details>
 
-          <!-- WAITING_HUMAN / Ready for Human Approval Boundary Card -->
+          <!-- WAITING_HUMAN Card -->
           <div id="parent-human-approval-card" class="parent-completion-card" hidden>
             <div class="completion-card-header">
               <span class="completion-icon">🏁</span>
               <div>
                 <h3 style="margin:0; color: #4ade80;">Ready for Human Approval</h3>
-                <p style="margin:2px 0 0 0; color: #cbd5e1; font-size: 0.85rem;">
+                <p style="margin:2px 0 0 0; color: #cbd5e1; font-size: 0.82rem;">
                   Tüm child tasklar entegre edildi ve aggregate repo doğrulaması ile bağımsız review başarıyla tamamlandı.
                 </p>
               </div>
-              <span class="badge badge-enabled" style="font-size: 0.8rem;">AUTONOMOUS PHASE COMPLETE</span>
+              <span class="badge badge-enabled" style="font-size: 0.72rem;">AUTONOMOUS PHASE COMPLETE</span>
             </div>
             <div class="completion-evidence-grid">
               <div class="evidence-cell"><span>Graph Fingerprint</span><strong id="comp-graph-fp">—</strong></div>
@@ -391,51 +334,85 @@
             </div>
           </div>
 
-          <!-- Child DAG Dependency Visualization Section -->
-          <div class="parent-section">
-            <div class="parent-section-header">
-              <h3>Child DAG Dependency Graph</h3>
-              <p class="section-desc">Bağımsız ve sıralı child taskların yürütme ve entegrasyon akışı.</p>
-            </div>
-            <div id="parent-dag-container" class="dag-container"></div>
-            <!-- Accessible Text Fallback for DAG -->
-            <div id="parent-dag-text-fallback" class="dag-text-fallback" aria-label="Bağımlılık listesi"></div>
-          </div>
-
-          <!-- Integration Lane Section -->
-          <div class="parent-section">
-            <div class="parent-section-header">
-              <h3>Integration Lane (Entegrasyon Hattı)</h3>
-              <p class="section-desc">Review edilen commitlerin parent integration worktree'sine sıralı entegrasyonu (Reviewed != Integrated).</p>
-            </div>
-            <div id="parent-integration-lane" class="integration-lane-container"></div>
-          </div>
-
-          <!-- Aggregate Review Findings & Verification -->
-          <div class="parent-section">
-            <div class="parent-section-header">
-              <h3>Aggregate Integration Review & Repo Verification</h3>
-              <p class="section-desc">Tüm epik kapsamının birleştirilmiş diff incelemesi ve <code>npm run check</code> doğrulama durumu.</p>
-            </div>
-            <div id="parent-review-findings" class="parent-review-findings-box"></div>
-          </div>
-        </section>
-      </div>
-
-      <!-- TAB 4: OBSERVABILITY -->
-      <div id="observability-view" class="tab-content" hidden>
-        <section class="panel observability-panel">
-          <div class="panel-heading">
+          <!-- Two-Column: DAG + Integration Lane -->
+          <div class="parent-two-col">
             <div>
-              <p class="eyebrow">Operational Metrics & Health</p>
-              <h2>Observability & Telemetry</h2>
+              <section class="parent-section" aria-labelledby="dag-heading">
+                <div class="parent-section-header">
+                  <h3 id="dag-heading">Child DAG</h3>
+                  <p class="section-desc">Bağımsız ve sıralı child taskların yürütme akışı.</p>
+                </div>
+                <div id="parent-dag-container" class="dag-container"></div>
+                <div id="parent-dag-text-fallback" class="dag-text-fallback" aria-label="Bağımlılık listesi"></div>
+              </section>
+            </div>
+            <div>
+              <section class="parent-section" aria-labelledby="int-heading">
+                <div class="parent-section-header">
+                  <h3 id="int-heading">Entegrasyon Hattı</h3>
+                  <p class="section-desc">Reviewed commitlerin parent worktree'sine sıralı entegrasyonu.</p>
+                </div>
+                <div id="parent-integration-lane" class="integration-lane-container"></div>
+              </section>
+
+              <!-- Aggregate Review -->
+              <section class="parent-section" aria-labelledby="agg-review-heading" style="margin-top: var(--sp-4);">
+                <div class="parent-section-header">
+                  <h3 id="agg-review-heading">Aggregate Review</h3>
+                  <p class="section-desc">Birleştirilmiş diff incelemesi ve doğrulama durumu.</p>
+                </div>
+                <div id="parent-review-findings" class="parent-review-findings-box"></div>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <!-- ════ TAB 4: OBSERVABILITY ═════════════════════════════════════ -->
+        <div id="observability-view" class="tab-content" hidden>
+          <div class="page-header">
+            <div>
+              <h2>Gözlem</h2>
+              <p>Operasyonel metrikler, provider sağlığı ve telemetri.</p>
             </div>
             <div class="obs-window-controls">
-              <span class="window-label">Zaman Penceresi:</span>
+              <span class="window-label">Pencere:</span>
               <div class="window-buttons">
                 <button class="window-btn" data-window="1h">1s</button>
                 <button class="window-btn is-active" data-window="24h">24s</button>
                 <button class="window-btn" data-window="7d">7g</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Health Strip -->
+          <section class="obs-health-strip" aria-label="Sistem sağlığı" id="obs-health-strip">
+            <article class="obs-health-card">
+              <p class="obs-label">Yürütmeler</p>
+              <strong class="obs-value" id="obs-active-workers">—</strong>
+            </article>
+            <article class="obs-health-card">
+              <p class="obs-label">Token Kullanımı</p>
+              <strong class="obs-value" id="obs-total-tokens">—</strong>
+            </article>
+            <article class="obs-health-card">
+              <p class="obs-label">Provider Sağlığı</p>
+              <strong class="obs-value" id="obs-active-parents">—</strong>
+            </article>
+            <article class="obs-health-card">
+              <p class="obs-label">Başarısızlıklar</p>
+              <strong class="obs-value" id="obs-conflicts">—</strong>
+            </article>
+          </section>
+
+          <!-- Provider Capacity -->
+          <div class="obs-section">
+            <div class="obs-section-header">
+              <h3>Provider Kapasitesi</h3>
+            </div>
+            <div class="panel" style="padding: var(--sp-4);">
+              <div id="provider-list" class="provider-list"></div>
+              <div style="margin-top: var(--sp-2); text-align: right;">
+                <span id="capacity-total" class="capacity-total">—</span>
               </div>
             </div>
           </div>
@@ -449,20 +426,20 @@
             <div id="obs-live-grid" class="obs-live-grid"></div>
           </div>
 
-          <!-- Provider Health & Capacity -->
+          <!-- Provider Health -->
           <div class="obs-section">
             <div class="obs-section-header">
-              <h3>Provider Sağlığı ve Kapasite</h3>
-              <p class="section-desc">Gerçek çalışma gözlemlerine dayalı provider sağlık durumu ve cooldown takibi.</p>
+              <h3>Provider Sağlığı</h3>
+              <p class="section-desc">Gerçek çalışma gözlemlerine dayalı sağlık durumu.</p>
             </div>
             <div id="obs-providers-grid" class="obs-providers-grid"></div>
           </div>
 
-          <!-- Recent Runs & Token Ledger -->
+          <!-- Recent Runs -->
           <div class="obs-section">
             <div class="obs-section-header">
               <h3>Son Yürütmeler ve Token Kullanımı</h3>
-              <p class="section-desc">Durable telemetry zaman çizelgesi, süreler ve normalize edilmiş token ledgeri.</p>
+              <p class="section-desc">Durable telemetry zaman çizelgesi.</p>
             </div>
             <div class="obs-runs-table-container">
               <table class="obs-runs-table">
@@ -482,30 +459,38 @@
               </table>
             </div>
           </div>
-        </section>
-      </div>
 
-      <!-- TAB 5: AGENT MANAGEMENT -->
-      <div id="agents-view" class="tab-content" hidden>
-        <section class="panel agents-panel">
-          <div class="panel-heading fleet-toolbar">
+          <!-- Hidden metric elements for JS compatibility -->
+          <div hidden>
+            <strong id="metric-queued">—</strong>
+            <strong id="metric-review">—</strong>
+            <strong id="metric-rework">—</strong>
+            <strong id="metric-active-parents">—</strong>
+            <strong id="metric-parent-conflicts">—</strong>
+            <strong id="metric-tokens">—</strong>
+          </div>
+        </div>
+
+        <!-- ════ TAB 5: AGENT MANAGEMENT ══════════════════════════════════ -->
+        <div id="agents-view" class="tab-content" hidden>
+          <div class="page-header">
             <div>
-              <p class="eyebrow">Registry & Tracking</p>
-              <h2>Agent Registry & Usage Telemetry</h2>
+              <h2>Agentlar</h2>
+              <p>İmmutable versiyonlama ile agent registry ve kullanım telemetrisi.</p>
             </div>
             <div class="agent-toolbar-actions">
               <div class="agent-filters">
                 <button class="agent-filter-btn is-active" data-agent-filter="all">Tümü</button>
-                <button class="agent-filter-btn" data-agent-filter="enabled">Etkin (Enabled)</button>
+                <button class="agent-filter-btn" data-agent-filter="enabled">Etkin</button>
                 <button class="agent-filter-btn" data-agent-filter="disabled">Devre Dışı</button>
-                <button class="agent-filter-btn" data-agent-filter="archived">Arşivlenmiş</button>
+                <button class="agent-filter-btn" data-agent-filter="archived">Arşiv</button>
               </div>
-              <button id="agent-create-btn" class="pm-btn pm-btn-approve">+ Yeni Agent Tanımla</button>
+              <button id="agent-create-btn" class="pm-btn pm-btn-approve">+ Yeni Agent</button>
             </div>
           </div>
 
           <div class="agent-safety-notice">
-            🔒 <strong>İmmutable Versiyonlama:</strong> Bir agent üzerinde yapılan değişiklikler yeni bir versiyon oluşturur. Aktif ve geçmiş runlar oluşturuldukları andaki versiyon ve hash'e bağlı kalır.
+            🔒 <strong>İmmutable Versiyonlama:</strong> Değişiklikler yeni bir versiyon oluşturur. Aktif ve geçmiş runlar sabitlenmiş versiyonu korur.
           </div>
 
           <div class="agents-layout">
@@ -514,84 +499,83 @@
               <div id="agent-definitions" class="agent-definitions-list"></div>
             </div>
             <div class="agent-telemetry">
-              <h3>Kullanım Telemetrisi (Usage Ledger)</h3>
+              <h3>Kullanım Telemetrisi</h3>
               <div id="usage-events" class="usage-events-list"></div>
             </div>
           </div>
-        </section>
-      </div>
+        </div>
 
-      <!-- TAB 6: PROVIDERS / CONFIGURATION -->
-      <div id="config-view" class="tab-content" hidden>
-        <section class="panel config-panel">
-          <div class="panel-heading fleet-toolbar">
+        <!-- ════ TAB 6: PROVIDERS / CONFIGURATION ═════════════════════════ -->
+        <div id="config-view" class="tab-content" hidden>
+          <div class="page-header">
             <div>
-              <p class="eyebrow">Runtime Architecture & Adapters</p>
-              <h2>Provider & Control Plane Yapılandırması</h2>
+              <h2>Sağlayıcı Yapılandırması</h2>
+              <p>Runtime mimarisi, adaptörler ve provider seçimleri.</p>
             </div>
             <span id="config-mutation-badge" class="read-only-badge">Salt Okunur (Read-Only)</span>
           </div>
 
           <div class="config-safety-notice">
-            ℹ️ <strong>Gelecek Çalıştırmalar Uyarısı:</strong> Sağlayıcı seçimlerinin değiştirilmesi yalnızca GELECEKTEKİ runlar için geçerlidir. Aktif ve geçmiş runlar kendi sabitlenmiş (pinned) konfigürasyonlarını korur.
+            ℹ️ <strong>Gelecek Çalıştırmalar Uyarısı:</strong> Sağlayıcı seçimlerinin değiştirilmesi yalnızca GELECEKTEKİ runlar için geçerlidir.
           </div>
 
           <div class="config-providers-grid">
-            <!-- WorkSourceProvider Card -->
+            <!-- WorkSourceProvider -->
             <div class="config-card">
               <div class="config-card-header">
                 <h3>WorkSourceProvider</h3>
                 <span id="cfg-ws-selected" class="badge badge-key">—</span>
               </div>
-              <p class="config-card-desc">İş kaynakları ve görev kuyruğu entegrasyonu (Jira, GitHub Issues, Local).</p>
+              <p class="config-card-desc">İş kaynakları ve görev kuyruğu entegrasyonu.</p>
               <div id="cfg-ws-list" class="config-options-list"></div>
             </div>
 
-            <!-- OrchestratorProvider Card -->
+            <!-- OrchestratorProvider -->
             <div class="config-card">
               <div class="config-card-header">
                 <h3>OrchestratorProvider</h3>
                 <span id="cfg-orch-selected" class="badge badge-key">—</span>
               </div>
-              <p class="config-card-desc">Görev yönlendirme, risk değerlendirme ve planlama sağlayıcısı.</p>
+              <p class="config-card-desc">Görev yönlendirme, risk değerlendirme ve planlama.</p>
               <div id="cfg-orch-list" class="config-options-list"></div>
             </div>
 
-            <!-- ExecutorProvider Card -->
+            <!-- ExecutorProvider -->
             <div class="config-card">
               <div class="config-card-header">
                 <h3>ExecutorProvider</h3>
                 <span id="cfg-exec-selected" class="badge badge-key">—</span>
               </div>
-              <p class="config-card-desc">Kod yazma ve reviewer süreçlerini çalıştıran yürütücü motoru.</p>
+              <p class="config-card-desc">Kod yazma ve reviewer süreçlerini çalıştıran motor.</p>
               <div id="cfg-exec-list" class="config-options-list"></div>
             </div>
 
-            <!-- CodeIntelligenceProvider Card -->
+            <!-- CodeIntelligenceProvider -->
             <div class="config-card">
               <div class="config-card-header">
                 <h3>CodeIntelligenceProvider</h3>
                 <span id="cfg-ci-selected" class="badge badge-key">—</span>
               </div>
-              <p class="config-card-desc">Semantik kod zekası, indexleme ve etki analiz motoru.</p>
+              <p class="config-card-desc">Semantik kod zekası ve etki analiz motoru.</p>
               <div id="cfg-ci-list" class="config-options-list"></div>
             </div>
 
-            <!-- SourceControlProvider Card -->
+            <!-- SourceControlProvider -->
             <div class="config-card">
               <div class="config-card-header">
                 <h3>SourceControlProvider</h3>
                 <span id="cfg-sc-selected" class="badge badge-key">—</span>
               </div>
-              <p class="config-card-desc">Git worktree ve entegrasyon branch sağlayıcısı (Local Git).</p>
+              <p class="config-card-desc">Git worktree ve entegrasyon branch sağlayıcısı.</p>
               <div id="cfg-sc-list" class="config-options-list"></div>
             </div>
           </div>
-        </section>
-      </div>
-    </main>
+        </div>
 
-    <!-- IN-PAGE MODALS & DRAWERS -->
+      </main>
+    </div><!-- .app-shell -->
+
+    <!-- ═══ IN-PAGE MODALS & DRAWERS ══════════════════════════════════════ -->
 
     <!-- Work Item Decision Trace Drawer -->
     <div id="decision-trace-modal" class="trace-modal-backdrop" hidden>
@@ -623,11 +607,11 @@
       </div>
     </div>
 
-    <!-- In-Page Approval Confirmation Modal -->
+    <!-- Approval Confirmation Modal -->
     <div id="approval-modal" class="trace-modal-backdrop" hidden>
       <div class="inpage-modal" role="dialog" aria-modal="true" aria-labelledby="approval-modal-title">
         <div class="modal-header">
-          <h3 id="approval-modal-title">🛡️ Yürütme Onayı (Execution Approval)</h3>
+          <h3 id="approval-modal-title">Yürütme Onayı</h3>
           <button id="approval-modal-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
         </div>
         <div class="modal-body">
@@ -653,11 +637,11 @@
       </div>
     </div>
 
-    <!-- In-Page Rejection Confirmation Modal -->
+    <!-- Rejection Confirmation Modal -->
     <div id="rejection-modal" class="trace-modal-backdrop" hidden>
       <div class="inpage-modal" role="dialog" aria-modal="true" aria-labelledby="rejection-modal-title">
         <div class="modal-header">
-          <h3 id="rejection-modal-title">✕ Talebi Reddet (Reject Approval)</h3>
+          <h3 id="rejection-modal-title">Talebi Reddet</h3>
           <button id="rejection-modal-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
         </div>
         <div class="modal-body">
@@ -675,7 +659,37 @@
       </div>
     </div>
 
-    <!-- In-Page Agent Version History Drawer -->
+    <!-- Agent Detail Drawer -->
+    <div id="agent-detail-drawer" class="trace-modal-backdrop" hidden>
+      <div class="trace-drawer" role="dialog" aria-modal="true" aria-labelledby="agent-detail-title">
+        <div class="trace-header">
+          <div>
+            <span id="agent-detail-pill" class="badge badge-key">—</span>
+            <h2 id="agent-detail-title">Agent Detayı</h2>
+            <p id="agent-detail-summary" class="trace-summary-text">—</p>
+          </div>
+          <button id="agent-detail-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
+        </div>
+        <div id="agent-detail-body" class="trace-body"></div>
+      </div>
+    </div>
+
+    <!-- Provider Detail Drawer -->
+    <div id="provider-detail-drawer" class="trace-modal-backdrop" hidden>
+      <div class="trace-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-detail-title">
+        <div class="trace-header">
+          <div>
+            <span id="provider-detail-pill" class="badge badge-key">—</span>
+            <h2 id="provider-detail-title">Sağlayıcı Detayı</h2>
+            <p id="provider-detail-summary" class="trace-summary-text">—</p>
+          </div>
+          <button id="provider-detail-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
+        </div>
+        <div id="provider-detail-body" class="trace-body"></div>
+      </div>
+    </div>
+
+    <!-- Agent Version History Drawer -->
     <div id="agent-versions-drawer" class="trace-modal-backdrop" hidden>
       <div class="trace-drawer" role="dialog" aria-modal="true" aria-labelledby="agent-ver-title">
         <div class="trace-header">
@@ -690,21 +704,21 @@
       </div>
     </div>
 
-    <!-- In-Page Agent Edit Modal (Save as new version) -->
+    <!-- Agent Edit Modal -->
     <div id="agent-edit-modal" class="trace-modal-backdrop" hidden>
       <div class="inpage-modal" role="dialog" aria-modal="true" aria-labelledby="agent-edit-title">
         <div class="modal-header">
-          <h3 id="agent-edit-title">✏️ Agent Güncelle (Yeni Versiyon Olarak Kaydet)</h3>
+          <h3 id="agent-edit-title">Agent Güncelle (Yeni Versiyon)</h3>
           <button id="agent-edit-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
         </div>
         <div class="modal-body">
           <p class="modal-desc">
-            ⚠️ <strong>İmmutable Kuralı:</strong> Bu formu kaydetmek yeni bir immutable versiyon (v+1) oluşturur. Geçmiş ve aktif runlar değişmez.
+            ⚠️ <strong>İmmutable Kuralı:</strong> Bu formu kaydetmek yeni bir immutable versiyon (v+1) oluşturur.
           </p>
           <form id="agent-edit-form" class="agent-modal-form">
             <input type="hidden" id="edit-agent-id" />
             <div class="form-group">
-              <label for="edit-agent-name">Görünen İsim (Display Name):</label>
+              <label for="edit-agent-name">Görünen İsim:</label>
               <input type="text" id="edit-agent-name" class="form-input" required />
             </div>
             <div class="form-group">
@@ -718,11 +732,11 @@
               </select>
             </div>
             <div class="form-group">
-              <label for="edit-agent-skills">Skills (Virgülle ayrılmış):</label>
-              <input type="text" id="edit-agent-skills" class="form-input" placeholder="api-design, backend-testing, minimal-change" />
+              <label for="edit-agent-skills">Skills (virgülle ayrılmış):</label>
+              <input type="text" id="edit-agent-skills" class="form-input" placeholder="api-design, backend-testing" />
             </div>
             <div class="form-group">
-              <label for="edit-agent-paths">Allowed Paths (Virgülle ayrılmış):</label>
+              <label for="edit-agent-paths">Allowed Paths (virgülle ayrılmış):</label>
               <input type="text" id="edit-agent-paths" class="form-input" placeholder="backend/**, src/**" />
             </div>
             <div class="form-group">
@@ -734,7 +748,7 @@
               </select>
             </div>
             <div class="form-group">
-              <label for="edit-agent-max-concurrency">Maksimum Concurrency:</label>
+              <label for="edit-agent-max-concurrency">Maks. Concurrency:</label>
               <input type="number" id="edit-agent-max-concurrency" class="form-input" min="1" max="10" value="2" />
             </div>
             <div id="agent-edit-status" class="modal-status-msg" hidden></div>
@@ -742,16 +756,16 @@
         </div>
         <div class="modal-footer">
           <button id="agent-edit-cancel-btn" class="pm-btn pm-btn-view">İptal</button>
-          <button id="agent-edit-submit-btn" class="pm-btn pm-btn-approve">💾 Yeni Versiyon Olarak Kaydet</button>
+          <button id="agent-edit-submit-btn" class="pm-btn pm-btn-approve">Yeni Versiyon Kaydet</button>
         </div>
       </div>
     </div>
 
-    <!-- In-Page Agent Create Modal -->
+    <!-- Agent Create Modal -->
     <div id="agent-create-modal" class="trace-modal-backdrop" hidden>
       <div class="inpage-modal" role="dialog" aria-modal="true" aria-labelledby="agent-create-title">
         <div class="modal-header">
-          <h3 id="agent-create-title">🤖 Yeni Agent Tanımla (Registry)</h3>
+          <h3 id="agent-create-title">Yeni Agent Tanımla</h3>
           <button id="agent-create-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
         </div>
         <div class="modal-body">
@@ -761,7 +775,7 @@
               <input type="text" id="create-agent-id" class="form-input" placeholder="custom-backend-engineer" required />
             </div>
             <div class="form-group">
-              <label for="create-agent-name">Görünen İsim (Display Name):</label>
+              <label for="create-agent-name">Görünen İsim:</label>
               <input type="text" id="create-agent-name" class="form-input" placeholder="Custom Backend Engineer" required />
             </div>
             <div class="form-group">
@@ -775,11 +789,11 @@
               </select>
             </div>
             <div class="form-group">
-              <label for="create-agent-skills">Skills (Virgülle ayrılmış):</label>
-              <input type="text" id="create-agent-skills" class="form-input" placeholder="api-design, backend-testing, minimal-change" />
+              <label for="create-agent-skills">Skills (virgülle ayrılmış):</label>
+              <input type="text" id="create-agent-skills" class="form-input" placeholder="api-design, backend-testing" />
             </div>
             <div class="form-group">
-              <label for="create-agent-paths">Allowed Paths (Virgülle ayrılmış):</label>
+              <label for="create-agent-paths">Allowed Paths (virgülle ayrılmış):</label>
               <input type="text" id="create-agent-paths" class="form-input" placeholder="backend/**, lib/**" />
             </div>
             <div class="form-group">
@@ -791,7 +805,7 @@
               </select>
             </div>
             <div class="form-group">
-              <label for="create-agent-max-concurrency">Maksimum Concurrency:</label>
+              <label for="create-agent-max-concurrency">Maks. Concurrency:</label>
               <input type="number" id="create-agent-max-concurrency" class="form-input" min="1" max="10" value="2" />
             </div>
             <div id="agent-create-status" class="modal-status-msg" hidden></div>
@@ -804,8 +818,8 @@
       </div>
     </div>
 
-    <footer class="page-footer">
-      <span>Agent Scaffold · Local Operations Console (Phase I)</span>
+    <footer class="page-footer" style="display:none;">
+      <span>Agent Scaffold · Local Operations Console</span>
       <span>Prompts ve Jira açıklamaları bu ekranda ham olarak gösterilmez.</span>
     </footer>
   </body>

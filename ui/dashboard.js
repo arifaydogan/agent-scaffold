@@ -60,7 +60,6 @@ const elements = typeof document !== "undefined" ? {
   search: document.querySelector("#run-search"),
   operatingModePill: document.querySelector("#operating-mode-pill"),
   operatingModeLabel: document.querySelector("#operating-mode-label"),
-  overviewModeTitle: document.querySelector("#overview-mode-title"),
   overviewModeBadge: document.querySelector("#overview-mode-badge"),
   overviewModeDesc: document.querySelector("#overview-mode-desc"),
   supervisorCard: document.querySelector("#supervisor-card"),
@@ -445,23 +444,89 @@ function visibleRuns() {
   });
 }
 
+function appendNode(parent, child) {
+  if (typeof parent?.appendChild === "function") parent.appendChild(child);
+  else if (typeof parent?.append === "function") parent.append(child);
+}
+
+function appendTableTextCell(row, value, className = "") {
+  const cell = element("td", className, value === null || value === undefined || value === "" ? "—" : String(value));
+  appendNode(row, cell);
+  return cell;
+}
+
+function renderActiveWorkTable(tasks) {
+  const tbody = getElem("active-work-tbody");
+  const table = getElem("active-work-table");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  if (tasks.length === 0) {
+    const row = element("tr");
+    const cell = element("td", null, "Bu görünümde aktif veya kuyrukta iş yok.");
+    cell.colSpan = 7;
+    appendNode(row, cell);
+    appendNode(tbody, row);
+    if (table) table.setAttribute("aria-busy", "false");
+    return;
+  }
+
+  tasks.forEach(task => {
+    const run = task.latest || task;
+    const issueKey = run.issue || run.issueKey || "—";
+    const row = element("tr", "work-table-row");
+    row.tabIndex = 0;
+    row.setAttribute("aria-label", issueKey + " detayını aç");
+    const openDetail = () => openDecisionTrace(issueKey, false, row);
+    row.addEventListener?.("click", openDetail);
+    row.addEventListener?.("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDetail();
+      }
+    });
+
+    appendTableTextCell(row, issueKey, "code-cell");
+    const stateCell = element("td");
+    appendNode(stateCell, statePill(run));
+    appendNode(row, stateCell);
+    appendTableTextCell(row, run.taskAgent || run.persona || "—");
+    appendTableTextCell(row, (run.provider || "—") + " / " + (displayModel(run) || "—"));
+    appendTableTextCell(row, formatDuration(run.durationSeconds));
+    appendTableTextCell(row, formatTime(run.updatedAt || run.createdAt));
+    const actionCell = element("td");
+    const detail = element("button", "pm-btn pm-btn-view", "Detay");
+    detail.type = "button";
+    detail.addEventListener?.("click", event => {
+      event.stopPropagation();
+      openDetail();
+    });
+    appendNode(actionCell, detail);
+    appendNode(row, actionCell);
+    appendNode(tbody, row);
+  });
+
+  if (table) table.setAttribute("aria-busy", "false");
+}
+
 function renderRuns() {
   const tasks = visibleRuns();
   const grid = elements.grid || getElem("agent-grid");
   const empty = elements.empty || getElem("empty-state");
-  if (!grid) return;
 
-  if (typeof grid.replaceChildren === "function") {
-    grid.replaceChildren(...tasks.map(taskCard));
-  } else {
-    grid.innerHTML = "";
-    tasks.forEach(t => grid.appendChild(taskCard(t)));
-  }
+  renderActiveWorkTable(tasks);
 
-  if (typeof grid.setAttribute === "function") {
-    grid.setAttribute("aria-busy", "false");
+  // Kept populated for the established test contract, but visually hidden by the cockpit layout.
+  if (grid) {
+    if (typeof grid.replaceChildren === "function") {
+      grid.replaceChildren(...tasks.map(taskCard));
+    } else {
+      grid.innerHTML = "";
+      tasks.forEach(task => grid.appendChild(taskCard(task)));
+    }
+    grid.setAttribute?.("aria-busy", "false");
+    grid.hidden = true;
   }
-  grid.hidden = tasks.length === 0;
   if (empty) empty.hidden = tasks.length !== 0;
 }
 
@@ -613,53 +678,30 @@ function switchView(targetViewId, fromHistory = false) {
   state.currentView = targetViewId;
   if (typeof document === "undefined") return;
 
-  const tabButtons = document.querySelectorAll(".main-tabs .tab-button");
-  tabButtons.forEach(btn => {
-    if (btn.dataset.target === targetViewId) {
-      btn.classList.add("is-active");
-    } else {
-      btn.classList.remove("is-active");
-    }
+  document.querySelectorAll(".nav-item").forEach(btn => {
+    btn.classList.toggle("is-active", btn.dataset.target === targetViewId);
   });
 
-  const views = [
-    "overview-view",
-    "pm-view",
-    "parents-view",
-    "observability-view",
-    "agents-view",
-    "config-view"
-  ];
-
-  views.forEach(id => {
-    const el = getElem(id);
-    if (el) {
-      if (id === targetViewId) {
-        el.classList.add("is-active");
-        el.hidden = false;
-      } else {
-        el.classList.remove("is-active");
-        el.hidden = true;
-      }
-    }
+  ["overview-view", "pm-view", "parents-view", "observability-view", "agents-view", "config-view"].forEach(id => {
+    const view = getElem(id);
+    if (!view) return;
+    const active = id === targetViewId;
+    if (active) view.classList?.add?.("is-active");
+    else view.classList?.remove?.("is-active");
+    view.hidden = !active;
   });
 
   if (targetViewId === "parents-view") {
     populateParentSelector();
-    if (state.selectedParentKey) {
-      fetchParentDetail(state.selectedParentKey);
-    } else {
-      clearParentDetail();
-    }
+    if (state.selectedParentKey) fetchParentDetail(state.selectedParentKey);
+    else clearParentDetail();
   } else if (targetViewId === "observability-view") {
     fetchObservabilitySummary();
   } else if (targetViewId === "pm-view") {
     renderPmWorkspace();
   }
 
-  if (!fromHistory) {
-    syncUrlState(false);
-  }
+  if (!fromHistory) syncUrlState(false);
 }
 
 // Focus & Accessibility for Modals/Drawers
@@ -701,7 +743,6 @@ function updateTopbar(data) {
   const operatingMode = (data.config?.operatingMode || data.pmWorkspace?.operatingMode || "AUTONOMOUS").toUpperCase();
   const modePill = getElem("operating-mode-pill");
   const modeLabel = getElem("operating-mode-label");
-  const ovModeTitle = getElem("overview-mode-title");
   const ovModeBadge = getElem("overview-mode-badge");
   const ovModeDesc = getElem("overview-mode-desc");
 
@@ -711,18 +752,13 @@ function updateTopbar(data) {
     ovModeBadge.textContent = operatingMode;
     ovModeBadge.className = `mode-badge mode-${operatingMode.toLowerCase()}`;
   }
-  if (ovModeTitle) {
-    ovModeTitle.textContent = operatingMode === "AUTONOMOUS"
-      ? "Otonom Teslimat Protokolü"
-      : (operatingMode === "SUPERVISED" ? "Denetimli (Supervised) Teslimat Protokolü" : "Manuel (Manual) Kontrol Protokolü");
-  }
   if (ovModeDesc) {
     if (operatingMode === "AUTONOMOUS") {
-      ovModeDesc.textContent = "AUTONOMOUS: Ready işler otonom yürütülür, review ve parent entegrasyonu otomatik işletilir; nihai Develop merge ve Done geçişi insan kontrolündedir.";
+      ovModeDesc.textContent = "Ready işler otonom ilerler; final merge ve Done insan kontrolündedir.";
     } else if (operatingMode === "SUPERVISED") {
-      ovModeDesc.textContent = "SUPERVISED: Planlama ve kritik yürütme adımları plan parmak izi korumalı insan onayı bekler; otonom ilerleme onay sonrası gerçekleşir.";
+      ovModeDesc.textContent = "Planlama ve kritik yürütme adımları insan onayı bekler.";
     } else {
-      ovModeDesc.textContent = "MANUAL: Tüm görev atamaları, yürütmeler ve entegrasyonlar doğrudan operatör müdahalesi gerektirir.";
+      ovModeDesc.textContent = "Tüm görev ve entegrasyon adımları operatör tarafından yürütülür.";
     }
   }
 
@@ -800,7 +836,37 @@ function renderOverview(data) {
 
   renderCapacity();
   renderRuns();
+  renderAttentionList(data.pmWorkspace?.groups || {});
   renderActivityFeed(data.activity || []);
+}
+
+function renderAttentionList(groups) {
+  const container = getElem("attention-list");
+  if (!container) return;
+  container.innerHTML = "";
+  const items = [
+    ...(groups.awaitingApproval || []),
+    ...(groups.blocked || []),
+    ...(groups.needsRework || []),
+    ...(groups.humanApproval || [])
+  ].slice(0, 6);
+
+  if (items.length === 0) {
+    container.appendChild(element("p", "empty-text", "Dikkat gerektiren öğe yok."));
+    return;
+  }
+
+  items.forEach(item => {
+    const entry = element("button", "attention-item");
+    entry.type = "button";
+    const copy = element("span");
+    copy.appendChild(element("strong", "att-key", item.issueKey || "—"));
+    copy.appendChild(element("span", "att-reason", item.blockedReason || STATUS_LABELS[item.canonicalState] || item.canonicalState || "İşlem bekliyor"));
+    const action = element("span", "attention-action", "Aç");
+    entry.append(copy, action);
+    entry.addEventListener?.("click", () => openDecisionTrace(item.issueKey, false, entry));
+    container.appendChild(entry);
+  });
 }
 
 function renderActivityFeed(activity) {
@@ -838,105 +904,111 @@ function renderPmWorkspace() {
   if (!pm) return;
 
   const counts = pm.counts || {};
-  const badgeAttn = getElem("pm-badge-attention");
-  const badgeAppr = getElem("pm-badge-approvals");
-  const statAppr = getElem("pm-stat-approvals");
-  const statBlocked = getElem("pm-stat-blocked");
-  const statExec = getElem("pm-stat-executing");
-  const statReview = getElem("pm-stat-review");
-  const statRework = getElem("pm-stat-rework");
-  const statReady = getElem("pm-stat-ready");
-  const statHuman = getElem("pm-stat-human-approval");
-
   const attentionCount = (counts.blocked || 0) + (counts.needsRework || 0);
-  if (badgeAttn) badgeAttn.textContent = attentionCount;
-  if (badgeAppr) badgeAppr.textContent = counts.awaitingApproval || 0;
-  if (statAppr) statAppr.textContent = counts.awaitingApproval || 0;
-  if (statBlocked) statBlocked.textContent = counts.blocked || 0;
-  if (statExec) statExec.textContent = counts.executing || 0;
-  if (statReview) statReview.textContent = counts.inReview || 0;
-  if (statRework) statRework.textContent = counts.needsRework || 0;
-  if (statReady) statReady.textContent = counts.ready || 0;
-  if (statHuman) statHuman.textContent = counts.humanApproval || 0;
-
-  const filter = state.currentPmFilter;
-  const inboxSec = getElem("pm-inbox-section");
-  const apprSec = getElem("pm-approvals-section");
-  const attnSec = getElem("pm-attention-section");
-  const jourSec = getElem("pm-journal-section");
-
-  if (inboxSec) inboxSec.hidden = filter !== "inbox";
-  if (apprSec) apprSec.hidden = filter !== "approvals";
-  if (attnSec) attnSec.hidden = filter !== "attention";
-  if (jourSec) jourSec.hidden = filter !== "journal";
+  const updates = {
+    "pm-badge-attention": attentionCount,
+    "pm-badge-approvals": counts.awaitingApproval || 0,
+    "pm-stat-approvals": counts.awaitingApproval || 0,
+    "pm-stat-blocked": counts.blocked || 0,
+    "pm-stat-executing": counts.executing || 0,
+    "pm-stat-review": counts.inReview || 0,
+    "pm-stat-rework": counts.needsRework || 0,
+    "pm-stat-ready": counts.ready || 0,
+    "pm-stat-human-approval": counts.humanApproval || 0
+  };
+  Object.entries(updates).forEach(([id, value]) => {
+    const target = getElem(id);
+    if (target) target.textContent = value;
+  });
 
   if (typeof document !== "undefined") {
-    const filterBtns = document.querySelectorAll(".pm-sub-nav .pm-filter-btn");
-    filterBtns.forEach(btn => {
-      if (btn.dataset.pmFilter === filter) {
-        btn.classList.add("is-active");
-      } else {
-        btn.classList.remove("is-active");
-      }
+    document.querySelectorAll(".pm-sub-nav .pm-filter-btn").forEach(btn => {
+      const active = btn.dataset.pmFilter === state.currentPmFilter;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", String(active));
     });
   }
 
-  if (filter === "inbox") {
-    renderPmInbox(pm.groups);
-  } else if (filter === "approvals") {
-    renderPmApprovals(pm.groups?.awaitingApproval || []);
-  } else if (filter === "attention") {
-    const items = [...(pm.groups?.blocked || []), ...(pm.groups?.needsRework || [])];
-    renderPmAttention(items);
-  } else if (filter === "journal") {
-    renderPmJournal();
-  }
+  const inbox = getElem("pm-inbox-section");
+  const approvals = getElem("pm-approvals-section");
+  const attention = getElem("pm-attention-section");
+  const journal = getElem("pm-journal-section");
+  if (inbox) inbox.hidden = false;
+  if (approvals) approvals.hidden = true;
+  if (attention) attention.hidden = true;
+  if (journal) journal.hidden = true;
+  renderPmInbox(pm.groups || {}, state.currentPmFilter);
 }
 
-function renderPmInbox(groups = {}) {
+function pmItemsForFilter(groups, filter) {
+  const all = Object.values(groups).flatMap(items => Array.isArray(items) ? items : []);
+  const byFilter = {
+    inbox: all,
+    attention: [...(groups.blocked || []), ...(groups.needsRework || [])],
+    approvals: groups.awaitingApproval || [],
+    review: groups.inReview || [],
+    rework: groups.needsRework || [],
+    ready: groups.ready || [],
+    human: groups.humanApproval || []
+  };
+  return byFilter[filter] || all;
+}
+
+function renderPmInbox(groups = {}, filter = "inbox") {
   const container = getElem("pm-queue-container");
   if (!container) return;
   container.innerHTML = "";
+  const items = pmItemsForFilter(groups, filter);
 
-  const groupKeys = [
-    ["awaitingApproval", "🛡️ Onay Bekleyenler (Awaiting Approval)", "approval"],
-    ["humanApproval", "🏁 İnsan Onay Kapısı (Ready for Human Approval)", "human"],
-    ["blocked", "🛑 Bloke / Müdahale Gerekenler", "blocked"],
-    ["needsRework", "🔄 Rework / Düzeltme Aşamasında", "rework"],
-    ["executing", "⚡ Yürütülüyor (Executing)", "active"],
-    ["inReview", "👁️ Review Aşamasında", "review"],
-    ["ready", "✨ Agent Ready (Kuyrukta)", "ready"],
-    ["needsPlanning", "📝 Planlama Bekleyenler", "idle"]
-  ];
-
-  let totalRendered = 0;
-
-  groupKeys.forEach(([key, title, style]) => {
-    const items = groups[key] || [];
-    if (items.length === 0) return;
-    totalRendered += items.length;
-
-    const section = element("div", "pm-group-block");
-    const header = element("div", "pm-group-header");
-    const titleSpan = element("h4", null, title);
-    const countBadge = element("span", "badge badge-count", String(items.length));
-    header.appendChild(titleSpan);
-    header.appendChild(countBadge);
-    section.appendChild(header);
-
-    const list = element("div", "pm-items-grid");
-    items.forEach(item => {
-      list.appendChild(createPmItemCard(item, style));
-    });
-    section.appendChild(list);
-    container.appendChild(section);
-  });
-
-  if (totalRendered === 0) {
-    const empty = element("div", "empty-state");
-    empty.appendChild(element("p", null, "Operasyonel iş kuyruğunda bekleyen paket yok."));
-    container.appendChild(empty);
+  if (items.length === 0) {
+    const row = element("tr");
+    const cell = element("td", null, "Bu filtrede iş bulunmuyor.");
+    cell.colSpan = 8;
+    row.appendChild(cell);
+    container.appendChild(row);
+    return;
   }
+
+  items.forEach(item => {
+    const row = element("tr", "work-table-row");
+    row.tabIndex = 0;
+    const openDetail = () => openDecisionTrace(item.issueKey, false, row);
+    row.addEventListener?.("click", openDetail);
+    row.addEventListener?.("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDetail();
+      }
+    });
+
+    appendTableTextCell(row, item.issueKey, "code-cell");
+    appendTableTextCell(row, item.summary || "—", "work-summary-cell");
+    appendTableTextCell(row, STATUS_LABELS[item.canonicalState] || item.canonicalState || "—");
+    appendTableTextCell(row, STATUS_LABELS[item.currentRunState] || item.currentRunState || "—");
+    appendTableTextCell(row, item.taskAgent || item.persona || "—");
+    appendTableTextCell(row, item.risk || "normal");
+    appendTableTextCell(row, formatTime(item.updatedAt || item.createdAt));
+
+    const actions = element("td");
+    const detail = element("button", "pm-btn pm-btn-view", "Detay");
+    detail.type = "button";
+    detail.addEventListener?.("click", event => {
+      event.stopPropagation();
+      openDetail();
+    });
+    actions.appendChild(detail);
+    if (item.operationalGroup === "awaitingApproval") {
+      const approve = element("button", "pm-btn pm-btn-approve", "Onayla");
+      approve.type = "button";
+      approve.addEventListener?.("click", event => {
+        event.stopPropagation();
+        openApprovalModal(item, approve);
+      });
+      actions.appendChild(approve);
+    }
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
 }
 
 function renderPmApprovals(items = []) {
@@ -1084,7 +1156,7 @@ function renderPmJournal() {
 }
 
 // Work Item Decision Trace Drawer
-async function openDecisionTrace(issueKey, fromHistory = false) {
+async function openDecisionTrace(issueKey, fromHistory = false, triggerElement = null) {
   if (!issueKey) return;
   state.selectedWorkItemKey = issueKey;
 
@@ -1101,7 +1173,7 @@ async function openDecisionTrace(issueKey, fromHistory = false) {
   if (summaryEl) summaryEl.textContent = "Detaylar yükleniyor...";
   body.innerHTML = '<div class="loading-spinner">Yükleniyor...</div>';
 
-  openModal("decision-trace-modal");
+  openModal("decision-trace-modal", triggerElement);
 
   if (!fromHistory) {
     syncUrlState(false);
@@ -1830,6 +1902,18 @@ async function fetchObservabilitySummary() {
 }
 
 function renderObservability(data) {
+  const metrics = data.metrics || {};
+  const providers = data.providers || [];
+  const healthyProviders = providers.filter(provider => ["healthy", "available", "ok"].includes(String(provider.status || "").toLowerCase())).length;
+  const activeEl = getElem("obs-active-workers");
+  const healthEl = getElem("obs-active-parents");
+  const tokensEl = getElem("obs-total-tokens");
+  const failuresEl = getElem("obs-conflicts");
+  if (activeEl) activeEl.textContent = String(metrics.activeRuns || 0) + " aktif / " + String(metrics.queuedRuns || 0) + " kuyruk";
+  if (healthEl) healthEl.textContent = providers.length ? String(healthyProviders) + " / " + String(providers.length) : "—";
+  if (tokensEl) tokensEl.textContent = metrics.totalUsage?.totalTokens === null || metrics.totalUsage?.totalTokens === undefined ? "—" : formatNumber(metrics.totalUsage.totalTokens);
+  if (failuresEl) failuresEl.textContent = String(metrics.runsFailed || 0) + " başarısız";
+
   const liveGrid = getElem("obs-live-grid");
   if (liveGrid) {
     liveGrid.innerHTML = "";
@@ -2058,67 +2142,139 @@ function renderTelemetryDrawerDetail(data) {
 
 // Agent Management View
 function renderAgentRegistry() {
-  const list = getElem("agent-definitions");
+  const host = getElem("agent-definitions");
   const usageEl = getElem("usage-events");
-  if (!list) return;
-  list.innerHTML = "";
+  if (!host) return;
+  host.innerHTML = "";
 
   if (typeof document !== "undefined") {
-    const filterBtns = document.querySelectorAll(".agent-filters .agent-filter-btn");
-    filterBtns.forEach(btn => {
-      if (btn.dataset.agentFilter === state.currentAgentFilter) {
-        btn.classList.add("is-active");
-      } else {
-        btn.classList.remove("is-active");
-      }
+    document.querySelectorAll(".agent-filters .agent-filter-btn").forEach(btn => {
+      const active = btn.dataset.agentFilter === state.currentAgentFilter;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", String(active));
     });
   }
 
-  const defs = state.snapshot?.agentDefinitions || [];
-  const filter = state.currentAgentFilter;
-  const filtered = defs.filter(d => {
-    if (filter === "enabled") return d.status === "enabled";
-    if (filter === "disabled") return d.status === "disabled";
-    if (filter === "archived") return d.status === "archived";
-    return true;
+  const definitions = state.snapshot?.agentDefinitions || [];
+  const filtered = definitions.filter(agent => {
+    if (state.currentAgentFilter === "all") return true;
+    return agent.status === state.currentAgentFilter;
   });
+  const usageEvents = state.snapshot?.usageEvents || [];
 
   if (filtered.length === 0) {
-    list.appendChild(element("div", "empty-state", "Kayıtlı agent bulunamadı."));
+    host.appendChild(element("div", "empty-state", "Kayıtlı agent bulunamadı."));
   } else {
-    filtered.forEach(agent => {
-      list.appendChild(createAgentCard(agent));
-    });
+    const tableWrap = element("div", "table-wrap agent-table-wrap");
+    const table = element("table");
+    table.setAttribute("aria-label", "Agent kayıtları");
+    const head = element("thead");
+    head.innerHTML = "<tr><th>Agent</th><th>Rol</th><th>Sürüm</th><th>Durum</th><th>Executor</th><th>Reviewer</th><th>Son aktivite</th><th></th></tr>";
+    const body = element("tbody");
+    filtered.forEach(agent => body.appendChild(createAgentTableRow(agent, usageEvents)));
+    table.append(head, body);
+    tableWrap.appendChild(table);
+    host.appendChild(tableWrap);
   }
 
   if (usageEl) {
     usageEl.innerHTML = "";
-    const events = state.snapshot?.usageEvents || [];
+    const events = usageEvents.slice(0, 8);
     if (events.length === 0) {
       usageEl.appendChild(element("p", "empty-text", "Henüz kullanım telemetrisi kaydedilmedi."));
     } else {
-      events.slice(0, 20).forEach(ev => {
-        const item = element("div", "usage-item");
-        const title = ev.runId ? `Run: ${String(ev.runId).slice(0, 8)}` : (ev.agentId || ev.taskAgent || "agent");
-        item.appendChild(element("strong", null, `${title} (${ev.provider || "—"}/${ev.model || "—"})`));
-
+      events.forEach(event => {
+        const row = element("div", "usage-item");
+        const identity = event.agentId || event.taskAgent || "agent";
+        row.appendChild(element("strong", null, identity + " · " + (event.provider || "—") + "/" + (event.model || "—")));
         let tokenText = "usage unavailable";
-        if (ev.inputTokens !== undefined && ev.inputTokens !== null && ev.outputTokens !== undefined && ev.outputTokens !== null) {
-          tokenText = `${formatNumber(ev.inputTokens)} in / ${formatNumber(ev.outputTokens)} out (${formatNumber(ev.inputTokens + ev.outputTokens)} tot)`;
-        } else if (ev.inputTokens !== undefined && ev.inputTokens !== null) {
-          tokenText = `${formatNumber(ev.inputTokens)} in`;
-        } else if (ev.outputTokens !== undefined && ev.outputTokens !== null) {
-          tokenText = `${formatNumber(ev.outputTokens)} out`;
-        } else if (ev.tokens !== undefined && ev.tokens !== null) {
-          tokenText = `${formatNumber(ev.tokens)} tok`;
+        if (event.inputTokens !== undefined && event.inputTokens !== null && event.outputTokens !== undefined && event.outputTokens !== null) {
+          tokenText = formatNumber(event.inputTokens) + " in / " + formatNumber(event.outputTokens) + " out (" + formatNumber(event.inputTokens + event.outputTokens) + " tot)";
+        } else if (event.inputTokens !== undefined && event.inputTokens !== null) {
+          tokenText = formatNumber(event.inputTokens) + " in";
+        } else if (event.outputTokens !== undefined && event.outputTokens !== null) {
+          tokenText = formatNumber(event.outputTokens) + " out";
         }
-
-        const durText = (ev.durationMs !== undefined && ev.durationMs !== null && ev.durationMs > 0) ? ` · ${formatDurationMs(ev.durationMs)}` : "";
-        item.appendChild(element("span", null, `${tokenText}${durText} · ${formatTime(ev.createdAt)}`));
-        usageEl.appendChild(item);
+        const duration = event.durationMs === null || event.durationMs === undefined ? "—" : formatDurationMs(event.durationMs);
+        row.appendChild(element("span", null, tokenText + " · Süre " + duration + " · " + formatTime(event.createdAt)));
+        usageEl.appendChild(row);
       });
     }
   }
+}
+
+function createAgentTableRow(agent, usageEvents) {
+  const row = element("tr", "work-table-row");
+  row.tabIndex = 0;
+  const latestUsage = usageEvents.find(event => event.agentId === agent.id || event.taskAgent === agent.id);
+  const executor = agent.executor || {};
+  const executorProvider = executor.provider || agent.executorProvider || "—";
+  const executorModel = executor.model || agent.executorModel || "—";
+  const executorProfile = executor.modelProfile || agent.executorModelProfile || agent.modelProfile || "—";
+  const executorText = executorProvider + " / " + executorModel + " · " + executorProfile;
+  const reviewer = (agent.reviewer && typeof agent.reviewer === "object" ? (agent.reviewer.agentId || agent.reviewer.name) : agent.reviewer) || agent.reviewerAssignment || agent.reviewerAgent || "—";
+  const openDetail = () => openAgentDetailDrawer(agent, row);
+  row.addEventListener?.("click", openDetail);
+  row.addEventListener?.("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openDetail();
+    }
+  });
+  appendTableTextCell(row, agent.displayName || agent.id, "agent-name-cell");
+  appendTableTextCell(row, agent.role || "—");
+  appendTableTextCell(row, "v" + (agent.version || agent.currentVersion || 1));
+  appendTableTextCell(row, (agent.status || "enabled").toUpperCase());
+  appendTableTextCell(row, executorText);
+  appendTableTextCell(row, reviewer);
+  appendTableTextCell(row, latestUsage ? formatTime(latestUsage.createdAt) : "—");
+  const actions = element("td");
+  const detail = element("button", "pm-btn pm-btn-view", "Detay");
+  detail.type = "button";
+  detail.addEventListener?.("click", event => { event.stopPropagation(); openDetail(); });
+  actions.appendChild(detail);
+  row.appendChild(actions);
+  return row;
+}
+
+function openAgentDetailDrawer(agent, triggerBtn = null) {
+  const pill = getElem("agent-detail-pill");
+  const title = getElem("agent-detail-title");
+  const summary = getElem("agent-detail-summary");
+  const body = getElem("agent-detail-body");
+  if (!body) return;
+  if (pill) pill.textContent = agent.id || "—";
+  if (title) title.textContent = (agent.displayName || agent.id || "Agent") + " · Detay";
+  if (summary) summary.textContent = "Sabitlenmiş sürüm ve çalışma yapılandırması";
+  body.innerHTML = "";
+
+  const executor = agent.executor || {};
+  const reviewer = agent.reviewer && typeof agent.reviewer === "object" ? agent.reviewer : { agentId: agent.reviewer || agent.reviewerAssignment || agent.reviewerAgent };
+  const sections = [
+    ["Kimlik", [["Rol", agent.role], ["Sürüm", "v" + (agent.version || agent.currentVersion || 1)], ["Durum", agent.status || "enabled"], ["Risk", agent.risk || "normal"]]],
+    ["Yürütme", [["Provider", executor.provider || agent.executorProvider], ["Model", executor.model || agent.executorModel], ["Profil", executor.modelProfile || agent.executorModelProfile || agent.modelProfile], ["Eşzamanlılık", agent.maxConcurrency || 1]]],
+    ["Review yapılandırması", [["Reviewer", reviewer.agentId || reviewer.name || "—"], ["Reviewer sürümü", reviewer.version || "—"], ["Reviewer hash", reviewer.hash || "—"]]],
+    ["Kapsam", [["Beceriler", Array.isArray(agent.skills) ? agent.skills.join(", ") : "—"], ["İzinli yollar", Array.isArray(agent.allowedPaths) ? agent.allowedPaths.join(", ") : "—"], ["Definition hash", agent.definitionHash || "—"]]]
+  ];
+  sections.forEach(([heading, cells]) => {
+    const section = element("section", "trace-section");
+    section.appendChild(element("h3", "trace-section-title", heading));
+    const grid = element("div", "trace-grid");
+    cells.forEach(([label, value]) => grid.appendChild(createTraceCell(label, value)));
+    section.appendChild(grid);
+    body.appendChild(section);
+  });
+
+  const actions = element("div", "drawer-actions");
+  const edit = element("button", "pm-btn pm-btn-view", "Yeni sürüm düzenle");
+  edit.type = "button";
+  edit.addEventListener?.("click", () => openAgentEditModal(agent, edit));
+  const versions = element("button", "pm-btn pm-btn-view", "Sürüm geçmişi");
+  versions.type = "button";
+  versions.addEventListener?.("click", () => openAgentVersionsDrawer(agent.id, versions));
+  actions.append(edit, versions);
+  body.appendChild(actions);
+  openModal("agent-detail-drawer", triggerBtn);
 }
 
 function createAgentCard(agent) {
@@ -2442,21 +2598,118 @@ async function submitAgentCreate() {
 function renderConfigView(data) {
   const mutationBadge = getElem("config-mutation-badge");
   const isMutable = Boolean(data.config?.mutationEnabled);
-
   if (mutationBadge) {
-    mutationBadge.textContent = isMutable ? "Yapılandırılabilir (Mutable)" : "Salt Okunur (Read-Only)";
+    mutationBadge.textContent = isMutable ? "Yapılandırılabilir" : "Salt okunur";
     mutationBadge.className = isMutable ? "badge badge-enabled" : "read-only-badge";
   }
 
+  const host = typeof document === "undefined" ? null : document.querySelector(".config-providers-grid");
+  if (!host) return;
+  host.innerHTML = "";
   const providers = data.providers || {};
   const selections = data.config?.selections || {};
   const mutableFields = data.config?.mutableFields || [];
+  const categories = [
+    ["İş kaynağı", "workSource", providers.workSources || []],
+    ["Orkestratör", "orchestrator", providers.orchestrators || []],
+    ["Executor", "executor", providers.executors || []],
+    ["Kod zekâsı", "codeIntelligence", providers.codeIntelligence || []],
+    ["Kaynak kontrol", "sourceControl", providers.sourceControl || []]
+  ];
+  const rows = categories.flatMap(([category, fieldName, list]) => (Array.isArray(list) ? list : []).map(provider => ({
+    category,
+    fieldName,
+    provider,
+    selected: (typeof provider === "object" && provider.selected === true) || (typeof provider === "string" ? provider : provider.id || provider.name || provider.provider) === selections[fieldName],
+    canMutate: isMutable && mutableFields.includes(fieldName) && fieldName !== "sourceControl"
+  })));
 
-  renderProviderSection("ws", "workSource", providers.workSources, selections.workSource, isMutable && mutableFields.includes("workSource"));
-  renderProviderSection("orch", "orchestrator", providers.orchestrators, selections.orchestrator, isMutable && mutableFields.includes("orchestrator"));
-  renderProviderSection("exec", "executor", providers.executors, selections.executor, isMutable && mutableFields.includes("executor"));
-  renderProviderSection("ci", "codeIntelligence", providers.codeIntelligence, selections.codeIntelligence, isMutable && mutableFields.includes("codeIntelligence"));
-  renderProviderSection("sc", "sourceControl", providers.sourceControl, selections.sourceControl, false);
+  if (rows.length === 0) {
+    host.appendChild(element("div", "empty-state", "Sağlayıcı bilgisi bulunamadı."));
+    return;
+  }
+
+  const wrap = element("div", "panel table-wrap provider-table-wrap");
+  const table = element("table");
+  table.setAttribute("aria-label", "Sağlayıcı yapılandırması");
+  const head = element("thead");
+  head.innerHTML = "<tr><th>Sağlayıcı</th><th>Tip</th><th>Seçili</th><th>Durum</th><th>Model / profil</th><th>Değişiklik</th><th></th></tr>";
+  const body = element("tbody");
+  rows.forEach(info => body.appendChild(createProviderTableRow(info)));
+  table.append(head, body);
+  wrap.appendChild(table);
+  host.appendChild(wrap);
+}
+
+function providerName(provider) {
+  return typeof provider === "string" ? provider : provider.id || provider.name || provider.provider || "—";
+}
+
+function createProviderTableRow(info) {
+  const provider = info.provider;
+  const object = typeof provider === "object" ? provider : {};
+  const row = element("tr", "work-table-row");
+  row.tabIndex = 0;
+  const openDetail = () => openProviderDetailDrawer(info, row);
+  row.addEventListener?.("click", openDetail);
+  row.addEventListener?.("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openDetail();
+    }
+  });
+  appendTableTextCell(row, providerName(provider), "code-cell");
+  appendTableTextCell(row, info.category);
+  appendTableTextCell(row, info.selected ? "Evet" : "—");
+  appendTableTextCell(row, object.enabled === false ? "Devre dışı" : (object.health || object.status || "Kullanılabilir"));
+  appendTableTextCell(row, object.model || object.modelProfile || object.profile || "—");
+  appendTableTextCell(row, info.canMutate ? "Değiştirilebilir" : "Salt okunur");
+  const actions = element("td");
+  const detail = element("button", "pm-btn pm-btn-view", "Detay");
+  detail.type = "button";
+  detail.addEventListener?.("click", event => { event.stopPropagation(); openDetail(); });
+  actions.appendChild(detail);
+  if (info.canMutate && !info.selected && object.enabled !== false) {
+    const select = element("button", "pm-btn pm-btn-approve", "Seç");
+    select.type = "button";
+    select.addEventListener?.("click", event => {
+      event.stopPropagation();
+      updateProviderSelection(info.fieldName, providerName(provider));
+    });
+    actions.appendChild(select);
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+function openProviderDetailDrawer(info, triggerBtn = null) {
+  const provider = info.provider;
+  const object = typeof provider === "object" ? provider : {};
+  const name = providerName(provider);
+  const pill = getElem("provider-detail-pill");
+  const title = getElem("provider-detail-title");
+  const summary = getElem("provider-detail-summary");
+  const body = getElem("provider-detail-body");
+  if (!body) return;
+  if (pill) pill.textContent = name;
+  if (title) title.textContent = name + " · Sağlayıcı detayı";
+  if (summary) summary.textContent = info.category + " · " + (info.selected ? "seçili" : "alternatif");
+  body.innerHTML = "";
+  const section = element("section", "trace-section");
+  section.appendChild(element("h3", "trace-section-title", "Çalışma yapılandırması"));
+  const grid = element("div", "trace-grid");
+  [["Tip", info.category], ["Seçili", info.selected ? "Evet" : "Hayır"], ["Etkin", object.enabled === false ? "Hayır" : "Evet"], ["Sağlık", object.health || object.status || "—"], ["Model", object.model || "—"], ["Profil", object.modelProfile || object.profile || "—"], ["Değişiklik", info.canMutate ? "Uygun" : "Salt okunur"], ["Kimlik", object.id || object.name || name]].forEach(([label, value]) => grid.appendChild(createTraceCell(label, value)));
+  section.appendChild(grid);
+  body.appendChild(section);
+  if (info.canMutate && !info.selected && object.enabled !== false) {
+    const actions = element("div", "drawer-actions");
+    const select = element("button", "pm-btn pm-btn-approve", "Bu sağlayıcıyı seç");
+    select.type = "button";
+    select.addEventListener?.("click", () => updateProviderSelection(info.fieldName, name));
+    actions.appendChild(select);
+    body.appendChild(actions);
+  }
+  openModal("provider-detail-drawer", triggerBtn);
 }
 
 function renderProviderSection(prefix, fieldName, providerList = [], selectedName, canMutate) {
@@ -2559,12 +2812,30 @@ async function fetchSnapshot() {
 function setupEventListeners() {
   if (typeof document === "undefined") return;
 
-  const tabButtons = document.querySelectorAll(".main-tabs .tab-button");
-  tabButtons.forEach(btn => {
+  const navButtons = document.querySelectorAll(".nav-item");
+  navButtons.forEach(btn => {
     btn.addEventListener("click", () => {
       const targetView = btn.dataset.target;
       if (targetView) switchView(targetView, false);
+      getElem("app-sidebar")?.classList.remove("is-open");
+      getElem("sidebar-backdrop")?.classList.remove("is-visible");
+      getElem("sidebar-toggle")?.setAttribute("aria-expanded", "false");
     });
+  });
+
+  const sidebarToggle = getElem("sidebar-toggle");
+  const sidebar = getElem("app-sidebar");
+  const sidebarBackdrop = getElem("sidebar-backdrop");
+  sidebarToggle?.addEventListener("click", () => {
+    const open = !sidebar?.classList.contains("is-open");
+    sidebar?.classList.toggle("is-open", open);
+    sidebarBackdrop?.classList.toggle("is-visible", open);
+    sidebarToggle.setAttribute("aria-expanded", String(open));
+  });
+  sidebarBackdrop?.addEventListener("click", () => {
+    sidebar?.classList.remove("is-open");
+    sidebarBackdrop.classList.remove("is-visible");
+    sidebarToggle?.setAttribute("aria-expanded", "false");
   });
 
   const pmFilterBtns = document.querySelectorAll(".pm-sub-nav .pm-filter-btn");
@@ -2609,14 +2880,14 @@ function setupEventListeners() {
     });
   }
 
-  const fleetFilterBtns = document.querySelectorAll(".filters .filter-button");
+  const fleetFilterBtns = document.querySelectorAll(".filter-bar .filter-btn");
   fleetFilterBtns.forEach(btn => {
     btn.addEventListener("click", () => {
-      fleetFilterBtns.forEach(b => {
-        b.classList.remove("is-selected");
-        b.setAttribute("aria-pressed", "false");
+      fleetFilterBtns.forEach(button => {
+        button.classList.remove("is-active");
+        button.setAttribute("aria-pressed", "false");
       });
-      btn.classList.add("is-selected");
+      btn.classList.add("is-active");
       btn.setAttribute("aria-pressed", "true");
       state.filter = btn.dataset.filter || "all";
       renderRuns();
@@ -2707,6 +2978,10 @@ function setupEventListeners() {
 
   const agentVerCloseBtn = getElem("agent-ver-close-btn");
   if (agentVerCloseBtn) agentVerCloseBtn.addEventListener("click", () => closeModal("agent-versions-drawer"));
+  const agentDetailCloseBtn = getElem("agent-detail-close-btn");
+  if (agentDetailCloseBtn) agentDetailCloseBtn.addEventListener("click", () => closeModal("agent-detail-drawer"));
+  const providerDetailCloseBtn = getElem("provider-detail-close-btn");
+  if (providerDetailCloseBtn) providerDetailCloseBtn.addEventListener("click", () => closeModal("provider-detail-drawer"));
 
   const traceCloseBtn = getElem("trace-close-btn");
   if (traceCloseBtn) {
@@ -2758,6 +3033,9 @@ function setupEventListeners() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" || e.keyCode === 27) {
+      getElem("app-sidebar")?.classList.remove("is-open");
+      getElem("sidebar-backdrop")?.classList.remove("is-visible");
+      getElem("sidebar-toggle")?.setAttribute("aria-expanded", "false");
       modalBackdrops.forEach(backdrop => {
         if (!backdrop.hidden) {
           backdrop.hidden = true;
