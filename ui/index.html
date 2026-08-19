@@ -29,7 +29,7 @@
           <div id="supervisor-card" class="supervisor-card" role="status" aria-live="polite" hidden>
             <div class="supervisor-header">
               <span id="supervisor-dot" class="supervisor-dot"></span>
-              <span style="font-size:0.6rem;color:var(--muted);font-weight:800;letter-spacing:0.1em;text-transform:uppercase;">SUP</span>
+              <span class="supervisor-label">SUP</span>
               <strong id="supervisor-status-text" class="supervisor-status-badge">—</strong>
             </div>
             <div id="supervisor-meta" class="supervisor-meta">
@@ -163,12 +163,10 @@
                 <h3>Bu görünümde run yok</h3>
                 <p>Filtreyi değiştirin veya bir <code>agent-ready</code> task dispatch edin.</p>
               </div>
-              <!-- Hidden grid for test compatibility -->
-              <div id="agent-grid" class="agent-grid" aria-live="polite" aria-busy="true"></div>
             </section>
 
             <aside aria-label="Dikkat gerektiren öğeler">
-              <section class="panel" aria-labelledby="attention-heading" style="margin-bottom: var(--sp-4);">
+              <section class="panel attention-panel" aria-labelledby="attention-heading">
                 <div class="panel-heading">
                   <h3 id="attention-heading">İlgi Gerekenler</h3>
                 </div>
@@ -214,6 +212,7 @@
             <button class="pm-filter-btn" data-pm-filter="rework">Rework</button>
             <button class="pm-filter-btn" data-pm-filter="ready">Hazır</button>
             <button class="pm-filter-btn" data-pm-filter="human">İnsan Onayı</button>
+            <button class="pm-filter-btn" data-pm-filter="journal">Journal</button>
           </nav>
 
           <div id="pm-inbox-section" class="pm-section">
@@ -316,18 +315,18 @@
             <div class="completion-card-header">
               <span class="completion-icon">🏁</span>
               <div>
-                <h3 style="margin:0; color: #4ade80;">Ready for Human Approval</h3>
-                <p style="margin:2px 0 0 0; color: #cbd5e1; font-size: 0.82rem;">
+                <h3 class="completion-title">Ready for Human Approval</h3>
+                <p class="completion-copy">
                   Tüm child tasklar entegre edildi ve aggregate repo doğrulaması ile bağımsız review başarıyla tamamlandı.
                 </p>
               </div>
-              <span class="badge badge-enabled" style="font-size: 0.72rem;">AUTONOMOUS PHASE COMPLETE</span>
+              <span class="badge badge-enabled completion-badge">AUTONOMOUS PHASE COMPLETE</span>
             </div>
             <div class="completion-evidence-grid">
               <div class="evidence-cell"><span>Graph Fingerprint</span><strong id="comp-graph-fp">—</strong></div>
               <div class="evidence-cell"><span>Base SHA</span><strong id="comp-base-sha">—</strong></div>
               <div class="evidence-cell"><span>Integration HEAD</span><strong id="comp-int-head">—</strong></div>
-              <div class="evidence-cell"><span>Review Verdict</span><strong id="comp-review-verdict" style="color: #4ade80;">CLEAN</strong></div>
+              <div class="evidence-cell"><span>Review Verdict</span><strong id="comp-review-verdict" class="completion-verdict">CLEAN</strong></div>
             </div>
             <div class="completion-disclaimer">
               ℹ️ <strong>İnsan Onayı Sınırı:</strong> Sistem otonom teslimatı tamamlamıştır. <code>develop</code> branch'ine final PR / merge ve Jira <strong>Done</strong> geçişi insan kontrolündedir ve otomatik tetiklenmez.
@@ -356,7 +355,7 @@
               </section>
 
               <!-- Aggregate Review -->
-              <section class="parent-section" aria-labelledby="agg-review-heading" style="margin-top: var(--sp-4);">
+              <section class="parent-section aggregate-review-section" aria-labelledby="agg-review-heading">
                 <div class="parent-section-header">
                   <h3 id="agg-review-heading">Aggregate Review</h3>
                   <p class="section-desc">Birleştirilmiş diff incelemesi ve doğrulama durumu.</p>
@@ -409,9 +408,9 @@
             <div class="obs-section-header">
               <h3>Provider Kapasitesi</h3>
             </div>
-            <div class="panel" style="padding: var(--sp-4);">
+            <div class="panel provider-capacity-panel">
               <div id="provider-list" class="provider-list"></div>
-              <div style="margin-top: var(--sp-2); text-align: right;">
+              <div class="capacity-footer">
                 <span id="capacity-total" class="capacity-total">—</span>
               </div>
             </div>
@@ -818,7 +817,7 @@
       </div>
     </div>
 
-    <footer class="page-footer" style="display:none;">
+    <footer class="page-footer" hidden>
       <span>Agent Scaffold · Local Operations Console</span>
       <span>Prompts ve Jira açıklamaları bu ekranda ham olarak gösterilmez.</span>
     </footer>

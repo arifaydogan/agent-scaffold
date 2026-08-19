@@ -601,7 +601,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .activity-panel { margin-top: var(--sp-4); }
 
 /* ── 15. Agent Cards (kept for test compatibility) ────────────────────────── */
-.agent-grid { display: none; }
 .agent-card {
   position: relative; min-width: 0; overflow: hidden;
   border: 1px solid var(--border); border-radius: var(--radius);
@@ -708,7 +707,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .pm-section-header h3 { font-size: var(--text-md); margin-bottom: 2px; color: #f1f5f9; }
 .section-desc { font-size: var(--text-sm); color: var(--muted); margin: 0; }
 
-.pm-queue-container { display: grid; gap: var(--sp-5); }
 .pm-group-block { margin-bottom: var(--sp-3); }
 .pm-group-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-3); padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .pm-group-header h4 { margin: 0; font-size: var(--text-base); color: #f8fafc; font-weight: 680; }
@@ -1113,7 +1111,8 @@ tbody tr:last-child td { border-bottom: 0; }
 /* Tablet: ≤1100px — collapse sidebar */
 @media (max-width: 1100px) {
   :root { --sidebar-w: 0px; }
-  .app-shell { grid-template-columns: 1fr; }
+  .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--topbar-h) minmax(0, 1fr); }
+  .main-content { grid-column: 1; grid-row: 2; min-width: 0; }
   .app-sidebar {
     position: fixed; left: 0; top: var(--topbar-h); bottom: 0;
     width: 210px; z-index: 50;
@@ -1150,7 +1149,9 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* Small mobile: ≤480px */
 @media (max-width: 480px) {
-  .topbar { height: auto; min-height: var(--topbar-h); flex-wrap: wrap; padding: 6px var(--sp-3); }
+  .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--topbar-h) minmax(0, 1fr); }
+  .topbar { height: var(--topbar-h); min-height: var(--topbar-h); flex-wrap: nowrap; overflow: hidden; padding: 0 var(--sp-3); }
+  .main-content { grid-column: 1; grid-row: 2; min-width: 0; }
   .topbar-brand { font-size: 0.72rem; }
   .connection-pill span:last-child { display: none; }
   .page-header h2 { font-size: var(--text-lg); }
@@ -1252,3 +1253,13 @@ tbody tr:last-child td { border-bottom: 0; }
   .usage-events-list { grid-template-columns: 1fr; }
   .work-summary-cell { min-width: 180px; }
 }
+
+.supervisor-label { color: var(--muted); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.attention-panel { margin-bottom: var(--sp-4); }
+.completion-title { margin: 0; color: #4ade80; }
+.completion-copy { margin: 2px 0 0; color: #cbd5e1; font-size: 0.82rem; }
+.completion-badge { font-size: 0.72rem; }
+.completion-verdict { color: #4ade80; }
+.aggregate-review-section { margin-top: var(--sp-4); }
+.provider-capacity-panel { padding: var(--sp-4); }
+.capacity-footer { margin-top: var(--sp-2); text-align: right; }

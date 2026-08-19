@@ -35,7 +35,6 @@ const state = {
 };
 
 const elements = typeof document !== "undefined" ? {
-  grid: document.querySelector("#agent-grid"),
   empty: document.querySelector("#empty-state"),
   activity: document.querySelector("#activity-body"),
   providers: document.querySelector("#provider-list"),
@@ -511,22 +510,10 @@ function renderActiveWorkTable(tasks) {
 
 function renderRuns() {
   const tasks = visibleRuns();
-  const grid = elements.grid || getElem("agent-grid");
   const empty = elements.empty || getElem("empty-state");
 
   renderActiveWorkTable(tasks);
 
-  // Kept populated for the established test contract, but visually hidden by the cockpit layout.
-  if (grid) {
-    if (typeof grid.replaceChildren === "function") {
-      grid.replaceChildren(...tasks.map(taskCard));
-    } else {
-      grid.innerHTML = "";
-      tasks.forEach(task => grid.appendChild(taskCard(task)));
-    }
-    grid.setAttribute?.("aria-busy", "false");
-    grid.hidden = true;
-  }
   if (empty) empty.hidden = tasks.length !== 0;
 }
 
@@ -933,11 +920,13 @@ function renderPmWorkspace() {
   const approvals = getElem("pm-approvals-section");
   const attention = getElem("pm-attention-section");
   const journal = getElem("pm-journal-section");
-  if (inbox) inbox.hidden = false;
+  const isJournal = state.currentPmFilter === "journal";
+  if (inbox) inbox.hidden = isJournal;
   if (approvals) approvals.hidden = true;
   if (attention) attention.hidden = true;
-  if (journal) journal.hidden = true;
-  renderPmInbox(pm.groups || {}, state.currentPmFilter);
+  if (journal) journal.hidden = !isJournal;
+  if (isJournal) renderPmJournal();
+  else renderPmInbox(pm.groups || {}, state.currentPmFilter);
 }
 
 function pmItemsForFilter(groups, filter) {
@@ -1005,6 +994,13 @@ function renderPmInbox(groups = {}, filter = "inbox") {
         openApprovalModal(item, approve);
       });
       actions.appendChild(approve);
+      const reject = element("button", "pm-btn pm-btn-reject", "Reddet");
+      reject.type = "button";
+      reject.addEventListener?.("click", event => {
+        event.stopPropagation();
+        openRejectionModal(item, reject);
+      });
+      actions.appendChild(reject);
     }
     row.appendChild(actions);
     container.appendChild(row);
