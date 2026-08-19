@@ -1251,9 +1251,8 @@ test("Scenario AA: Reviewer agent definition executor constraints fail closed on
   const parentKey = "PACE-950";
   const parent950 = { key: parentKey, summary: "Strict Reviewer Test", issueType: "Epic" };
   workSource.setChildren(parentKey, []);
-  await discoverAndPinParent(settings, store, parent950, { workSource, execute: true });
 
-  // Settings uses default antigravity provider -> conflict!
+  // Pin the strict reviewer at parent generation; default antigravity provider conflicts with its registry constraint.
   const settingsConf = {
     ...settings,
     data: {
@@ -1261,11 +1260,13 @@ test("Scenario AA: Reviewer agent definition executor constraints fail closed on
       policy: {
         ...settings.data.policy,
         review: {
+          provider: "antigravity",
           taskAgent: "strict-anthropic-reviewer"
         }
       }
     }
   };
+  await discoverAndPinParent(settingsConf, store, parent950, { workSource, execute: true });
 
   const revRes = await runParentIntegrationReview(settingsConf, store, parentKey, {
     injectedReviewOutcome: { verdict: "clean", evidence: [] }

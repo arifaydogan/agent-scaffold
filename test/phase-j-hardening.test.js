@@ -33,8 +33,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -144,6 +145,12 @@ class FakeWorkSourceProvider extends WorkSourceProvider {
   async getChildren(id) { return this.childrenMap.get(id) || []; }
   async getDependencies(id) { return this.dependenciesMap.get(id) || []; }
   async listWorkItems() { return Array.from(this.items.values()); }
+  async poll({ canonicalStates = [], limit = 10 } = {}) {
+    const allowedStates = new Set(canonicalStates);
+    return Array.from(this.items.values())
+      .filter((item) => allowedStates.size === 0 || allowedStates.has(item.canonicalState))
+      .slice(0, limit);
+  }
   async transition(id, state, meta) {
     this.transitions.push({ id, state, meta });
     const item = this.items.get(id);
@@ -422,7 +429,7 @@ test("Phase J — C. Production Atomic Implementation Claim Race (Two Connection
         try {
           const editDir = path.join(cwd, "backend");
           fs.mkdirSync(editDir, { recursive: true });
-          fs.writeFileSync(path.join(editDir, "app.js"), `// implemented\n`, "utf8");
+          fs.writeFileSync(path.join(editDir, "app.js"), `// implemented ${providerCalls}\n`, "utf8");
           spawnSync("git", ["-C", cwd, "add", "backend/app.js"]);
           spawnSync("git", ["-C", cwd, "commit", "-m", "worker commit"]);
         } catch {}
@@ -468,17 +475,40 @@ test("Phase J — C. Production Atomic Implementation Claim Race (Two Connection
     const storeReopened = new RunStore(dbPath);
     const settingsReopened = makeSettings(repo, worktreeRoot, storeReopened);
 
+    const firstRun = storeReopened.getRun(winner.output.runId);
     const retryRes = handleImplementation(settingsReopened, workItem, true, fakeRuntime);
     assert.equal(retryRes.exitCode, 0);
     assert.equal(retryRes.output.duplicate, true, "Sequential retry of unchanged completed plan must report duplicate");
+    assert.equal(retryRes.output.runId, winner.output.runId, "Unchanged retry must return the durable existing runId");
     assert.equal(providerCalls, 1, "Must NOT invoke provider a second time for completed implementation");
     const totalRunsAfter = storeReopened.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
     assert.equal(totalRunsAfter, 1, "Must NOT create a second implementation execution run");
 
-    // 3. Explicit rework DOES execute:
+    // 3. A changed authoritative plan fingerprint executes as new implementation work.
+    const changedPlan = {
+      ...firstRun.payload,
+      allowedPaths: ["backend/**"],
+      configSnapshot: {
+        ...firstRun.payload.configSnapshot,
+        allowedPaths: ["backend/**"]
+      },
+      eligible: true,
+      eligibilityReasons: []
+    };
+    const changedRes = handleImplementation(settingsReopened, workItem, true, fakeRuntime, { plan: changedPlan });
+    assert.equal(changedRes.exitCode, 0);
+    assert.notEqual(changedRes.output.runId, winner.output.runId);
+    assert.equal(changedRes.output.duplicate, undefined);
+    assert.equal(providerCalls, 2, "Changed plan must invoke the provider");
+    const changedRun = storeReopened.getRun(changedRes.output.runId);
+    assert.notEqual(changedRun.payload.planFingerprint, firstRun.payload.planFingerprint);
+    const changedRunCount = storeReopened.database.prepare("SELECT COUNT(*) as count FROM runs WHERE issue_key = ?").get(issueKey).count;
+    assert.equal(changedRunCount, 2, "Changed plan must create a new implementation run");
+
+    // 4. Explicit rework DOES execute and is never suppressed as duplicate implementation.
     const reworkRes = handleImplementation(settingsReopened, workItem, true, fakeRuntime, { role: "rework", action: "rework", attempt: 1, allowedPaths: ["backend/*"] });
     assert.equal(reworkRes.exitCode, 0);
-    assert.equal(providerCalls, 2, "Explicit rework must invoke provider and create new execution");
+    assert.equal(providerCalls, 3, "Explicit rework must invoke provider and create new execution");
 
     try { storeReopened.close(); } catch {}
   } finally {
@@ -602,6 +632,66 @@ test("Phase J — E. Duplicate Integration Reconciliation Idempotency", () => {
 });
 
 // -----------------------------------------------------------------------------
+// Test E2: Normal Integration Adapter Exception Normalization
+// -----------------------------------------------------------------------------
+test("Phase J — E2. Normal Integration Adapter Exception Normalization", () => {
+  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+  try {
+    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+    const epicKey = "PACE-E2";
+    const issueKey = "PACE-E21";
+    const reviewedSha = "a".repeat(40);
+    const secret = "sk-12345678901234567890";
+
+    store.upsertEpic({ key: epicKey, summary: "Adapter failure parent", branch: "epic/PACE-E2", baseBranch: "develop" });
+    store.upsertEpicTask({
+      epicKey,
+      issueKey,
+      summary: "Adapter failure child",
+      branch: "task/PACE-E21",
+      state: "reviewed-clean",
+      reviewedSha
+    });
+
+    const implementationRunId = store.createRun(issueKey, { action: "implementation", attempt: 0 });
+    store.transition(implementationRunId, "review-queued", { implementationSha: reviewedSha });
+    recordReviewerOutcome(store, {
+      runId: implementationRunId,
+      implementationSha: reviewedSha,
+      reviewerId: "correctness-reviewer",
+      verdict: "clean",
+      evidence: [{ id: "E2-1", severity: "suggestion", category: "correctness", problem: "Clean" }]
+    });
+    store.queueEpicIntegration({ epicKey, issueKey, leafBranch: "task/PACE-E21" });
+
+    const result = reconcileIntegrations(settings, store, {
+      integrationAdapter: () => {
+        throw new Error(`provider exploded with ${secret}`);
+      }
+    });
+
+    assert.equal(result.integrationsCompleted, 0);
+    assert.equal(result.blocked.length, 1);
+    assert.match(result.blocked[0].reason, /Integration adapter failed/i);
+    assert.ok(!result.blocked[0].reason.includes(secret), "Normalized error must redact provider secrets");
+
+    const integration = store.listEpicIntegrations(epicKey).find((row) => row.issueKey === issueKey);
+    assert.notEqual(integration.state, "integrating", "Adapter exception must not strand the integration lane");
+
+    const workerRuns = store.listRunsForIssue(issueKey).filter((run) => run.payload?.role === "integration-worker");
+    assert.equal(workerRuns.length, 1);
+    assert.equal(workerRuns[0].state, "failed");
+    const terminalCount = store.database.prepare(
+      "SELECT COUNT(*) AS count FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'"
+    ).get(workerRuns[0].id).count;
+    assert.equal(terminalCount, 1, "Failed integration worker must terminalize exactly once");
+  } finally {
+    cleanup();
+  }
+});
+
+
+// -----------------------------------------------------------------------------
 // Test F: Supervisor Lease Ownership, Fencing & Stale Reclaim
 // -----------------------------------------------------------------------------
 test("Phase J — F. Supervisor Lease Ownership, Fencing & Stale Reclaim", () => {
@@ -706,6 +796,147 @@ test("Phase J — G. Real Approval Contention Matrix (Two Connections)", () => {
   } finally {
     try { store1.close(); } catch {}
     try { store2.close(); } catch {}
+    cleanup();
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// Test G2: Genuine SQLite Writer Overlap Across Worker Threads
+// -----------------------------------------------------------------------------
+test("Phase J — G2. Genuine SQLite Writer Overlap Across Worker Threads", async () => {
+  const { repo, worktreeRoot, store, dbPath, cleanup } = makeTestGitRepo();
+  let workerA = null;
+  let workerB = null;
+  try {
+    const issueKey = "PACE-G-WRITER";
+    const plan = { issue: issueKey, summary: "Writer overlap", allowedPaths: ["backend/**"] };
+    const planFingerprint = computePlanFingerprint(plan);
+    store.addPmDecision(issueKey, "approval_requested", {
+      action: "implementation",
+      attempt: 0,
+      planFingerprint,
+      plan
+    });
+    store.close();
+
+    const signalBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+    const signal = new Int32Array(signalBuffer);
+    const workerSource = [
+      'const { parentPort, workerData } = require("node:worker_threads");',
+      '(async () => {',
+      '  const { RunStore } = await import(workerData.storeUrl);',
+      '  const { handlePmApproval, handlePmRejection } = await import(workerData.pmUrl);',
+      '  const store = new RunStore(workerData.dbPath);',
+      '  const signal = new Int32Array(workerData.signalBuffer);',
+      '  const settings = { _store: store, getStore: () => store, data: { policy: { operatingMode: "supervised" } } };',
+      '  const request = { action: "implementation", attempt: 0, planFingerprint: workerData.planFingerprint, approver: workerData.approver };',
+      '  parentPort.postMessage({ stage: "ready" });',
+      '  try {',
+      '    let result;',
+      '    if (workerData.hold) {',
+      '      Atomics.wait(signal, 0, 0, 5000);',
+      '      result = store.withTransaction(() => {',
+      '        parentPort.postMessage({ stage: "holding" });',
+      '        Atomics.wait(signal, 1, 0, 5000);',
+      '        return handlePmApproval(settings, workerData.issueKey, request, { store });',
+      '      });',
+      '    } else {',
+      '      Atomics.wait(signal, 2, 0, 5000);',
+      '      parentPort.postMessage({ stage: "attempting" });',
+      '      result = handlePmRejection(settings, workerData.issueKey, request, { store });',
+      '    }',
+      '    parentPort.postMessage({ stage: "result", ok: true, result });',
+      '  } catch (error) {',
+      '    parentPort.postMessage({ stage: "result", ok: false, statusCode: error.statusCode || null, code: error.code || null, message: error.message });',
+      '  } finally {',
+      '    store.close();',
+      '  }',
+      '})().catch((error) => parentPort.postMessage({ stage: "result", ok: false, code: error.code || null, message: error.message }));'
+    ].join("\n");
+
+    const commonWorkerData = {
+      dbPath,
+      issueKey,
+      planFingerprint,
+      signalBuffer,
+      storeUrl: pathToFileURL(path.join(rootDir, "lib", "store.js")).href,
+      pmUrl: pathToFileURL(path.join(rootDir, "lib", "pm-workspace.js")).href
+    };
+
+    const monitor = (worker) => {
+      const waiters = new Map();
+      const pending = new Map();
+      const result = new Promise((resolve, reject) => {
+        worker.on("message", (message) => {
+          const waiter = waiters.get(message.stage);
+          if (waiter) {
+            waiters.delete(message.stage);
+            waiter(message);
+          } else {
+            pending.set(message.stage, message);
+          }
+          if (message.stage === "result") resolve(message);
+        });
+        worker.on("error", reject);
+        worker.on("exit", (code) => {
+          if (code !== 0) reject(new Error(`Approval worker exited with code ${code}`));
+        });
+      });
+      return {
+        result,
+        async waitFor(stage) {
+          if (pending.has(stage)) {
+            const message = pending.get(stage);
+            pending.delete(stage);
+            return message;
+          }
+          return new Promise((resolve) => waiters.set(stage, resolve));
+        }
+      };
+    };
+
+    workerA = new Worker(workerSource, {
+      eval: true,
+      workerData: { ...commonWorkerData, hold: true, approver: "writer-a" }
+    });
+    workerB = new Worker(workerSource, {
+      eval: true,
+      workerData: { ...commonWorkerData, hold: false, approver: "writer-b" }
+    });
+    const monitorA = monitor(workerA);
+    const monitorB = monitor(workerB);
+    await Promise.all([monitorA.waitFor("ready"), monitorB.waitFor("ready")]);
+
+    Atomics.store(signal, 0, 1);
+    Atomics.notify(signal, 0, 1);
+    await monitorA.waitFor("holding");
+
+    Atomics.store(signal, 2, 1);
+    Atomics.notify(signal, 2, 1);
+    await monitorB.waitFor("attempting");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    Atomics.store(signal, 1, 1);
+    Atomics.notify(signal, 1, 1);
+    const [resultA, resultB] = await Promise.all([monitorA.result, monitorB.result]);
+
+    assert.equal(resultA.ok, true);
+    assert.equal(resultA.result.approved, true);
+    assert.equal(resultB.ok, false);
+    assert.equal(resultB.statusCode, 409);
+    assert.match(resultB.message, /already approved|no approval pending/i);
+    assert.doesNotMatch(`${resultB.code || ""} ${resultB.message || ""}`, /SQLITE_BUSY|database is locked/i);
+
+    const verificationStore = new RunStore(dbPath);
+    const decisions = verificationStore.getPmDecisions(issueKey).filter((decision) => decision.type === "execution_approval");
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0].payload.approver, "writer-a");
+    assert.equal(decisions[0].payload.approved, true);
+    verificationStore.close();
+  } finally {
+    if (workerA) await workerA.terminate();
+    if (workerB) await workerB.terminate();
     cleanup();
   }
 });
@@ -1574,7 +1805,7 @@ test("Phase J — T. Command Injection Resistance (Argument Array Safety)", () =
 // -----------------------------------------------------------------------------
 // Test U: Real Config Snapshot Runtime Test
 // -----------------------------------------------------------------------------
-test("Phase J — U. Real Config Snapshot Runtime Test", async () => {
+test("Phase J — U0. Config Snapshot Persistence Baseline", async () => {
   const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
   try {
     // 1. Configure live settings to Configuration X:
@@ -1722,6 +1953,268 @@ test("Phase J — U. Real Config Snapshot Runtime Test", async () => {
     cleanup();
   }
 });
+
+// -----------------------------------------------------------------------------
+// Test U: Real X -> Y Runtime and Parent Reviewer Pinning
+// -----------------------------------------------------------------------------
+test("Phase J — U. Real X -> Y Runtime and Parent Reviewer Pinning", async () => {
+  const { repo, worktreeRoot, store, cleanup } = makeTestGitRepo();
+  try {
+    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+    settings.data.policy.externalWritesEnabled = true;
+    settings.data.policy.autonomyEnabled = true;
+    settings.data.executor = {
+      defaultProvider: "provider-x",
+      providers: {
+        "provider-x": {
+          command: ["provider-x", "--model", "{model}", "{prompt}"],
+          defaultModel: "model-x",
+          modelProfiles: { medium: "model-x", high: "model-x" }
+        },
+        "provider-y": {
+          command: ["provider-y", "--model", "{model}", "{prompt}"],
+          defaultModel: "model-y",
+          modelProfiles: { medium: "model-y", high: "model-y" }
+        }
+      }
+    };
+    settings.data.policy.review = {
+      provider: "provider-x",
+      model: "model-x",
+      modelProfile: "medium",
+      persona: "review-persona-x",
+      taskAgent: "correctness-reviewer",
+      maxReworkAttempts: 2
+    };
+
+    const builderX = store.updateAgentDefinition("backend-engineer", {
+      executor: { provider: "provider-x", modelProfile: "medium", model: "model-x" }
+    });
+    const reviewerX = store.updateAgentDefinition("correctness-reviewer", {
+      executor: { provider: "provider-x", modelProfile: "medium", model: "model-x" }
+    });
+
+    const invocations = [];
+    let implementationCount = 0;
+    const runtime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") return spawnSync(cmd, args, opts);
+        if (cmd === "npm" || cmd === "npm.cmd" || args.includes("check")) {
+          return { status: 0, stdout: "verification ok", stderr: "" };
+        }
+
+        const prompt = args.join(" ");
+        invocations.push({ provider: cmd, model: args[1] || null, prompt });
+        if (prompt.includes("Aggregate Integration Review")) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "clean",
+              evidence: [{ id: "U-AGG", severity: "suggestion", category: "correctness", problem: "Aggregate review clean" }]
+            }),
+            stderr: ""
+          };
+        }
+        if (prompt.includes("Review implementation")) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "changes-requested",
+              evidence: [{ id: "U-REV", severity: "major", category: "correctness", problem: "Exercise pinned rework", expected: "Rework with X" }]
+            }),
+            stderr: ""
+          };
+        }
+
+        implementationCount += 1;
+        const cwd = opts.cwd || repo;
+        const relativeFile = `backend/u-${implementationCount}.js`;
+        fs.mkdirSync(path.join(cwd, "backend"), { recursive: true });
+        fs.writeFileSync(path.join(cwd, relativeFile), `// implementation ${implementationCount}\n`, "utf8");
+        spawnSync("git", ["-C", cwd, "add", relativeFile]);
+        spawnSync("git", ["-C", cwd, "commit", "-m", `implementation ${implementationCount}`]);
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Implemented",
+            changed_files: [relativeFile],
+            validation_commands: ["npm test"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    const childX = {
+      key: "PACE-U-X",
+      summary: "Pinned child X",
+      description: "Acceptance criteria: execute and rework with X",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
+    const implementationX = handleImplementation(settings, childX, true, runtime);
+    assert.equal(implementationX.exitCode, 0);
+    const runX = store.getRun(implementationX.output.runId);
+    assert.equal(runX.payload.configSnapshot.executorProvider, "provider-x");
+    assert.equal(runX.payload.configSnapshot.executorModel, "model-x");
+    assert.equal(runX.payload.configSnapshot.agentVersion, builderX.version);
+    assert.equal(runX.payload.configSnapshot.agentHash, builderX.definitionHash);
+    assert.equal(runX.payload.configSnapshot.operatingMode, "autonomous");
+    assert.equal(runX.payload.configSnapshot.reviewProvider, "provider-x");
+    assert.equal(runX.payload.configSnapshot.reviewModel, "model-x");
+    assert.equal(runX.payload.configSnapshot.reviewAgentVersion, reviewerX.version);
+    assert.equal(runX.payload.configSnapshot.reviewAgentHash, reviewerX.definitionHash);
+
+    reconcileReviewers(settings, store);
+    reconcileReviewers(settings, store);
+    assert.equal(store.getRun(runX.id).state, "review-queued");
+
+    const parentSource = new FakeWorkSourceProvider();
+    const parentXKey = "PACE-U-PARENT-X";
+    const parentXItem = {
+      key: parentXKey,
+      summary: "Parent pinned under X",
+      description: "Acceptance criteria: aggregate X",
+      type: "Epic",
+      canonicalState: "backlog"
+    };
+    parentSource.setWorkItem(parentXItem);
+    parentSource.setChildren(parentXKey, [childX]);
+    const parentPinX = await discoverAndPinParent(settings, store, parentXItem, { workSource: parentSource, runtime, execute: true });
+    assert.equal(parentPinX.ok, true);
+    const pinnedParentX = store.getParentExecution(parentXKey);
+    assert.equal(pinnedParentX.reviewerSnapshot.provider, "provider-x");
+    assert.equal(pinnedParentX.reviewerSnapshot.model, "model-x");
+    assert.equal(pinnedParentX.reviewerSnapshot.reviewerVersion, reviewerX.version);
+    assert.equal(pinnedParentX.reviewerSnapshot.reviewerHash, reviewerX.definitionHash);
+
+    settings.data.operatingMode = "supervised";
+    settings.data.project.operatingMode = "supervised";
+    settings.data.policy.operatingMode = "supervised";
+    settings.data.executor.defaultProvider = "provider-y";
+    settings.data.policy.review = {
+      provider: "provider-y",
+      model: "model-y",
+      modelProfile: "medium",
+      persona: "review-persona-y",
+      taskAgent: "correctness-reviewer",
+      maxReworkAttempts: 2
+    };
+    const builderY = store.updateAgentDefinition("backend-engineer", {
+      executor: { provider: "provider-y", modelProfile: "medium", model: "model-y" }
+    });
+    const reviewerY = store.updateAgentDefinition("correctness-reviewer", {
+      executor: { provider: "provider-y", modelProfile: "medium", model: "model-y" }
+    });
+
+    const reviewItemX = { ...childX, canonicalState: "review" };
+    const reviewX = handleReview(settings, reviewItemX, true, runtime);
+    assert.equal(reviewX.exitCode, 0);
+    assert.equal(reviewX.output.provider, "provider-x");
+    assert.equal(reviewX.output.model, "model-x");
+    const reviewRunX = store.getRun(reviewX.output.runId);
+    assert.equal(reviewRunX.payload.configSnapshot.reviewAgentVersion, reviewerX.version);
+    assert.equal(reviewRunX.payload.configSnapshot.reviewAgentHash, reviewerX.definitionHash);
+    assert.equal(store.getRun(runX.id).state, "review-failed");
+
+    const reworkSource = new FakeWorkSourceProvider();
+    reworkSource.setWorkItem(reviewItemX);
+    reconcileReviewers(settings, store);
+    const reworkPromises = [];
+    reconcileReviewers(settings, store, { execute: true, workSource: reworkSource, promises: reworkPromises });
+    await Promise.all(reworkPromises);
+    const reworkItem = await reworkSource.getWorkItem(childX.key);
+    assert.equal(reworkItem.canonicalState, "rework");
+    const reworkX = await Promise.resolve(runIssue(settings, reworkItem, true, runtime));
+    assert.equal(reworkX.exitCode, 0);
+    assert.equal(reworkX.output.provider, "provider-x");
+    assert.equal(reworkX.output.model, "model-x");
+    const reworkRunX = store.getRun(reworkX.output.runId);
+    assert.equal(reworkRunX.payload.action, "rework");
+    assert.equal(reworkRunX.payload.configSnapshot.executorProvider, "provider-x");
+    assert.equal(reworkRunX.payload.configSnapshot.agentVersion, builderX.version);
+    assert.equal(reworkRunX.payload.configSnapshot.agentHash, builderX.definitionHash);
+
+    const childY = {
+      key: "PACE-U-Y",
+      summary: "New child Y",
+      description: "Acceptance criteria: execute with Y",
+      canonicalState: "ready",
+      labels: ["agent-ready"]
+    };
+    const implementationY = await Promise.resolve(runIssue(settings, childY, true, runtime, { approved: true }));
+    assert.equal(implementationY.exitCode, 0);
+    assert.equal(implementationY.output.provider, "provider-y");
+    assert.equal(implementationY.output.model, "model-y");
+    const runY = store.getRun(implementationY.output.runId);
+    assert.equal(runY.payload.configSnapshot.executorProvider, "provider-y");
+    assert.equal(runY.payload.configSnapshot.agentVersion, builderY.version);
+    assert.equal(runY.payload.configSnapshot.agentHash, builderY.definitionHash);
+    assert.equal(runY.payload.configSnapshot.operatingMode, "supervised");
+
+    const aggregateX = await runParentIntegrationReview(settings, store, parentXKey, { runtime });
+    assert.equal(aggregateX.ok, true);
+    const aggregateRunX = store.getRun(aggregateX.reviewRunId);
+    assert.equal(aggregateRunX.payload.provider, "provider-x");
+    assert.equal(aggregateRunX.payload.model, "model-x");
+    assert.equal(aggregateRunX.payload.reviewerVersion, reviewerX.version);
+    assert.equal(aggregateRunX.payload.reviewerHash, reviewerX.definitionHash);
+
+    settings.data.operatingMode = "autonomous";
+    settings.data.project.operatingMode = "autonomous";
+    settings.data.policy.operatingMode = "autonomous";
+
+    const parentYKey = "PACE-U-PARENT-Y";
+    const parentYItem = {
+      key: parentYKey,
+      summary: "Parent pinned under Y",
+      description: "Acceptance criteria: aggregate Y",
+      type: "Epic",
+      canonicalState: "backlog"
+    };
+    parentSource.setWorkItem(parentYItem);
+    parentSource.setChildren(parentYKey, [childY]);
+    const parentPinY = await discoverAndPinParent(settings, store, parentYItem, { workSource: parentSource, runtime, execute: true });
+    assert.equal(parentPinY.ok, true);
+    const pinnedParentY = store.getParentExecution(parentYKey);
+    assert.equal(pinnedParentY.reviewerSnapshot.provider, "provider-y");
+    assert.equal(pinnedParentY.reviewerSnapshot.model, "model-y");
+    assert.equal(pinnedParentY.reviewerSnapshot.reviewerVersion, reviewerY.version);
+    assert.equal(pinnedParentY.reviewerSnapshot.reviewerHash, reviewerY.definitionHash);
+
+    const aggregateY = await runParentIntegrationReview(settings, store, parentYKey, { runtime });
+    assert.equal(aggregateY.ok, true);
+    const aggregateRunY = store.getRun(aggregateY.reviewRunId);
+    assert.equal(aggregateRunY.payload.provider, "provider-y");
+    assert.equal(aggregateRunY.payload.model, "model-y");
+    assert.equal(aggregateRunY.payload.reviewerVersion, reviewerY.version);
+    assert.equal(aggregateRunY.payload.reviewerHash, reviewerY.definitionHash);
+
+    const aggregateInvocations = invocations.filter((entry) => entry.prompt.includes("Aggregate Integration Review"));
+    assert.deepEqual(aggregateInvocations.map((entry) => entry.provider), ["provider-x", "provider-y"]);
+
+    const deletedPinnedVersion = store.database.prepare(
+      "DELETE FROM agent_versions WHERE agent_id = ? AND version = ?"
+    ).run("correctness-reviewer", reviewerY.version);
+    assert.equal(deletedPinnedVersion.changes, 1);
+    const unavailablePinnedReviewer = await runParentIntegrationReview(settings, store, parentYKey, { runtime });
+    assert.equal(unavailablePinnedReviewer.blocked, true);
+    assert.match(unavailablePinnedReviewer.reason, /not registered|unavailable/i);
+    assert.equal(
+      invocations.filter((entry) => entry.prompt.includes("Aggregate Integration Review")).length,
+      2,
+      "Unavailable pinned reviewer must fail closed without a live provider fallback"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 
 // -----------------------------------------------------------------------------
 // Test V: Real Database Restart Tests (A, B, C)
@@ -1887,7 +2380,7 @@ test("Phase J — V. Real Database Restart Tests (A, B, C)", async () => {
 // -----------------------------------------------------------------------------
 // Test W: True Production Autonomous E2E with Post-Merge Crash Recovery
 // -----------------------------------------------------------------------------
-test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary", async () => {
+test("Phase J — W0. Legacy Direct Lifecycle Baseline", async () => {
   const { repo, worktreeRoot, dbPath, cleanup } = makeTestGitRepo();
   let store = new RunStore(dbPath);
   try {
@@ -2003,10 +2496,8 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
       reconcileIntegrations(settings, store, {
         sourceControl: sc,
         runtime: fakeRuntime,
-        integrationAdapter: (opts) => {
-          // Perform real Git merge into epic worktree
-          const mergeRes = sc.integrateReviewedRevision(settings, opts);
-          // Trigger crash right after merge succeeds
+        integrationAdapter: (opts) => sc.integrateReviewedRevision(settings, opts),
+        afterIntegrationEvidence: () => {
           crashTriggered = true;
           throw new Error("Simulated hard crash immediately after Git merge");
         }
@@ -2121,6 +2612,304 @@ test("Phase J — W. Full Product Lifecycle Autonomous E2E with Restart Boundary
   }
 });
 
+// -----------------------------------------------------------------------------
+// Test W: True dispatchOnce -> scheduler -> runtime -> restart -> aggregate lifecycle
+// -----------------------------------------------------------------------------
+test("Phase J — W. True dispatchOnce Autonomous Lifecycle with Restart Recovery", async () => {
+  const setup = makeTestGitRepo();
+  const { repo, worktreeRoot, dbPath, cleanup } = setup;
+  let store = setup.store;
+  try {
+    const initialDevelopSha = spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout.toString().trim();
+    const parentKey = "PACE-500";
+    const childA = "PACE-501";
+    const childB = "PACE-502";
+    const childC = "PACE-503";
+
+    const workSource = new FakeWorkSourceProvider();
+    workSource.setWorkItem({
+      key: parentKey,
+      summary: "Dispatcher lifecycle parent",
+      description: "Acceptance criteria: integrate A, B, and independent frontend C",
+      canonicalState: "backlog",
+      type: "Epic"
+    });
+    workSource.setChildren(parentKey, [
+      {
+        key: childA,
+        summary: "Backend child A",
+        description: "Acceptance criteria: add backend child A",
+        canonicalState: "ready",
+        labels: ["agent-ready"]
+      },
+      {
+        key: childB,
+        summary: "Backend child B",
+        description: "Acceptance criteria: add backend child B after A",
+        canonicalState: "ready",
+        labels: ["agent-ready"]
+      },
+      {
+        key: childC,
+        summary: "Frontend dashboard child C",
+        description: "Acceptance criteria: add independent frontend child C",
+        canonicalState: "ready",
+        labels: ["agent-ready"]
+      }
+    ]);
+    workSource.setDependencies(childB, [childA]);
+
+    const invocations = [];
+    const runtime = {
+      spawnSync: (cmd, args = [], opts = {}) => {
+        if (cmd === "git") return spawnSync(cmd, args, opts);
+        if (cmd === "npm" || cmd === "npm.cmd" || args.includes("check")) {
+          return { status: 0, stdout: "verification ok", stderr: "" };
+        }
+
+        const prompt = args.join(" ");
+        if (prompt.includes("Aggregate Integration Review")) {
+          invocations.push({ kind: "aggregate", provider: cmd });
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "clean",
+              evidence: [{
+                id: "W-AGG",
+                severity: "suggestion",
+                category: "correctness",
+                problem: "Aggregate integration review is clean"
+              }]
+            }),
+            stderr: ""
+          };
+        }
+        if (prompt.includes("Review implementation")) {
+          invocations.push({ kind: "review", provider: cmd });
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              verdict: "clean",
+              evidence: [{
+                id: "W-REV",
+                severity: "suggestion",
+                category: "correctness",
+                problem: "Reviewed implementation is clean"
+              }]
+            }),
+            stderr: ""
+          };
+        }
+
+        const cwd = opts.cwd || repo;
+        const normalizedCwd = cwd.toLowerCase();
+        const issueKey = normalizedCwd.includes("pace-501")
+          ? childA
+          : normalizedCwd.includes("pace-502")
+          ? childB
+          : normalizedCwd.includes("pace-503")
+          ? childC
+          : null;
+        const relativeFile = issueKey === childC
+          ? "frontend/w-child-c.js"
+          : issueKey === childB
+          ? "backend/w-child-b.js"
+          : "backend/w-child-a.js";
+        invocations.push({ kind: "implementation", provider: cmd, issueKey });
+
+        fs.mkdirSync(path.dirname(path.join(cwd, relativeFile)), { recursive: true });
+        fs.writeFileSync(path.join(cwd, relativeFile), "// implementation for " + issueKey + "\n", "utf8");
+        const addResult = spawnSync("git", ["-C", cwd, "add", relativeFile], { encoding: "utf8" });
+        const commitResult = spawnSync("git", ["-C", cwd, "commit", "-m", "implement " + issueKey], { encoding: "utf8" });
+        if (addResult.status !== 0 || commitResult.status !== 0) {
+          return {
+            status: 1,
+            stdout: "",
+            stderr: String(addResult.stderr || "") + String(commitResult.stderr || "")
+          };
+        }
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            status: "completed",
+            summary: "Implemented " + issueKey,
+            changed_files: [relativeFile],
+            validation_commands: ["npm run check"],
+            blockers: [],
+            risks: [],
+            duration_seconds: 1
+          }),
+          stderr: ""
+        };
+      },
+      spawn: () => {}
+    };
+
+    const settings = makeSettings(repo, worktreeRoot, store, { operatingMode: "autonomous" });
+    settings.data.policy.externalWritesEnabled = true;
+    settings.data.policy.autonomyEnabled = true;
+    settings.data.policy.maxConcurrency = 3;
+    settings.data.policy.pathScopes["backend-engineer"] = ["backend/**"];
+    settings.data.policy.pathScopes["frontend-engineer"] = ["frontend/**"];
+    settings.data.policy.review = {
+      provider: "codex",
+      model: "gpt-4o",
+      modelProfile: "high",
+      taskAgent: "correctness-reviewer",
+      maxReworkAttempts: 2
+    };
+
+    const sourceControl = new LocalGitSourceControlProvider();
+    const dispatchCycle = (extra = {}) => dispatchOnce(settings, {
+      store,
+      workSource,
+      execute: true,
+      limit: 10,
+      maxConcurrency: 3,
+      runtime,
+      sourceControl,
+      integrationAdapter: (request) => sourceControl.integrateReviewedRevision(settings, request),
+      ...extra
+    });
+    const childRuns = (issueKey) => store.listRunsForIssue(issueKey) || [];
+    const implementations = (issueKey) => childRuns(issueKey).filter(
+      (run) => run.payload?.action === "implementation" && run.payload?.role !== "reviewer"
+    );
+    const reviewers = (issueKey) => childRuns(issueKey).filter(
+      (run) => run.payload?.type === "review" && run.payload?.action === "review"
+    );
+    const integrationWorkers = (issueKey) => childRuns(issueKey).filter(
+      (run) => run.payload?.role === "integration-worker"
+    );
+
+    const firstCycle = await dispatchCycle();
+    const firstWaveIssues = firstCycle.waves.flat().map((plan) => plan.issue);
+    assert.ok(firstWaveIssues.includes(childA));
+    assert.ok(firstWaveIssues.includes(childC), "Independent C must dispatch without waiting for A");
+    assert.ok(!firstWaveIssues.includes(childB), "B must remain gated by A");
+    assert.equal(implementations(childA).length, 1);
+    assert.equal(implementations(childC).length, 1);
+    assert.equal(implementations(childB).length, 0);
+    assert.equal(store.getEpicTask(parentKey, childB).orchestrationState, "pending-dependencies");
+
+    await dispatchCycle();
+    await dispatchCycle();
+    assert.equal(reviewers(childA).length, 1);
+    assert.equal(reviewers(childC).length, 1);
+    assert.equal(store.getRun(implementations(childA)[0].id).state, "reviewed-clean");
+    assert.equal(store.getRun(implementations(childC)[0].id).state, "reviewed-clean");
+
+    let crashTriggered = false;
+    await assert.rejects(
+      dispatchCycle({
+        afterIntegrationEvidence: (_evidence, integration) => {
+          if (integration.issueKey === childA && !crashTriggered) {
+            crashTriggered = true;
+            throw new Error("Simulated post-merge pre-bookkeeping crash");
+          }
+        }
+      }),
+      /post-merge pre-bookkeeping crash/
+    );
+    assert.equal(crashTriggered, true);
+    assert.equal(
+      store.listEpicIntegrations(parentKey).find((row) => row.issueKey === childA).state,
+      "integrating"
+    );
+    assert.equal(integrationWorkers(childA).length, 1);
+    assert.equal(integrationWorkers(childA)[0].state, "started");
+    assert.equal(implementations(childB).length, 0, "B must not dispatch before durable A integration");
+
+    const parentBeforeRestart = store.getParentExecution(parentKey);
+    const reviewedShaA = store.getEpicTask(parentKey, childA).reviewedSha;
+    const parentHeadBeforeRestart = sourceControl.getHead({ repoPath: parentBeforeRestart.integrationWorktree });
+    const ancestryBeforeRestart = sourceControl.isAncestor(
+      reviewedShaA,
+      parentHeadBeforeRestart.sha,
+      { repoPath: parentBeforeRestart.integrationWorktree }
+    );
+    assert.ok(
+      ancestryBeforeRestart === true || ancestryBeforeRestart?.isAncestor === true,
+      "Successful Git integration evidence must exist before the bookkeeping crash"
+    );
+
+    store.close();
+    store = new RunStore(dbPath);
+    settings._store = store;
+    settings.getStore = () => store;
+
+    await dispatchCycle();
+    assert.equal(store.getEpicTask(parentKey, childA).state, "integrated");
+    assert.equal(implementations(childB).length, 1, "Restart recovery must unlock and dispatch B");
+    assert.equal(integrationWorkers(childA).length, 1, "Recovery must not create a second integration worker");
+    assert.equal(integrationWorkers(childA)[0].state, "completed");
+
+    for (let cycle = 0; cycle < 6 && store.getParentExecution(parentKey).state !== "waiting_human"; cycle += 1) {
+      await dispatchCycle();
+    }
+
+    const finalParent = store.getParentExecution(parentKey);
+    assert.equal(finalParent.state, "waiting_human");
+    assert.ok(finalParent.completionPacket);
+    assert.equal(finalParent.completionPacket.children.length, 3);
+    for (const issueKey of [childA, childB, childC]) {
+      assert.equal(store.getEpicTask(parentKey, issueKey).state, "integrated");
+      assert.equal(implementations(issueKey).length, 1, issueKey + " must have exactly one implementation provider run");
+      assert.equal(reviewers(issueKey).length, 1, issueKey + " must have exactly one independent review provider run");
+      assert.equal(integrationWorkers(issueKey).length, 1, issueKey + " must have exactly one integration worker");
+    }
+    assert.equal(invocations.filter((entry) => entry.kind === "implementation").length, 3);
+    assert.equal(invocations.filter((entry) => entry.kind === "review").length, 3);
+    assert.equal(invocations.filter((entry) => entry.kind === "aggregate").length, 1);
+
+    const parentTelemetry = store.database.prepare(
+      "SELECT id, raw_payload FROM telemetry_events WHERE issue_key = ? ORDER BY id"
+    ).all(parentKey).map((row) => ({
+      id: row.id,
+      payload: row.raw_payload ? JSON.parse(row.raw_payload) : {}
+    }));
+    const aIntegratedIndex = parentTelemetry.findIndex(
+      (row) => row.payload.event === "child_integrated" && row.payload.issueKey === childA
+    );
+    const bDispatchedIndex = parentTelemetry.findIndex(
+      (row) => String(row.payload.event || "").startsWith("child_dis") && row.payload.issueKey === childB
+    );
+    assert.ok(aIntegratedIndex >= 0);
+    assert.ok(bDispatchedIndex > aIntegratedIndex, "Durable A integration must precede B dispatch");
+
+    const workerRuns = store.listRunsDetailed(500).filter((run) =>
+      run.payload?.action === "implementation" ||
+      run.payload?.type === "review" ||
+      run.payload?.role === "reviewer" ||
+      run.payload?.role === "integration-worker"
+    );
+    for (const run of workerRuns) {
+      const terminalCount = store.database.prepare(
+        "SELECT COUNT(*) AS count FROM telemetry_events WHERE run_id = ? AND stage = 'terminal'"
+      ).get(run.id).count;
+      assert.equal(terminalCount, 1, "Worker run " + run.id + " must terminalize exactly once");
+    }
+    const orphanRuns = store.listRunsDetailed(500).filter(
+      (run) => run.state === "started" || run.state === "executing"
+    );
+    assert.deepEqual(orphanRuns, []);
+
+    const forbiddenTransitions = ["done", "closed", "release", "deploy", "production", "finalmerge"];
+    for (const transition of workSource.transitions) {
+      const normalizedState = String(transition.state || "").toLowerCase();
+      assert.equal(
+        forbiddenTransitions.some((word) => normalizedState.includes(word)),
+        false,
+        "Forbidden automatic WorkSource transition: " + transition.state
+      );
+    }
+    const finalDevelopSha = spawnSync("git", ["-C", repo, "rev-parse", "develop"]).stdout.toString().trim();
+    assert.equal(finalDevelopSha, initialDevelopSha, "develop must remain untouched");
+  } finally {
+    try { store.close(); } catch {}
+    cleanup();
+  }
+});
 // -----------------------------------------------------------------------------
 // Test X: WAITING_HUMAN Final Boundary (Zero Auto-Merge / Done / Promotion)
 // -----------------------------------------------------------------------------
