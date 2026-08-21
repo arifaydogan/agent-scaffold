@@ -3,6 +3,7 @@
     "key": "PACE",
     "repoPath": ".",
     "name": "PaceBuild",
+    "baseBranch": "epic/provider-neutral-control-plane",
     "operatingMode": "autonomous"
   },
   "policy": {
@@ -55,7 +56,9 @@
         "backend/**"
       ],
       "frontend-engineer": [
-        "frontend/**"
+        "frontend/**",
+        "ui/**",
+        "test/ui.test.js"
       ],
       "devops-engineer": [
         ".github/**",
