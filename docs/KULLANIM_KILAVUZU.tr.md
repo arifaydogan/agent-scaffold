@@ -431,6 +431,15 @@ yalnizca `controlPlane.configMutationEnabled: true` acikca ayarlandiginda calisi
 Bu endpoint sadece tanimli provider isimlerini secer. Komut, credential, policy,
 `supervisor.executeEnabled`, write flag, merge veya Done gate'i degistiremez.
 
+**Saglayicilar > Baglantilar** bolumu provider seciminden ayri calisir. Jira site,
+e-posta ve API token bilgileri once Jira ile dogrulanir; ardindan token config veya
+SQLite'a yazilmadan Windows DPAPI ile `.agent-runtime/provider-credentials.json`
+dosyasinda korunur. Mevcut environment credential'lari her zaman onceliklidir.
+Codex icin resmi `codex login` tarayici akisi acilir; Claude Code ve Antigravity
+oturumlari kendi CLI/uygulamalarinda yonetilir ve ekrandan test edilir. Baglanti
+degisiklikleri localhost ile sinirlidir ve
+`controlPlane.providerConnectionMutationEnabled: true` olmadikca kapali kalir.
+
 ### Runtime'in bugunku siniri
 
 Runtime su anda orchestration prompt paketini tam olarak faz faz calistirmiyor.

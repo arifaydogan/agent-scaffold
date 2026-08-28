@@ -518,6 +518,19 @@
             ℹ️ <strong>Gelecek Çalıştırmalar Uyarısı:</strong> Sağlayıcı seçimlerinin değiştirilmesi yalnızca GELECEKTEKİ runlar için geçerlidir.
           </div>
 
+          <section class="provider-connections-section" aria-labelledby="provider-connections-title">
+            <div class="provider-connections-heading">
+              <div>
+                <h3 id="provider-connections-title">Bağlantılar</h3>
+                <p>Jira ve yürütme araçlarının oturum durumunu tek yerden yönetin.</p>
+              </div>
+              <span id="provider-connections-security" class="badge">Yerel ve güvenli</span>
+            </div>
+            <div id="provider-connections-grid" class="provider-connections-grid" aria-live="polite">
+              <div class="empty-state">Bağlantı durumları yükleniyor…</div>
+            </div>
+          </section>
+
           <div class="config-providers-grid">
             <!-- WorkSourceProvider -->
             <div class="config-card">
@@ -685,6 +698,46 @@
           <button id="provider-detail-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
         </div>
         <div id="provider-detail-body" class="trace-body"></div>
+      </div>
+    </div>
+
+    <!-- Provider Connection Drawer -->
+    <div id="provider-connection-drawer" class="trace-modal-backdrop" hidden>
+      <div class="trace-drawer provider-connection-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-connection-title">
+        <div class="trace-header">
+          <div>
+            <span id="provider-connection-pill" class="badge badge-key">—</span>
+            <h2 id="provider-connection-title">Sağlayıcı bağlantısı</h2>
+            <p id="provider-connection-summary" class="trace-summary-text">—</p>
+          </div>
+          <button id="provider-connection-close-btn" class="trace-close-button" aria-label="Kapat">✕</button>
+        </div>
+        <div class="trace-body">
+          <p id="provider-connection-guidance" class="provider-connection-guidance"></p>
+          <form id="provider-connection-form" class="agent-modal-form">
+            <div id="jira-connection-fields" class="provider-connection-fields" hidden>
+              <div class="form-group">
+                <label for="jira-site-input">Jira site adresi</label>
+                <input id="jira-site-input" class="form-input" type="url" inputmode="url" autocomplete="url" placeholder="https://sirket.atlassian.net" />
+              </div>
+              <div class="form-group">
+                <label for="jira-email-input">Jira hesabı e-postası</label>
+                <input id="jira-email-input" class="form-input" type="email" inputmode="email" autocomplete="username" placeholder="ad@firma.com" />
+              </div>
+              <div class="form-group">
+                <label for="jira-token-input">Jira API token</label>
+                <input id="jira-token-input" class="form-input" type="password" autocomplete="new-password" placeholder="Token yalnızca güvenli kasaya kaydedilir" />
+                <small>Token ekranda tekrar gösterilmez ve yapılandırma dosyasına yazılmaz.</small>
+              </div>
+            </div>
+            <div id="provider-connection-status" class="modal-status-msg" hidden aria-live="polite"></div>
+            <div class="drawer-actions provider-connection-actions">
+              <button id="provider-connection-connect-btn" class="pm-btn pm-btn-approve" type="submit">Bağlan</button>
+              <button id="provider-connection-test-btn" class="pm-btn pm-btn-view" type="button">Test Et</button>
+              <button id="provider-connection-disconnect-btn" class="pm-btn pm-btn-reject" type="button" hidden>Bağlantıyı Kaldır</button>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
 

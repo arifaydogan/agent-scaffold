@@ -112,6 +112,53 @@ test("dashboard server is localhost-only and returns secure read-only responses"
   }
 });
 
+test("dashboard exposes localhost-only provider connection lifecycle endpoints", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-dashboard-providers-"));
+  const store = new RunStore(path.join(directory, "runs.sqlite3"));
+  const dashboardSettings = settings(directory);
+  dashboardSettings.data.controlPlane = { providerConnectionMutationEnabled: true };
+  const calls = [];
+  const providerConnections = {
+    async list() { return { mutationEnabled: true, secureStore: { supported: true }, connections: [{ id: "jira" }] }; },
+    async test(id) { calls.push(["test", id]); return { ok: true, status: "connected" }; },
+    async connect(id, body) { calls.push(["connect", id, body]); return { ok: true, status: "connected" }; },
+    async disconnect(id) { calls.push(["disconnect", id]); return { ok: true, removed: true }; },
+    safeError(error) { return error.message; }
+  };
+  const dashboard = await startDashboardServer(dashboardSettings, {
+    port: 0,
+    demo: true,
+    store,
+    providerConnections
+  });
+  try {
+    const list = await fetch(`${dashboard.url}/api/provider-connections`).then(response => response.json());
+    assert.equal(list.connections[0].id, "jira");
+
+    const tested = await fetch(`${dashboard.url}/api/provider-connections/jira/test`, { method: "POST" });
+    assert.equal(tested.status, 200);
+    await tested.json();
+
+    const connected = await fetch(`${dashboard.url}/api/provider-connections/jira/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ baseUrl: "https://example.atlassian.net", email: "agent@example.com", token: "secret-token" })
+    });
+    assert.equal(connected.status, 202);
+    await connected.json();
+
+    const disconnected = await fetch(`${dashboard.url}/api/provider-connections/jira`, { method: "DELETE" });
+    assert.equal(disconnected.status, 200);
+    await disconnected.json();
+    assert.deepEqual(calls.map(call => call.slice(0, 2)), [
+      ["test", "jira"], ["connect", "jira"], ["disconnect", "jira"]
+    ]);
+  } finally {
+    dashboard.server.closeAllConnections?.();
+    await new Promise(resolve => dashboard.server.close(resolve));
+  }
+});
+
 test("dashboard snapshot exposes epic progress, integration queue, and token budget", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-dashboard-epic-"));
   const store = new RunStore(path.join(directory, "runs.sqlite3"));

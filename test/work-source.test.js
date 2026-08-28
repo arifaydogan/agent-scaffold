@@ -93,6 +93,36 @@ test("work source factory selects GitHub without constructing Jira credentials",
   assert.ok(createWorkSourceProvider(settings) instanceof GitHubIssuesWorkSourceProvider);
 });
 
+test("work source factory can use Jira credentials from the secure provider vault", () => {
+  const settings = {
+    source: "C:/repo/agent-scaffold.json",
+    data: {
+      workSource: {
+        defaultProvider: "jira",
+        providers: {
+          jira: {
+            type: "jira",
+            baseUrl: "https://config.atlassian.net",
+            emailEnv: "EMAIL",
+            tokenEnv: "TOKEN"
+          }
+        }
+      }
+    }
+  };
+  const jira = createWorkSourceProvider(settings, {}, {
+    vault: {
+      read: () => ({
+        baseUrl: "https://vault.atlassian.net",
+        email: "agent@example.com",
+        token: "vault-token"
+      })
+    }
+  });
+  assert.ok(jira instanceof JiraClient);
+  assert.equal(jira.baseUrl, "https://vault.atlassian.net");
+});
+
 test("Jira adapter constructs JQL with canonicalStates forwarding for ready, review, rework, human_approval", async () => {
   const jira = new JiraClient(
     {

@@ -31,7 +31,10 @@ const state = {
   selectedRunId: null,
   lastFocusedElement: null,
   pendingApprovalItem: null,
-  pendingRejectionItem: null
+  pendingRejectionItem: null,
+  providerConnections: null,
+  providerConnectionsLoading: false,
+  activeProviderConnectionId: null
 };
 
 const elements = typeof document !== "undefined" ? {
@@ -2637,6 +2640,214 @@ function renderConfigView(data) {
   host.appendChild(wrap);
 }
 
+const PROVIDER_CONNECTION_STATUS_LABELS = {
+  connected: "Bağlı",
+  configured: "Yapılandırıldı",
+  not_authenticated: "Oturum gerekli",
+  not_installed: "Kurulu değil",
+  not_configured: "Bağlı değil"
+};
+
+function renderProviderConnections(data) {
+  state.providerConnections = data || { connections: [] };
+  const host = getElem("provider-connections-grid");
+  const security = getElem("provider-connections-security");
+  if (security) {
+    security.textContent = data?.secureStore?.supported ? "Windows güvenli kasa" : "Ortam değişkenleri";
+    security.className = data?.secureStore?.supported ? "badge badge-enabled" : "badge";
+  }
+  if (!host) return;
+  host.innerHTML = "";
+  const connections = Array.isArray(data?.connections) ? data.connections : [];
+  if (connections.length === 0) {
+    host.appendChild(element("div", "empty-state", "Bağlantı bilgisi bulunamadı."));
+    return;
+  }
+  connections.forEach(connection => {
+    const card = element("article", `provider-connection-card status-${connection.status || "unknown"}`);
+    const header = element("div", "provider-connection-card-header");
+    const identity = element("div", "provider-connection-identity");
+    identity.appendChild(element("strong", null, connection.displayName || connection.id));
+    identity.appendChild(element("span", "provider-connection-kind", connection.kind === "work-source" ? "İş kaynağı" : "Yürütme aracı"));
+    const badge = element("span", `provider-connection-status status-${connection.status || "unknown"}`, PROVIDER_CONNECTION_STATUS_LABELS[connection.status] || "Bilinmiyor");
+    header.append(identity, badge);
+    card.appendChild(header);
+    card.appendChild(element("p", "provider-connection-copy", connection.guidance || "Bağlantı durumunu kontrol edin."));
+    const meta = element("div", "provider-connection-meta");
+    if (connection.site) meta.appendChild(element("span", null, connection.site));
+    if (connection.credentialSource) {
+      meta.appendChild(element("span", null, connection.credentialSource === "environment" ? "Ortam değişkenleri" : "Güvenli kasa"));
+    }
+    if (connection.selected) meta.appendChild(element("span", "badge badge-key", "Seçili"));
+    card.appendChild(meta);
+    const actions = element("div", "provider-connection-card-actions");
+    const manage = element("button", "pm-btn pm-btn-view", connection.status === "connected" ? "Detay" : "Bağlantıyı Aç");
+    manage.type = "button";
+    manage.addEventListener?.("click", () => openProviderConnectionDrawer(connection, manage));
+    actions.appendChild(manage);
+    const test = element("button", "pm-btn pm-btn-approve", "Test Et");
+    test.type = "button";
+    test.disabled = connection.installed === false || (connection.id === "jira" && !connection.configured);
+    test.addEventListener?.("click", () => {
+      openProviderConnectionDrawer(connection, test);
+      testProviderConnection(connection.id, test);
+    });
+    actions.appendChild(test);
+    card.appendChild(actions);
+    host.appendChild(card);
+  });
+}
+
+function setProviderConnectionMessage(kind, message) {
+  const status = getElem("provider-connection-status");
+  if (!status) return;
+  status.hidden = false;
+  status.className = `modal-status-msg is-${kind}`;
+  status.textContent = message;
+}
+
+function clearProviderConnectionSecret() {
+  const token = getElem("jira-token-input");
+  if (token) token.value = "";
+}
+
+function openProviderConnectionDrawer(connection, trigger = null) {
+  state.activeProviderConnectionId = connection.id;
+  const mutationEnabled = Boolean(state.providerConnections?.mutationEnabled);
+  const pill = getElem("provider-connection-pill");
+  const title = getElem("provider-connection-title");
+  const summary = getElem("provider-connection-summary");
+  const guidance = getElem("provider-connection-guidance");
+  const fields = getElem("jira-connection-fields");
+  const form = getElem("provider-connection-form");
+  const connect = getElem("provider-connection-connect-btn");
+  const test = getElem("provider-connection-test-btn");
+  const disconnect = getElem("provider-connection-disconnect-btn");
+  const status = getElem("provider-connection-status");
+  if (pill) pill.textContent = connection.displayName || connection.id;
+  if (title) title.textContent = `${connection.displayName || connection.id} bağlantısı`;
+  if (summary) summary.textContent = PROVIDER_CONNECTION_STATUS_LABELS[connection.status] || "Bağlantı durumu bilinmiyor";
+  if (guidance) guidance.textContent = connection.guidance || "Bağlantı durumunu test edin.";
+  if (fields) fields.hidden = connection.id !== "jira";
+  if (form) form.dataset.providerId = connection.id;
+  if (status) status.hidden = true;
+  const site = getElem("jira-site-input");
+  const email = getElem("jira-email-input");
+  if (site) site.value = connection.site || "";
+  if (email) email.value = "";
+  clearProviderConnectionSecret();
+  const canStartLogin = connection.id === "jira" ? connection.canConnect : connection.loginSupported;
+  if (connect) {
+    connect.hidden = !canStartLogin;
+    connect.disabled = !mutationEnabled || connection.installed === false;
+    connect.textContent = connection.id === "codex" ? "Codex Girişini Aç" : "Bağlan ve Güvenli Kaydet";
+  }
+  if (test) test.disabled = connection.installed === false || (connection.id === "jira" && !connection.configured);
+  if (disconnect) {
+    disconnect.hidden = !(connection.id === "jira" && connection.credentialSource === "vault");
+    disconnect.disabled = !mutationEnabled;
+  }
+  if (!mutationEnabled && canStartLogin && guidance) {
+    guidance.textContent += " Bu dashboard için bağlantı değişiklikleri kapalı.";
+  }
+  openModal("provider-connection-drawer", trigger);
+}
+
+function closeProviderConnectionDrawer() {
+  clearProviderConnectionSecret();
+  state.activeProviderConnectionId = null;
+  closeModal("provider-connection-drawer");
+}
+
+async function fetchProviderConnections() {
+  if (state.providerConnectionsLoading) return;
+  state.providerConnectionsLoading = true;
+  try {
+    const response = await fetch("/api/provider-connections");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    renderProviderConnections(data);
+  } catch (error) {
+    const host = getElem("provider-connections-grid");
+    if (host) {
+      host.innerHTML = "";
+      host.appendChild(element("div", "empty-state", `Bağlantı durumları alınamadı: ${error.message}`));
+    }
+  } finally {
+    state.providerConnectionsLoading = false;
+  }
+}
+
+async function providerConnectionRequest(id, action, payload) {
+  const options = { method: action === "disconnect" ? "DELETE" : "POST" };
+  const suffix = action === "disconnect" ? "" : `/${action}`;
+  if (payload !== undefined) {
+    options.headers = { "Content-Type": "application/json" };
+    options.body = JSON.stringify(payload);
+  }
+  const response = await fetch(`/api/provider-connections/${encodeURIComponent(id)}${suffix}`, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+async function submitProviderConnection(event) {
+  event?.preventDefault?.();
+  const id = state.activeProviderConnectionId;
+  if (!id) return;
+  const connect = getElem("provider-connection-connect-btn");
+  if (connect) connect.disabled = true;
+  setProviderConnectionMessage("loading", id === "codex" ? "Codex giriş ekranı açılıyor…" : "Bağlantı doğrulanıyor…");
+  try {
+    const payload = id === "jira" ? {
+      baseUrl: getElem("jira-site-input")?.value,
+      email: getElem("jira-email-input")?.value,
+      token: getElem("jira-token-input")?.value
+    } : {};
+    const result = await providerConnectionRequest(id, "connect", payload);
+    clearProviderConnectionSecret();
+    setProviderConnectionMessage("success", result.guidance || "Bağlantı doğrulandı ve güvenli biçimde kaydedildi.");
+    await fetchProviderConnections();
+  } catch (error) {
+    clearProviderConnectionSecret();
+    setProviderConnectionMessage("error", `Bağlantı kurulamadı: ${error.message}`);
+  } finally {
+    if (connect) connect.disabled = false;
+  }
+}
+
+async function testProviderConnection(id = state.activeProviderConnectionId, trigger = null) {
+  if (!id) return;
+  if (trigger) trigger.disabled = true;
+  if (state.activeProviderConnectionId === id) setProviderConnectionMessage("loading", "Bağlantı test ediliyor…");
+  try {
+    await providerConnectionRequest(id, "test");
+    if (state.activeProviderConnectionId === id) setProviderConnectionMessage("success", "Bağlantı hazır ve kullanılabilir.");
+    await fetchProviderConnections();
+  } catch (error) {
+    if (state.activeProviderConnectionId === id) setProviderConnectionMessage("error", `Test başarısız: ${error.message}`);
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
+}
+
+async function disconnectProviderConnection() {
+  const id = state.activeProviderConnectionId;
+  if (!id || !confirm("Dashboard tarafından güvenli kasada tutulan Jira bağlantısı kaldırılsın mı?")) return;
+  const button = getElem("provider-connection-disconnect-btn");
+  if (button) button.disabled = true;
+  setProviderConnectionMessage("loading", "Bağlantı kaldırılıyor…");
+  try {
+    await providerConnectionRequest(id, "disconnect");
+    setProviderConnectionMessage("success", "Yerel Jira bağlantısı kaldırıldı.");
+    await fetchProviderConnections();
+  } catch (error) {
+    setProviderConnectionMessage("error", `Bağlantı kaldırılamadı: ${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function providerName(provider) {
   return typeof provider === "string" ? provider : provider.id || provider.name || provider.provider || "—";
 }
@@ -2788,6 +2999,7 @@ async function fetchSnapshot() {
     renderOverview(data);
     renderPmWorkspace();
     renderConfigView(data);
+    fetchProviderConnections();
     renderAgentRegistry();
 
     if (state.currentView === "parents-view") {
@@ -2978,6 +3190,14 @@ function setupEventListeners() {
   if (agentDetailCloseBtn) agentDetailCloseBtn.addEventListener("click", () => closeModal("agent-detail-drawer"));
   const providerDetailCloseBtn = getElem("provider-detail-close-btn");
   if (providerDetailCloseBtn) providerDetailCloseBtn.addEventListener("click", () => closeModal("provider-detail-drawer"));
+  const providerConnectionCloseBtn = getElem("provider-connection-close-btn");
+  if (providerConnectionCloseBtn) providerConnectionCloseBtn.addEventListener("click", closeProviderConnectionDrawer);
+  const providerConnectionForm = getElem("provider-connection-form");
+  if (providerConnectionForm) providerConnectionForm.addEventListener("submit", submitProviderConnection);
+  const providerConnectionTestBtn = getElem("provider-connection-test-btn");
+  if (providerConnectionTestBtn) providerConnectionTestBtn.addEventListener("click", () => testProviderConnection());
+  const providerConnectionDisconnectBtn = getElem("provider-connection-disconnect-btn");
+  if (providerConnectionDisconnectBtn) providerConnectionDisconnectBtn.addEventListener("click", disconnectProviderConnection);
 
   const traceCloseBtn = getElem("trace-close-btn");
   if (traceCloseBtn) {
@@ -3110,6 +3330,8 @@ if (typeof module !== "undefined" && module.exports) {
     populateParentSelector,
     renderObservability,
     renderConfigView,
+    renderProviderConnections,
+    fetchProviderConnections,
     renderAgentRegistry,
     createPmItemCard,
     renderProviderSection,

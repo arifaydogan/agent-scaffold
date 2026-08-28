@@ -261,6 +261,7 @@
     "issueLimit": 10
   },
   "controlPlane": {
-    "configMutationEnabled": false
+    "configMutationEnabled": false,
+    "providerConnectionMutationEnabled": false
   }
 }

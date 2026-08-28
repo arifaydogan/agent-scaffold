@@ -110,6 +110,14 @@ Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`; GitHub Issues can 
 `GITHUB_TOKEN`. Work-source writes remain disabled in the example. Provider selection
 mutation is also fail-closed and requires `controlPlane.configMutationEnabled = true`.
 
+The **Providers > Connections** area manages authentication separately from provider
+selection. Jira credentials entered there are validated first and then protected with
+Windows DPAPI in ignored `.agent-runtime/provider-credentials.json`; environment
+variables keep priority when present. Codex login uses the native `codex login` browser
+flow, while Claude Code and Antigravity continue to use their own CLI/application
+sessions. Connection writes are localhost-only and fail closed unless
+`controlPlane.providerConnectionMutationEnabled = true`.
+
 ## Provider-neutral Control Plane
 
 The provider model and safety contract are documented in

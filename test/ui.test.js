@@ -45,7 +45,7 @@ function setupMockDOM() {
 function loadUi() {
   const code = fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8");
   const { elements, globalScope } = setupMockDOM();
-  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderOverview, renderPmWorkspace, switchView, openModal, closeModal };");
+  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderOverview, renderPmWorkspace, renderProviderConnections, switchView, openModal, closeModal };");
   return { ...runUI(...Object.values(globalScope)), elements };
 }
 
@@ -98,6 +98,23 @@ test("Cockpit navigation and drawers preserve practical keyboard focus behavior"
   assert.equal(trigger.focused, true, "closing a drawer or modal restores focus to its trigger");
 });
 
+test("Provider connections render clear status cards without exposing credentials", () => {
+  const ui = loadUi();
+  ui.renderProviderConnections({
+    mutationEnabled: true,
+    secureStore: { supported: true },
+    connections: [
+      { id: "jira", displayName: "Jira", kind: "work-source", status: "configured", installed: true, configured: true, credentialSource: "vault", site: "https://example.atlassian.net", guidance: "Bağlantıyı test edin." },
+      { id: "codex", displayName: "Codex", kind: "executor", status: "connected", installed: true, connected: true, selected: true, guidance: "Codex güvenli giriş kullanır." }
+    ]
+  });
+  const cards = ui.elements["#provider-connections-grid"].children;
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].children[0].children[1].textContent, "Yapılandırıldı");
+  assert.equal(cards[1].children[0].children[1].textContent, "Bağlı");
+  assert.equal(JSON.stringify(cards).includes("token"), false);
+});
+
 test("Cockpit markup keeps four Overview KPIs and table-first provider/work surfaces", () => {
   const html = fs.readFileSync(path.resolve("ui/index.html"), "utf8");
   const css = fs.readFileSync(path.resolve("ui/dashboard.css"), "utf8");
@@ -106,6 +123,8 @@ test("Cockpit markup keeps four Overview KPIs and table-first provider/work surf
   assert.match(html, /id="attention-list"/);
   assert.match(html, /data-pm-filter="journal"/);
   assert.match(fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8"), /provider-table-wrap/);
+  assert.match(html, /id="provider-connections-grid"/);
+  assert.match(html, /id="jira-token-input" class="form-input" type="password" autocomplete="new-password"/);
   assert.doesNotMatch(html, /\sstyle="/, "strict CSP markup contains no inline style attributes");
   assert.doesNotMatch(css, /\.pm-queue-container\s*\{[^}]*display:\s*(grid|flex)/, "table tbody never becomes a grid or flex container");
   assert.match(css, /@media \(max-width: 1100px\)[\s\S]*?\.main-content \{ grid-column: 1; grid-row: 2; min-width: 0; \}/);
