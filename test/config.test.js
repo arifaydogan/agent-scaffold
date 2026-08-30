@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadSettings } from "../lib/config.js";
+import {
+  loadSettings,
+  normalizeLocalExecutorEndpoint,
+  selectLocalExecutor,
+  updateLocalExecutorModel
+} from "../lib/config.js";
 
 /** Writes a minimal valid config to a temp file and returns the path. */
 function writeConfig(directory, overrides = {}) {
@@ -219,4 +224,53 @@ test("policy review: accepts valid review provider and model profile", () => {
   const settings = loadSettings(configPath);
   assert.equal(settings.data.policy.review.provider, "antigravity");
   assert.equal(settings.data.policy.review.maxReworkAttempts, 3);
+});
+
+test("local executor model configuration and selection use the narrow connection mutation gate", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-local-"));
+  const configPath = writeConfig(dir, {
+    controlPlane: { configMutationEnabled: false, providerConnectionMutationEnabled: true },
+    executor: {
+      defaultProvider: "codex",
+      providers: {
+        codex: { command: ["codex", "exec", "{prompt}"] },
+        ollama: {
+          enabled: false,
+          localProvider: "ollama",
+          command: ["codex", "exec", "--oss", "--local-provider", "ollama", "-m", "{model}", "{prompt}"],
+          modelProfiles: {}
+        }
+      }
+    }
+  });
+  const configured = updateLocalExecutorModel(
+    loadSettings(configPath),
+    "ollama",
+    "qwen3:8b",
+    "http://10.20.30.40:11434",
+    true
+  );
+  assert.equal(configured.data.executor.providers.ollama.enabled, true);
+  assert.equal(configured.data.executor.providers.ollama.endpoint, "http://10.20.30.40:11434");
+  assert.equal(configured.data.executor.providers.ollama.remoteEndpointApproved, true);
+  assert.equal(configured.data.executor.providers.ollama.defaultModel, "qwen3:8b");
+  assert.equal(configured.data.executor.providers.ollama.modelProfiles.medium, "qwen3:8b");
+  assert.equal(configured.data.executor.defaultProvider, "codex", "saving a model does not silently select it");
+
+  const selected = selectLocalExecutor(configured, "ollama");
+  assert.equal(selected.data.executor.defaultProvider, "ollama");
+  assert.equal(selected.data.controlPlane.configMutationEnabled, false);
+});
+
+test("local executor endpoints are restricted to loopback or explicitly approved private networks", () => {
+  assert.equal(normalizeLocalExecutorEndpoint("http://127.0.0.1:11434/"), "http://127.0.0.1:11434");
+  assert.equal(normalizeLocalExecutorEndpoint("https://192.168.1.50:8443"), "https://192.168.1.50:8443");
+  assert.equal(normalizeLocalExecutorEndpoint("http://models.office.local:1234"), "http://models.office.local:1234");
+  assert.equal(
+    normalizeLocalExecutorEndpoint("https://llm.example.com:8443", ["https://llm.example.com:8443"]),
+    "https://llm.example.com:8443"
+  );
+  assert.throws(() => normalizeLocalExecutorEndpoint("https://public.example.com"), /private network\/VPN/);
+  assert.throws(() => normalizeLocalExecutorEndpoint("http://user:secret@10.0.0.8:11434"), /cannot contain credentials/);
+  assert.throws(() => normalizeLocalExecutorEndpoint("http://10.0.0.8:11434/v1"), /without a path/);
 });

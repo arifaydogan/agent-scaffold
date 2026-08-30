@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { routeIssue } from "../lib/routing.js";
+import { extractDeclaredAllowedPaths, routeIssue } from "../lib/routing.js";
 
 test("CV work routes to the CV persona", () => {
   const route = routeIssue({
@@ -60,4 +60,90 @@ test("all routes include minimal-change exactly once", () => {
     const count = route.skills.filter((s) => s === "minimal-change").length;
     assert.equal(count, 1, `Expected minimal-change exactly once for issue ${issue.summary}, got ${count}`);
   }
+});
+
+test("technical governance work ignores Jira skill metadata and migration used outside a data context", () => {
+  const route = routeIssue({
+    summary: "Enforce worktree ownership, shared-path locks and migration reservation",
+    description: [
+      "Add a shared-path lock registry and worktree ownership checks.",
+      "",
+      "## Agent route",
+      "Required skills: `jira-management`, `minimal-change`"
+    ].join("\n")
+  });
+  assert.equal(route.persona, "backend-engineer");
+  assert.equal(route.risk, "high");
+  assert.ok(route.reasons.some(reason => reason.includes("worktree")));
+});
+
+test("declared allowed paths are extracted only from explicit scope and verification sections", () => {
+  const paths = extractDeclaredAllowedPaths([
+    "## Allowed and forbidden scope",
+    "- Allowed: `.agents/**`, `bin/**`, `lib/**`, focused governance tests",
+    "- Forbidden: `ui/**`, `secrets/**`",
+    "",
+    "## Verification",
+    "- Expected test file: `lib/__tests__/worktree-locks.test.js`",
+    "",
+    "## Agent route",
+    "- Required skills: `jira-management`"
+  ].join("\n"));
+  assert.deepEqual(paths, [
+    ".agents/**",
+    "bin/**",
+    "lib/**",
+    "lib/__tests__/worktree-locks.test.js"
+  ]);
+});
+
+test("declared paths survive Jira ADF plain-text heading conversion", () => {
+  const paths = extractDeclaredAllowedPaths([
+    "Allowed and forbidden scope",
+    "Allowed:",
+    ".agents/**",
+    "bin/**",
+    "lib/**",
+    "focused governance tests",
+    "Forbidden:",
+    "ui/**",
+    "Verification",
+    "Expected test file: lib/__tests__/worktree-locks.test.js"
+  ].join("\n"));
+  assert.deepEqual(paths, [
+    ".agents/**",
+    "bin/**",
+    "lib/**",
+    "lib/__tests__/worktree-locks.test.js"
+  ]);
+});
+
+test("declared paths support an inline Allowed line from Jira ADF", () => {
+  const paths = extractDeclaredAllowedPaths([
+    "Allowed and forbidden scope",
+    "Allowed: .agents/**, bin/**, lib/**, focused governance tests",
+    "Forbidden: ui/**",
+    "Expected test file: lib/__tests__/worktree-locks.test.js"
+  ].join("\n"));
+  assert.deepEqual(paths, [
+    ".agents/**",
+    "bin/**",
+    "lib/**",
+    "lib/__tests__/worktree-locks.test.js"
+  ]);
+});
+
+test("Jira ADF directory paths that lose bold glob markers are normalized inside explicit Allowed scope", () => {
+  const paths = extractDeclaredAllowedPaths([
+    "Allowed and forbidden scope",
+    "Allowed: .agents/, bin/, lib/** and focused governance tests; PACEBUILD_ORCHESTRATOR.md only through separately approved protocol change.",
+    "Forbidden: backend/, cv-engine/, frontend product code, migrations.",
+    "Expected test file: lib/__tests__/worktree-locks.test.js"
+  ].join("\n"));
+  assert.deepEqual(paths, [
+    ".agents/**",
+    "bin/**",
+    "lib/**",
+    "lib/__tests__/worktree-locks.test.js"
+  ]);
 });

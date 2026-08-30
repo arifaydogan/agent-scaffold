@@ -413,6 +413,53 @@ Henuz run yoksa aktif, review ve blocked durumlarini ornek veriyle gor:
 node bin/agentctl.js --config agent-scaffold.json dashboard --demo
 ```
 
+`--demo` yalniz ornek veri gosterir; Jira veya GitHub'dan Isler/Parentlar cekmez. Gercek bagli work-source verisi icin dashboard'i `--demo` olmadan baslatin. Canli modda Isler sekmesindeki **Is Kaynagindan Yenile** ve Parentlar sekmesindeki yenile dugmesi salt-okunur katalog senkronizasyonu yapar.
+
+#### Control Plane ne işe yarar?
+
+Control Plane bir Jira kopyası değildir. Jira veya GitHub'daki işleri; seçilen AI yürütücüsü,
+agent tanımı, worktree, review ve insan onayı sınırlarıyla birlikte yönetmek ve izlemek için
+kullanılan yerel operasyon ekranıdır.
+
+- **İşler:** Tek başına planlanıp çalıştırılabilen Jira/GitHub kayıtlarını gösterir. Bir işe
+  tıklamak detayını açar. **Planı hazırla** kapsamı, agentı, modeli, base SHA'yı ve plan
+  parmak izini gösterir; **Agentı başlat** ancak bu önizlemeden sonra yürütmeyi başlatır.
+  Plan uygun değilse **İşi uyumlu hale getir** güncel routing ve registry kurallarıyla
+  salt okunur bir uyumluluk önizlemesi üretir. Eksikleri iş kaynağı, agent, dosya kapsamı,
+  kaynak kontrolü ve politika başlıklarında ayırır.
+- **Sorular:** Agent karar vermeden ilerleyemediğinde sorusunu ayrı bir gelen kutusunda
+  gösterir. Verilen yanıt SQLite karar günlüğüne eklenir ve agent aynı plan/scope ile
+  otomatik devam eder.
+- **Parentlar:** Bir Epic veya üst teslimat altındaki işleri birlikte gösterir. Alt işlerin
+  hangilerinin hemen başlayabileceğini, hangilerinin başka bir işi beklediğini ve Parent
+  dalına hangi sırayla birleştirileceğini burada izlersiniz.
+- **Sağlayıcılar:** Jira/GitHub bağlantısı ile Codex, Claude Code, Gemini, Antigravity ve
+  model sunucusu bağlantılarını yönetir.
+- **Gözlem:** Çalışan agentları, süre/token kullanımını, hataları ve provider sağlığını izler.
+
+Tipik kullanım sırası:
+
+1. **Sağlayıcılar > İş Araçları** bölümünden Jira bağlantısını kurun ve test edin.
+2. Dashboard'ı `--demo` olmadan başlatın.
+3. **İşler > İş Kaynağından Yenile** ile gerçek kayıtları alın ve bir işin detayını açın.
+4. **Planı hazırla** ile agent, provider/model, izinli yollar, base SHA ve fingerprint
+   önizlemesini kontrol edin. Uygun değilse **İşi uyumlu hale getir** ile kalan kapıları
+   kategorik olarak inceleyin. Uygunsa **Agentı başlat** düğmesine basın.
+5. Çalışan agentı Genel Bakış'tan izleyin. Gerekirse **Durdur** düğmesi yalnızca o aktif
+   run'ın süreç ağacını sonlandırır.
+6. Agent soru sorarsa **İşler > Sorular** sekmesinde yanıtlayın; yanıt kaydedildikten sonra
+   agent aynı güvenlik sınırlarıyla otomatik devam eder.
+7. İş bir Epic'in parçasıysa **Parentlar** bölümünde Epic'i seçip alt işlerin yürütme sırasını
+   ve birleştirme durumunu izleyin.
+
+Dashboard yürütmesi fail-closed'dur. `controlPlane.executionMutationEnabled` ve
+`controlPlane.operatorInteractionMutationEnabled` açık değilse plan/başlat/durdur veya
+yanıtla-devam işlemleri 403 döner. Örnek config bu alanları kapalı tutar; bilinçli yerel
+opt-in gerekir.
+Uyumluluk önizlemesi hiçbir label'ı, agent durumunu, hard path scope'u veya Git base
+branch'ini kendiliğinden değiştirmez. Özellikle dosya kapsamı otomatik genişletilmez ve
+bulunmayan parent/integration branch için sessiz fallback kullanılmaz.
+
 Varsayilan adres `http://127.0.0.1:4317`'dir. Port degistirilebilir:
 
 ```powershell
@@ -431,14 +478,63 @@ yalnizca `controlPlane.configMutationEnabled: true` acikca ayarlandiginda calisi
 Bu endpoint sadece tanimli provider isimlerini secer. Komut, credential, policy,
 `supervisor.executeEnabled`, write flag, merge veya Done gate'i degistiremez.
 
-**Saglayicilar > Baglantilar** bolumu provider seciminden ayri calisir. Jira site,
-e-posta ve API token bilgileri once Jira ile dogrulanir; ardindan token config veya
-SQLite'a yazilmadan Windows DPAPI ile `.agent-runtime/provider-credentials.json`
-dosyasinda korunur. Mevcut environment credential'lari her zaman onceliklidir.
-Codex icin resmi `codex login` tarayici akisi acilir; Claude Code ve Antigravity
-oturumlari kendi CLI/uygulamalarinda yonetilir ve ekrandan test edilir. Baglanti
-degisiklikleri localhost ile sinirlidir ve
-`controlPlane.providerConnectionMutationEnabled: true` olmadikca kapali kalir.
+**Saglayicilar > Baglantilar** bolumu provider seciminden ayri calisir ve uc sekmeye
+ayrilir:
+
+- **Is Araclari:** Jira, GitHub Issues, Notion ve Linear.
+- **AI Araclari:** Codex, Claude Code, Gemini CLI ve Antigravity.
+- **Model Sunuculari:** Bu makinede veya ozel ag/VPN uzerindeki Ollama ve LM Studio.
+
+Jira site/e-posta/token bilgileri ile GitHub, Notion ve Linear token'lari once ilgili
+servisle dogrulanir; ardindan token config veya SQLite'a yazilmadan Windows DPAPI ile
+`.agent-runtime/provider-credentials.json` dosyasinda korunur. Mevcut environment
+credential'lari her zaman onceliklidir ve ekrandan ezilemez. GitHub Issues gercek bir
+work-source adaptorudur. Notion ve Linear su anda yalnizca baglanti testi ve guvenli
+credential saklama sunar; gorev cekme adaptorleri henuz yoktur.
+
+Codex icin `codex login` tarayici akisi acilir. Claude Code, Gemini CLI ve Antigravity
+oturumlari kendi CLI/uygulamalarinda yonetilir. Gemini icin ekran sadece kurulum durumunu
+dogrular; oturum acildi gibi davranmaz.
+
+Bu ekrandaki "Model Sunuculari", modelin dashboard ile ayni makinede olmasini zorunlu kilmaz.
+Ollama veya LM Studio ayni makinede, yerel agdaki baska bir bilgisayarda ya da guvenilir
+VPN uzerindeki bir sunucuda calisabilir.
+
+Yerel/uzak LLM kullanmak icin:
+
+1. Ollama veya LM Studio'yu modelin calisacagi makineye kurup sunucuyu baslatin.
+2. En az bir model indirin/yukleyin.
+3. **Saglayicilar > Baglantilar > Model Sunuculari** sekmesinde sunucu origin adresini girin
+   (ornegin `http://192.168.1.50:11434`) ve **Modelleri Getir** dugmesine basin.
+4. Sunucu uzaktaysa, görev metni ve ilgili kod baglaminin bu sunucuya gonderilecegini
+   belirten acik onay kutusunu isaretleyin.
+5. Modeli secip **Modeli Kaydet**, ardindan **Yurutucu Olarak Kullan** dugmesine basin.
+   Bu secim
+   yalnizca gelecek run'lari etkiler.
+
+Varsayilan olarak localhost, ozel LAN/VPN IP adresleri, Tailscale/CGNAT araligi ve
+`.local` hostname'ler kabul edilir. Genel internetteki bir HTTPS sunucusu ancak tam
+origin configte acikca allowlist'e eklenirse kullanilabilir:
+
+```json
+"controlPlane": {
+  "providerConnectionMutationEnabled": true,
+  "trustedModelEndpoints": [
+    "https://llm.example.com:8443"
+  ]
+}
+```
+
+Wildcard desteklenmez. URL icinde kullanici adi/parola, path, query veya fragment kabul
+edilmez; HTTP yonlendirmeleri izlenmez. Public sunucuyu internete ciplak acmak yerine VPN
+veya kimligi dogrulanmis bir HTTPS reverse proxy kullanilmalidir.
+
+Yerel/uzak modeller dogrudan ham sohbet endpoint'i olarak degil, mevcut Codex agent harness'i
+uzerinden calisir; boylece worktree, arac kullanimi ve sonuc semasi korunur. Modeli
+kaydetmek tek basina varsayilan yurutucuyu degistirmez. Tum baglanti degisiklikleri
+localhost ile sinirlidir ve `controlPlane.providerConnectionMutationEnabled: true`
+olmadikca kapali kalir. Genel provider secim kapisi bundan bagimsizdir ve varsayilan
+olarak kapali kalmaya devam eder.
 
 ### Runtime'in bugunku siniri
 

@@ -101,7 +101,7 @@ Parallel dispatch is bounded by global and provider concurrency limits. Tasks wi
 overlapping path scopes are serialized, and cross-service tasks run in an exclusive
 wave.
 
-`dashboard` starts the localhost-only Agent Scaffold Control Plane on port 4317.
+`dashboard` starts the localhost-only Agent Scaffold Control Plane on port 4317. In live mode, the **Work** and **Parents** views read the connected work-source catalog on demand; `--demo` intentionally uses sample data and never reads Jira or GitHub. The **Work** detail now supports a fingerprint-protected **Prepare plan → Start agent** flow, active-run stop controls, and a separate **Questions** inbox that persists operator answers before resuming the agent.
 Its snapshot shows project, provider selections, canonical workflow states,
 capabilities, runs, model capacity, and blockers without exposing prompts, work-item
 descriptions, credential values, or log bodies.
@@ -111,12 +111,28 @@ Jira access uses `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN`; GitHub Issues can 
 mutation is also fail-closed and requires `controlPlane.configMutationEnabled = true`.
 
 The **Providers > Connections** area manages authentication separately from provider
-selection. Jira credentials entered there are validated first and then protected with
-Windows DPAPI in ignored `.agent-runtime/provider-credentials.json`; environment
-variables keep priority when present. Codex login uses the native `codex login` browser
-flow, while Claude Code and Antigravity continue to use their own CLI/application
-sessions. Connection writes are localhost-only and fail closed unless
-`controlPlane.providerConnectionMutationEnabled = true`.
+selection and splits the catalog into **Work Tools**, **AI Tools**, and **Model Servers**.
+Jira, GitHub, Notion, and Linear credentials entered there are validated first and then
+protected with Windows DPAPI in ignored `.agent-runtime/provider-credentials.json`;
+environment variables keep priority when present. GitHub Issues is available as a real
+work-source adapter. Notion and Linear currently provide connection validation and secure
+credential storage only; they are not advertised as runtime work sources.
+
+Codex login uses the native `codex login` browser flow. Claude Code, Gemini CLI, and
+Antigravity continue to use their own CLI/application sessions. Ollama and LM Studio can
+run on the dashboard machine or on another trusted machine. The operator enters the
+server origin, explicitly approves sending task/code context when it is remote, discovers
+models from that server, saves one as a Codex custom model-provider profile, and chooses
+**Use as executor** for future runs. Saving a model alone never changes the selected
+executor.
+
+Remote model endpoints are fail-closed: localhost, private LAN/VPN addresses, and `.local`
+hosts are accepted; public hosts require their exact origin in
+`controlPlane.trustedModelEndpoints` (no wildcards). URL credentials, paths, query strings,
+fragments, and HTTP redirects are rejected. The Control Plane mutation API itself remains
+localhost-only and fails closed unless
+`controlPlane.providerConnectionMutationEnabled = true`; the broader provider-selection
+mutation gate remains independent and closed by default.
 
 ## Provider-neutral Control Plane
 

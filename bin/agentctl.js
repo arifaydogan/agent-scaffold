@@ -3,16 +3,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { loadSettings } from "../lib/config.js";
 import { createWorkSourceProvider } from "../lib/work-source.js";
 import { configuredExecutors } from "../lib/executor.js";
 import { startDashboardServer } from "../lib/dashboard.js";
-import { getStore, issuePlan, runIssue, runIssueLocal } from "../lib/runtime.js";
+import { getStore, issuePlan, runIssue, runIssueLocal, runIssueWithPlan } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
 import { recordReviewerOutcome, tick } from "../lib/reconciler.js";
 import { backfillExternalRun, requestExternalRetry } from "../lib/external-run.js";
+import { computePlanFingerprint } from "../lib/policy.js";
 
 function usage() {
   console.error(
@@ -51,6 +52,76 @@ function numericArgument(args, name, fallback) {
   return value;
 }
 
+const DASHBOARD_ACTIVE_RUN_STATES = new Set([
+  "claimed", "prepared", "queued", "started", "model_selected", "progress", "executing"
+]);
+
+function spawnDashboardRun(settings, { issueKey, planFingerprint, operatorRequestId = null }) {
+  if (!planFingerprint) throw new Error("A verified plan fingerprint is required");
+  const args = [
+    fileURLToPath(import.meta.url),
+    "--config",
+    settings.source,
+    "run",
+    issueKey,
+    "--execute",
+    "--expected-plan-fingerprint",
+    planFingerprint
+  ];
+  if (operatorRequestId) args.push("--operator-request-id", operatorRequestId);
+  const child = spawn(process.execPath, args, {
+    cwd: path.dirname(settings.source),
+    env: process.env,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  if (!Number.isInteger(child.pid) || child.pid < 1) throw new Error("Agent runner could not be started");
+  child.unref();
+
+  const store = getStore(settings);
+  try {
+    store.addPmDecision(issueKey, "dashboard_execution_started", {
+      planFingerprint,
+      operatorRequestId,
+      runnerPid: child.pid
+    });
+  } finally {
+    store.database.close();
+  }
+  return { accepted: true, pid: child.pid };
+}
+
+function stopDashboardRun(settings, { runId }) {
+  const store = getStore(settings);
+  try {
+    const run = store.getRun(String(runId || ""));
+    if (!DASHBOARD_ACTIVE_RUN_STATES.has(run.state)) throw new Error("Run is not active");
+    const eventPid = [...run.events].reverse()
+      .map(event => Number(event.payload?.pid))
+      .find(pid => Number.isInteger(pid) && pid > 0);
+    const dispatch = store.listPmDecisions(400).find(decision =>
+      decision.issueKey === run.issue_key &&
+      decision.type === "dashboard_execution_started" &&
+      decision.payload?.planFingerprint === run.payload?.planFingerprint
+    );
+    const pid = eventPid || Number(dispatch?.payload?.runnerPid);
+    if (!Number.isInteger(pid) || pid < 1) throw new Error("Active worker PID is unavailable");
+
+    if (process.platform === "win32") {
+      const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      if (result.status !== 0) throw new Error("Worker process tree could not be stopped");
+    } else {
+      process.kill(pid, "SIGTERM");
+    }
+    store.addPmDecision(run.issue_key, "operator_stop_requested", { runId: run.id, pid });
+    return { accepted: true, runId: run.id, pid };
+  } finally {
+    store.database.close();
+  }
+}
 async function main() {
   const parsed = parseArguments(process.argv.slice(2));
   if (!parsed.command) {
@@ -110,7 +181,14 @@ async function main() {
     const dashboard = await startDashboardServer(settings, {
       port,
       demo,
-      retryHandler: demo ? undefined : (request) => requestExternalRetry(settings, request)
+      retryHandler: demo ? undefined : (request) => requestExternalRetry(settings, request),
+      startHandler: demo ? undefined : request => spawnDashboardRun(settings, request),
+      operatorResponseHandler: demo ? undefined : ({ request }) => spawnDashboardRun(settings, {
+        issueKey: request.issueKey,
+        planFingerprint: request.planFingerprint,
+        operatorRequestId: request.requestId
+      }),
+      stopHandler: demo ? undefined : request => stopDashboardRun(settings, request)
     });
     console.log(
       `Agent Scaffold Control Plane${demo ? " (demo)" : ""}: ${dashboard.url}`
@@ -414,11 +492,34 @@ async function main() {
   }
   const issue = await workSource.getWorkItem(issueKey);
   if (parsed.command === "plan") {
-    console.log(JSON.stringify(issuePlan(settings, issue), null, 2));
+    const planned = issuePlan(settings, issue);
+    console.log(JSON.stringify({
+      ...planned,
+      planFingerprint: computePlanFingerprint(planned)
+    }, null, 2));
     return 0;
   }
   if (parsed.command === "run") {
-    const result = await Promise.resolve(runIssue(settings, issue, parsed.args.includes("--execute")));
+    const planned = issuePlan(settings, issue);
+    const planFingerprint = computePlanFingerprint(planned);
+    const expectedPlanFingerprint = stringArgument(parsed.args, "--expected-plan-fingerprint");
+    if (expectedPlanFingerprint && expectedPlanFingerprint !== planFingerprint) {
+      console.error(JSON.stringify({
+        error: "Plan fingerprint changed; execution was not started",
+        expected: expectedPlanFingerprint,
+        actual: planFingerprint
+      }));
+      return 2;
+    }
+    const operatorRequestId = stringArgument(parsed.args, "--operator-request-id");
+    const result = await Promise.resolve(runIssueWithPlan(
+      settings,
+      issue,
+      { ...planned, planFingerprint },
+      parsed.args.includes("--execute"),
+      undefined,
+      operatorRequestId ? { operatorRequestId } : {}
+    ));
     console.log(JSON.stringify(result.output, null, 2));
     return result.exitCode;
   }

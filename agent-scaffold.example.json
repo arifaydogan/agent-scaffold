@@ -229,6 +229,64 @@
         },
         "resultSchema": "adapters/antigravity/execution-result.schema.json",
         "timeoutSeconds": 3600
+      },
+      "ollama": {
+        "type": "codex-local",
+        "localProvider": "ollama",
+        "enabled": false,
+        "endpoint": "http://127.0.0.1:11434",
+        "remoteEndpointApproved": false,
+        "command": [
+          "codex",
+          "exec",
+          "-c",
+          "model_provider=\"agent_scaffold_ollama\"",
+          "-c",
+          "model_providers.agent_scaffold_ollama.name=\"Ollama\"",
+          "-c",
+          "model_providers.agent_scaffold_ollama.base_url=\"{endpoint}/v1\"",
+          "-c",
+          "model_providers.agent_scaffold_ollama.wire_api=\"responses\"",
+          "-m",
+          "{model}",
+          "-C",
+          "{worktree}",
+          "--output-schema",
+          "{resultSchema}",
+          "{prompt}"
+        ],
+        "modelProfiles": {},
+        "resultSchema": "adapters/antigravity/execution-result.schema.json",
+        "timeoutSeconds": 3600
+      },
+      "lmstudio": {
+        "type": "codex-local",
+        "localProvider": "lmstudio",
+        "enabled": false,
+        "endpoint": "http://127.0.0.1:1234",
+        "remoteEndpointApproved": false,
+        "command": [
+          "codex",
+          "exec",
+          "-c",
+          "model_provider=\"agent_scaffold_lmstudio\"",
+          "-c",
+          "model_providers.agent_scaffold_lmstudio.name=\"LM Studio\"",
+          "-c",
+          "model_providers.agent_scaffold_lmstudio.base_url=\"{endpoint}/v1\"",
+          "-c",
+          "model_providers.agent_scaffold_lmstudio.wire_api=\"responses\"",
+          "-m",
+          "{model}",
+          "-C",
+          "{worktree}",
+          "--output-schema",
+          "{resultSchema}",
+          "{prompt}"
+        ],
+        "modelProfiles": {},
+        "resultSchema": "adapters/antigravity/execution-result.schema.json",
+        "timeoutSeconds": 3600
       }
     }
   },
@@ -262,6 +320,9 @@
   },
   "controlPlane": {
     "configMutationEnabled": false,
-    "providerConnectionMutationEnabled": false
+    "providerConnectionMutationEnabled": false,
+    "executionMutationEnabled": false,
+    "operatorInteractionMutationEnabled": false,
+    "trustedModelEndpoints": []
   }
 }

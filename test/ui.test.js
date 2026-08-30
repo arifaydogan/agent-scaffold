@@ -37,15 +37,17 @@ function setupMockDOM() {
     querySelectorAll: () => [],
     getElementById: (id) => document.querySelector("#" + id),
     createElement, createTextNode: (text) => ({ textNode: true, text }),
-    activeElement: null, hidden: false
+    activeElement: null, hidden: false, documentElement: { lang: "tr" }
   };
   return { elements, globalScope: { document, fetch: async () => ({ ok: true, json: async () => ({}) }), setInterval: () => {}, Intl: global.Intl, console: global.console, Math: global.Math, Date: global.Date, String: global.String, JSON: global.JSON, confirm: () => true, navigator: { clipboard: { writeText: async () => {} } } } };
 }
 
-function loadUi() {
+function loadUi({ fetchImpl, windowImpl } = {}) {
   const code = fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8");
   const { elements, globalScope } = setupMockDOM();
-  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, renderRuns, renderOverview, renderPmWorkspace, renderProviderConnections, switchView, openModal, closeModal };");
+  if (fetchImpl) globalScope.fetch = fetchImpl;
+  if (windowImpl) globalScope.window = windowImpl;
+  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, STATUS_LABELS, translateUiText, applyLanguage, syncUrlState, openDecisionTrace, fetchParentDetail, renderRuns, renderOverview, renderPmWorkspace, renderPmInbox, renderProviderConnections, setProviderConnectionCategory, buildExecutionStages, renderChildDag, renderPlanPreview, switchView, openModal, closeModal };");
   return { ...runUI(...Object.values(globalScope)), elements };
 }
 
@@ -85,6 +87,35 @@ test("Cockpit renders visible active work, attention, and table-based approvals"
   assert.equal(ui.elements["#pm-journal-section"].hidden, false, "Journal remains reachable from Work");
 });
 
+test("Work catalog searches summary/key, filters canonical state, and paginates results", () => {
+  const ui = loadUi();
+  const ready = Array.from({ length: 30 }, (_, index) => ({
+    issueKey: `PACE-${index + 1}`, summary: `Camera task ${index + 1}`, canonicalState: "ready"
+  }));
+  const review = Array.from({ length: 3 }, (_, index) => ({
+    issueKey: `PACE-R${index + 1}`, summary: `Review task ${index + 1}`, canonicalState: "review"
+  }));
+  const groups = { ready, inReview: review };
+
+  ui.state.workItemQuery = "camera";
+  ui.state.workItemState = "ready";
+  ui.state.workItemPageSize = 25;
+  ui.renderPmInbox(groups, "inbox");
+  assert.equal(ui.elements["#pm-queue-container"].children.length, 25);
+  assert.equal(ui.elements["#work-pagination-summary"].textContent, "30 işten 1-25 gösteriliyor");
+  assert.equal(ui.elements["#work-page-next"].disabled, false);
+
+  ui.state.workItemPage = 2;
+  ui.renderPmInbox(groups, "inbox");
+  assert.equal(ui.elements["#pm-queue-container"].children.length, 5);
+
+  ui.state.workItemQuery = "PACE-R";
+  ui.state.workItemState = "review";
+  ui.state.workItemPage = 1;
+  ui.renderPmInbox(groups, "inbox");
+  assert.equal(ui.elements["#pm-queue-container"].children.length, 3);
+});
+
 test("Cockpit navigation and drawers preserve practical keyboard focus behavior", () => {
   const ui = loadUi();
   ui.switchView("pm-view", true);
@@ -104,14 +135,17 @@ test("Provider connections render clear status cards without exposing credential
     mutationEnabled: true,
     secureStore: { supported: true },
     connections: [
-      { id: "jira", displayName: "Jira", kind: "work-source", status: "configured", installed: true, configured: true, credentialSource: "vault", site: "https://example.atlassian.net", guidance: "Bağlantıyı test edin." },
-      { id: "codex", displayName: "Codex", kind: "executor", status: "connected", installed: true, connected: true, selected: true, guidance: "Codex güvenli giriş kullanır." }
+      { id: "jira", displayName: "Jira", category: "work-tools", kind: "work-source", status: "configured", installed: true, configured: true, credentialSource: "vault", site: "https://example.atlassian.net", guidance: "Bağlantıyı test edin." },
+      { id: "codex", displayName: "Codex", category: "ai-tools", kind: "executor", status: "connected", installed: true, connected: true, selected: true, guidance: "Codex güvenli giriş kullanır." }
     ]
   });
-  const cards = ui.elements["#provider-connections-grid"].children;
-  assert.equal(cards.length, 2);
+  let cards = ui.elements["#provider-connections-grid"].children;
+  assert.equal(cards.length, 1, "work tools tab does not mix AI executors into the grid");
   assert.equal(cards[0].children[0].children[1].textContent, "Yapılandırıldı");
-  assert.equal(cards[1].children[0].children[1].textContent, "Bağlı");
+  ui.setProviderConnectionCategory("ai-tools");
+  cards = ui.elements["#provider-connections-grid"].children;
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].children[0].children[1].textContent, "Bağlı");
   assert.equal(JSON.stringify(cards).includes("token"), false);
 });
 
@@ -124,8 +158,175 @@ test("Cockpit markup keeps four Overview KPIs and table-first provider/work surf
   assert.match(html, /data-pm-filter="journal"/);
   assert.match(fs.readFileSync(path.resolve("ui/dashboard.js"), "utf8"), /provider-table-wrap/);
   assert.match(html, /id="provider-connections-grid"/);
+  assert.match(html, /data-provider-category="work-tools"/);
+  assert.match(html, /data-provider-category="ai-tools"/);
+  assert.match(html, /data-provider-category="local-ai"/);
+  assert.match(html, /data-language="tr"/);
+  assert.match(html, /data-language="en"/);
+  assert.match(css, /\.language-switcher/);
   assert.match(html, /id="jira-token-input" class="form-input" type="password" autocomplete="new-password"/);
+  assert.match(html, /id="provider-token-input" class="form-input" type="password" autocomplete="new-password"/);
+  assert.match(html, /id="local-model-select" class="form-input"/);
+  assert.match(html, /id="local-endpoint-input" class="form-input" type="url"/);
+  assert.match(html, /id="local-endpoint-trust-input" type="checkbox"/);
   assert.doesNotMatch(html, /\sstyle="/, "strict CSP markup contains no inline style attributes");
   assert.doesNotMatch(css, /\.pm-queue-container\s*\{[^}]*display:\s*(grid|flex)/, "table tbody never becomes a grid or flex container");
   assert.match(css, /@media \(max-width: 1100px\)[\s\S]*?\.main-content \{ grid-column: 1; grid-row: 2; min-width: 0; \}/);
+});
+
+test("Parent child flow uses dependency stages and plain-language cards", () => {
+  const ui = loadUi();
+  const children = [
+    { issueKey: "PACE-1", summary: "Foundation", dependencies: [], runtimeState: "executing" },
+    { issueKey: "PACE-2", summary: "API", dependencies: ["PACE-1"], runtimeState: "ready" },
+    { issueKey: "PACE-3", summary: "UI", dependencies: ["PACE-2"], integrationState: "integrated", integratedSha: "abc12345" }
+  ];
+
+  const stages = ui.buildExecutionStages(children);
+  assert.deepEqual(stages.map(stage => stage.children.map(child => child.issueKey)), [
+    ["PACE-1"],
+    ["PACE-2"],
+    ["PACE-3"]
+  ]);
+
+  ui.renderChildDag(children);
+  const collectText = node => {
+    if (!node) return "";
+    let value = node.textContent || node.text || "";
+    for (const child of node.children || []) value += " " + collectText(child);
+    return value;
+  };
+  const text = collectText(ui.elements["#parent-dag-container"]);
+  assert.match(text, /Hemen başlayabilir/);
+  assert.match(text, /Önceki işler tamamlanınca/);
+  assert.match(text, /PACE-1/);
+  assert.match(text, /PACE-2 tamamlanmalı/);
+  assert.doesNotMatch(text, /Dalga 1|Dalga 2/);
+  assert.equal(ui.elements["#parent-dag-container"].children[1].children.length, 3);
+});
+
+
+test("Work details render provider-backed data and never remain stuck on loading", async () => {
+  const ui = loadUi({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        workItem: { key: "PACE-73", summary: "Live Jira summary", description: "Provider description", canonicalState: "ready", sourceProvider: "jira", autonomousEligible: true },
+        orchestratorDecision: {}, agentIdentity: {}, execution: {}, review: {}, humanControl: {}, blockedInfo: {}, history: []
+      })
+    })
+  });
+  await ui.openDecisionTrace("PACE-73");
+  assert.equal(ui.elements["#trace-issue-summary"].textContent, "Live Jira summary");
+  assert.notEqual(ui.elements["#trace-issue-summary"].textContent, "Detaylar yükleniyor...");
+  assert.equal(ui.elements["#trace-drawer-body"].children.length > 0, true);
+});
+
+test("Work detail failures clear the loading state and show a useful error", async () => {
+  const ui = loadUi({ fetchImpl: async () => ({ ok: false, status: 503, statusText: "Unavailable" }) });
+  await ui.openDecisionTrace("PACE-404");
+  assert.equal(ui.elements["#trace-issue-summary"].textContent, "İş detayı yüklenemedi");
+  assert.match(JSON.stringify(ui.elements["#trace-drawer-body"].children), /HTTP 503/);
+});
+
+test("Dashboard language can switch between Turkish and English", () => {
+  const ui = loadUi();
+  ui.applyLanguage("en", { rerender: false });
+  assert.equal(ui.state.language, "en");
+  assert.equal(ui.STATUS_LABELS.eligible, "Ready");
+  assert.equal(ui.translateUiText("Detay"), "Details");
+  ui.applyLanguage("tr", { rerender: false });
+  assert.equal(ui.state.language, "tr");
+  assert.equal(ui.STATUS_LABELS.eligible, "Hazır");
+  assert.equal(ui.translateUiText("Details"), "Detay");
+});
+
+test("Ineligible plans render a categorized compatibility action in both languages", () => {
+  const ui = loadUi();
+  const host = ui.elements["#empty-state"];
+  const status = ui.elements["#connection-label"];
+  const plan = {
+    issue: "PACE-257",
+    taskAgent: "backend-engineer",
+    execution: { provider: "codex" },
+    allowedPaths: [],
+    eligible: false,
+    eligibilityReasons: ["Missing required labels: agent-ready"],
+    compatibility: {
+      status: "needs_attention",
+      items: [{
+        id: "labels:agent-ready",
+        category: "work_source",
+        current: "agent-ready",
+        proposed: "agent-ready",
+        automatic: false
+      }]
+    }
+  };
+  const collectText = node => {
+    let value = node?.textContent || node?.text || "";
+    for (const child of node?.children || []) value += " " + collectText(child);
+    return value;
+  };
+
+  ui.renderPlanPreview(plan, host, status, { showCompatibility: true });
+  assert.match(collectText(host), /Uyumluluk gerekiyor/);
+  assert.match(collectText(host), /İşi uyumlu hale getir/);
+  assert.match(collectText(host), /Gerekli iş kaynağı etiketleri eksik/);
+
+  ui.applyLanguage("en", { rerender: false });
+  ui.renderPlanPreview(plan, host, status, { showCompatibility: true });
+  assert.match(collectText(host), /Compatibility required/);
+  assert.match(collectText(host), /Make work item compatible/);
+  assert.match(collectText(host), /Required work-source labels are missing/);
+});
+
+
+test("Parent details clear loading state on both success and failure", async () => {
+  const success = loadUi({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        parent: {
+          parent: { key: "PACE-6", summary: "Live parent epic" },
+          state: "active",
+          children: []
+        }
+      })
+    })
+  });
+  await success.fetchParentDetail("PACE-6");
+  assert.equal(success.elements["#parent-summary-text"].textContent, "Live parent epic");
+  assert.equal(success.elements["#parent-select"].disabled, false);
+
+  const failure = loadUi({
+    fetchImpl: async () => ({ ok: false, status: 502, statusText: "Bad Gateway" })
+  });
+  await failure.fetchParentDetail("PACE-6");
+  assert.match(failure.elements["#parent-summary-text"].textContent, /Parent detayı yüklenemedi/);
+  assert.doesNotMatch(failure.elements["#parent-summary-text"].textContent, /yükleniyor/i);
+  assert.equal(failure.elements["#parent-select"].disabled, false);
+});
+
+
+test("History state excludes DOM elements and remains structured-clone safe", () => {
+  const calls = [];
+  const windowImpl = {
+    location: { pathname: "/", search: "" },
+    history: {
+      pushState(value, _title, url) { structuredClone(value); calls.push({ value, url }); },
+      replaceState(value, _title, url) { structuredClone(value); calls.push({ value, url }); }
+    },
+    addEventListener() {}
+  };
+  const ui = loadUi({ windowImpl });
+  ui.state.currentView = "pm-view";
+  ui.state.selectedWorkItemKey = "PACE-73";
+  ui.state.lastFocusedElement = ui.elements["#trace-trigger-row"];
+  ui.syncUrlState(false);
+  assert.deepEqual(calls[0].value, { view: "pm-view", parent: null, issue: "PACE-73", run: null });
+  assert.equal(calls[0].url, "/?view=pm&issue=PACE-73");
+  assert.equal("lastFocusedElement" in calls[0].value, false);
 });

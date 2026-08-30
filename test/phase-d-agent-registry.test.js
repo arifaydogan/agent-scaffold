@@ -200,6 +200,9 @@ test("Agent Registry Store: builtin seeding is automatic, idempotent, and non-de
   const store1 = new RunStore(dbPath);
   const initialAgents = store1.listAgentDefinitions();
   const seedIds = BUILTIN_AGENT_SEEDS.map(s => s.id);
+  for (const expected of ["architect", "pm-analyst", "data-engineer"]) {
+    assert.ok(seedIds.includes(expected), `Routable agent '${expected}' must have a durable builtin definition`);
+  }
   assert.ok(initialAgents.length >= seedIds.length);
   for (const id of seedIds) {
     assert.ok(initialAgents.some(a => a.id === id), `Builtin agent '${id}' must be seeded`);
@@ -1336,4 +1339,3 @@ test("Scheduler Concurrency: selectDispatchBatch never returns fallback eligible
   });
   assert.equal(dispatchRes.waves.length, 0, "No dispatch wave should be created when agent concurrency is exhausted");
 });
-

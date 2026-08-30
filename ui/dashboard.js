@@ -34,7 +34,21 @@ const state = {
   pendingRejectionItem: null,
   providerConnections: null,
   providerConnectionsLoading: false,
-  activeProviderConnectionId: null
+  activeProviderConnectionId: null,
+  activeProviderConnectionCategory: "work-tools",
+  workSourceCatalog: null,
+  workSourceCatalogLoading: false,
+  workSourceCatalogError: null,
+  workItemQuery: "",
+  workItemState: "all",
+  workItemPage: 1,
+  workItemPageSize: 25,
+  language: readStoredLanguage(),
+  workItemDetailRequestId: 0,
+  parentDetailRequestId: 0,
+  currentWorkItemDetail: null,
+  pendingExecutionPlan: null,
+  currentParentDetail: null
 };
 
 const elements = typeof document !== "undefined" ? {
@@ -73,7 +87,7 @@ const elements = typeof document !== "undefined" ? {
   supervisorHeartbeat: document.querySelector("#supervisor-heartbeat")
 } : {};
 
-const STATUS_LABELS = {
+const STATUS_LABELS_TR = {
   discovered: "Keşfedildi",
   eligible: "Hazır",
   claimed: "Alındı",
@@ -97,8 +111,285 @@ const STATUS_LABELS = {
   "blocked-conflict": "Entegrasyon Çatışması",
   integrated: "Entegre Edildi",
   waiting_human: "İnsan Onayında",
-  human_approval: "İnsan Onayında"
+  human_approval: "İnsan Onayında",
+  not_started: "Henüz başlatılmadı",
+  unknown: "Work-source durumu"
 };
+
+const STATUS_LABELS_EN = {
+  discovered: "Discovered", eligible: "Ready", claimed: "Claimed", prepared: "Preparing",
+  queued: "Queued", started: "Started", model_selected: "Model selected", progress: "In progress",
+  executing: "Running", retry_requested: "Retry queued", verifying: "Waiting for review",
+  review_queued: "Review queued", reviewing: "Under review", review_fix_queued: "Waiting for review fix",
+  accepted: "Accepted", blocked: "Blocked", human_action_required: "Waiting for your action",
+  "failed-retryable": "Retryable", "failed-scope": "Scope violation", failed: "Failed",
+  "blocked-conflict": "Integration conflict", integrated: "Integrated", waiting_human: "Human approval",
+  human_approval: "Human approval", not_started: "Not started", unknown: "Work-source status"
+};
+
+const STATUS_LABELS = { ...STATUS_LABELS_TR };
+
+// Fixed interface copy only. Jira summaries, descriptions, and provider data stay untouched.
+const UI_TEXT_EN = Object.freeze({
+  "Ana içeriğe geç": "Skip to main content", "Menüyü aç/kapat": "Open/close menu",
+  "Kontrol Merkezi": "Control Center", "Çalışma Modu": "Operating mode", "Bağlanıyor": "Connecting",
+  "Son senkronizasyon": "Last synchronization", "Demo verisi": "Demo data", "Ana Navigasyon": "Main navigation",
+  "Genel Bakış": "Overview", "İşler": "Work", "Parentlar": "Parents", "Gözlem": "Observability",
+  "Agentlar": "Agents", "Sağlayıcılar": "Providers", "Canlı bağlantı kesildi.": "Live connection was lost.",
+  "Son başarılı veri gösteriliyor; yeniden bağlanmayı deniyoruz.": "Showing the last successful data while reconnecting.",
+  "Sistem durumunu, aktif işleri ve dikkat gerektiren öğeleri izleyin.": "Monitor system status, active work, and items needing attention.",
+  "Aktif İşler": "Active work", "Kapasite hesaplanıyor": "Calculating capacity", "İlgi Gereken": "Needs attention",
+  "İlgi Gerekenler": "Needs attention", "İlgi gerekiyor": "Needs attention", "Müdahale gereken": "Requires intervention",
+  "Onay Bekleyen": "Awaiting approval", "Plan parmak izi korumalı": "Protected by plan fingerprint",
+  "İnsan İçin Hazır": "Ready for human", "Hazır / Final PR": "Ready / Final PR",
+  "Çalışan ve Kuyruktaki İşler": "Running and queued work", "Task veya persona ara": "Search task or persona",
+  "Task, persona veya skill ara": "Search task, persona, or skill", "Agent durum filtreleri": "Agent status filters",
+  "Tümü": "All", "Aktif": "Active", "Süre": "Duration", "Son Aktivite": "Last activity",
+  "Bu görünümde run yok": "No runs in this view", "Dikkat gerektiren öğe yok.": "No items need attention.",
+  "Son hareketler": "Recent activity", "Salt okunur": "Read-only", "Zaman": "Time", "Olay": "Event", "Durum": "Status",
+  "Operasyonel iş kuyruğu, onaylar ve karar günlüğü.": "Operational work queue, approvals, and decision journal.",
+  "İş kaynağı bekleniyor": "Waiting for work source", "İş Kaynağından Yenile": "Refresh from work source",
+  "İş kuyruğu filtreleri": "Work queue filters", "Onaylar": "Approvals", "Sorular": "Questions", "Hazır": "Ready",
+  "Agent Soruları": "Agent Questions",
+  "Agent bir iş kararına ihtiyaç duyduğunda sorusu burada görünür. Yanıtınız kaydedilir ve aynı güvenli planla çalışma otomatik devam eder.": "When an agent needs a work decision, its question appears here. Your answer is recorded and work resumes automatically with the same safe plan.",
+  "Agentı Çalıştır": "Run Agent", "Planı hazırla": "Prepare plan", "Agentı başlat": "Start agent", "Agentı durdur": "Stop agent",
+  "Uyumluluk gerekiyor": "Compatibility required", "İşi uyumlu hale getir": "Make work item compatible",
+  "Uyumluluk önizlemesi": "Compatibility preview", "Mevcut": "Current", "Önerilen": "Proposed",
+  "Yapılması gereken": "Required action", "İş kaynağı": "Work source", "Dosya kapsamı": "File scope",
+  "Kaynak kontrolü": "Source control", "Politika": "Policy",
+  "İş güncel kurallarla yeniden yorumlandı; kalan maddeler aşağıda.": "The work item was re-evaluated with the current rules; remaining items are below.",
+  "Uyumluluk yeniden değerlendiriliyor…": "Re-evaluating compatibility…",
+  "Uyumluluk değerlendirilemedi:": "Compatibility could not be evaluated:",
+  "Önce güvenli planı hazırlayın; agent, gösterilen rol ve dosya kapsamıyla ancak ikinci adımda başlar.": "Prepare the safe plan first; the agent starts in the second step with the displayed role and file scope.",
+  "Yanıtınız": "Your answer", "Yanıtla ve devam ettir": "Answer and resume",
+  "Agentlardan bekleyen bir soru yok.": "There are no pending questions from agents.",
+  "Yanıt kaydedildikten sonra agent aynı planla otomatik devam eder.": "After your answer is recorded, the agent automatically resumes with the same plan.",
+  "Yanıt servisi şu anda etkin değil.": "The answer service is not currently enabled.",
+  "Plan hazır. Kapsamı kontrol edip Agentı başlat düğmesine basın.": "The plan is ready. Review the scope, then press Start agent.",
+  "İnsan Onayı": "Human approval", "Özet": "Summary", "Kanonik durum": "Canonical status",
+  "Yerel durum": "Local status", "Güncelleme": "Updated", "İş kuyruğu": "Work queue",
+  "Bekleyen Onay Talepleri": "Pending approval requests",
+  "Plan parmak izi korumalı, denetlenebilir ve aksiyon kapsamlı insan onayları.": "Auditable, action-scoped human approvals protected by plan fingerprints.",
+  "Müdahale Gerektiren Durumlar": "Items requiring intervention",
+  "Bloke workerlar, tükenmiş rework denemeleri, scope ihlalleri ve entegrasyon çatışmaları.": "Blocked workers, exhausted rework attempts, scope violations, and integration conflicts.",
+  "Gönder": "Send", "Birden fazla işi tek teslimat hedefi altında yönetin.": "Manage multiple work items under one delivery goal.",
+  "Parent seç": "Select parent", "Parent Epik Yükleniyor...": "Loading parent epics...",
+  "Parent listesini yenile": "Refresh parent list", "İş": "Work item",
+  "Tek başına planlanıp çalıştırılabilen Jira kaydıdır.": "A Jira record that can be planned and run independently.",
+  "Aynı teslimatın altındaki işleri ve bağımlılıklarını bir arada yönetir.": "Groups work and dependencies that belong to the same delivery.",
+  "Kullanım:": "How to use:",
+  "Önce İşler sekmesinde görevleri inceleyin; bir Epic seçtiğinizde burada alt işlerin hangi sırayla çalışacağını ve ne zaman birleştirileceğini görün.": "Review tasks in Work first; after selecting an Epic, see the child execution order and merge timing here.",
+  "Parent Epik Seçilmedi": "No parent epic selected", "Lütfen bir parent epik seçin": "Please select a parent epic",
+  "Parent seçilmedi.": "No parent selected.", "İnsan Onayı Sınırı:": "Human approval boundary:",
+  "Sistem otonom teslimatı tamamlamıştır.": "The system has completed the autonomous delivery.",
+  "Çalışma planı": "Execution plan", "Alt İşlerin Yürütme Sırası": "Child work execution order",
+  "Birbirini beklemeyen işler birlikte, bağımlı işler ise gereken iş tamamlandıktan sonra başlar.": "Independent work can run together; dependent work starts after its prerequisite completes.",
+  "Çalışıyor": "Running", "Tamamlandı": "Completed", "Engelli": "Blocked", "Birleştirme Sırası": "Merge order",
+  "İncelemesi tamamlanan alt işlerin Parent dalına alınma durumu.": "Status of reviewed child work being merged into the parent branch.",
+  "Kalite kapısı": "Quality gate", "Birleştirilen değişikliklerin test ve inceleme sonucu.": "Test and review results for merged changes.",
+  "Operasyonel metrikler, provider sağlığı ve telemetri.": "Operational metrics, provider health, and telemetry.",
+  "Yürütmeler": "Executions", "Token Kullanımı": "Token usage", "Provider Sağlığı": "Provider health",
+  "Başarısızlıklar": "Failures", "Canlı ve Kuyruktaki İşlemler": "Live and queued executions",
+  "Şu anda çalışan veya yürütme sırası bekleyen provider süreçleri.": "Provider processes currently running or waiting in the execution queue.",
+  "Gerçek çalışma gözlemlerine dayalı sağlık durumu.": "Health status based on actual runtime observations.",
+  "Son Yürütmeler ve Token Kullanımı": "Recent executions and token usage",
+  "Durable telemetry zaman çizelgesi.": "Durable telemetry timeline.",
+  "İmmutable versiyonlama ile agent registry ve kullanım telemetrisi.": "Agent registry and usage telemetry with immutable versioning.",
+  "Devre Dışı": "Disabled", "Arşiv": "Archive", "İmmutable Versiyonlama:": "Immutable versioning:",
+  "Kayıtlı Agentlar": "Registered agents", "Kullanım Telemetrisi": "Usage telemetry",
+  "Sağlayıcı Yapılandırması": "Provider configuration",
+  "Runtime mimarisi, adaptörler ve provider seçimleri.": "Runtime architecture, adapters, and provider selections.",
+  "Gelecek Çalıştırmalar Uyarısı:": "Future runs notice:", "Bağlantılar": "Connections",
+  "İş kaynaklarını, AI araçlarını ve model sunucularını ayrı kategorilerde yönetin.": "Manage work sources, AI tools, and model servers in separate categories.",
+  "Yerel ve güvenli": "Local and secure", "İş Araçları": "Work tools", "AI Araçları": "AI tools",
+  "Model Sunucuları": "Model servers", "Bağlantı durumları yükleniyor…": "Loading connection statuses…",
+  "İş kaynakları ve görev kuyruğu entegrasyonu.": "Work source and task queue integration.",
+  "Görev yönlendirme, risk değerlendirme ve planlama.": "Task routing, risk assessment, and planning.",
+  "Kod yazma ve reviewer süreçlerini çalıştıran motor.": "Engine that runs coding and reviewer processes.",
+  "Semantik kod zekası ve etki analiz motoru.": "Semantic code intelligence and impact analysis engine.",
+  "Git worktree ve entegrasyon branch sağlayıcısı.": "Git worktree and integration branch provider.",
+  "Yürütme Onayı": "Execution approval",
+  "Aşağıdaki işlem için plan parmak izi korumalı onay vermek üzeresiniz:": "You are about to grant plan-fingerprint-protected approval for:",
+  "İzinli Yollar (Scope)": "Allowed paths (scope)", "Plan Parmak İzi:": "Plan fingerprint:", "İptal": "Cancel",
+  "✓ Onayla ve Yürüt": "✓ Approve and run",
+  "Talebi reddetmek işi bloke duruma geçirecektir. Lütfen bir gerekçe belirtin:": "Rejecting this request will block the work item. Please provide a reason:",
+  "Reddetme Gerekçesi:": "Rejection reason:", "Agent Detayı": "Agent details",
+  "Sağlayıcı Detayı": "Provider details", "Sağlayıcı bağlantısı": "Provider connection",
+  "Jira hesabı e-postası": "Jira account email",
+  "Token ekranda tekrar gösterilmez ve yapılandırma dosyasına yazılmaz.": "The token is never shown again and is not written to the configuration file.",
+  "Bu güvenilir özel ağ sunucusuna görev metni ve ilgili kod bağlamının gönderilebileceğini onaylıyorum.": "I confirm task text and relevant code context may be sent to this trusted private network server.",
+  "Önce “Modelleri Getir” ile sunucuyu doğrulayın.": "Verify the server with “Fetch models” first.",
+  "Bağlan": "Connect", "Yürütücü Olarak Kullan": "Use as executor", "Bağlantıyı Kaldır": "Remove connection",
+  "Agent Versiyon Geçmişi": "Agent version history", "Agent Güncelle (Yeni Versiyon)": "Update agent (new version)",
+  "İmmutable Kuralı:": "Immutable rule:", "Görünen İsim:": "Display name:",
+  "Skills (virgülle ayrılmış):": "Skills (comma-separated):", "Allowed Paths (virgülle ayrılmış):": "Allowed paths (comma-separated):",
+  "Yeni Agent Tanımla": "Create new agent", "✓ Agent Oluştur": "✓ Create agent",
+  "Prompts ve Jira açıklamaları bu ekranda ham olarak gösterilmez.": "Prompts and Jira descriptions are not shown raw on this screen.",
+  "Canlı": "Live", "Bağlantı Yok": "No connection", "Bağlantı Kesildi": "Connection lost",
+  "Açıklama yok": "No description", "Detay": "Details", "İncele": "View", "Onayla": "Approve",
+  "Reddet": "Reject", "Aç": "Open", "Arşivle": "Archive", "Seç": "Select",
+  "Yapılandırılabilir": "Configurable", "Yapılandırıldı": "Configured", "Bağlı": "Connected",
+  "Bağlı değil": "Not connected", "Kurulu": "Installed", "Kurulu değil": "Not installed",
+  "Çalışmıyor": "Not running", "Model yok": "No models", "Oturum gerekli": "Sign-in required",
+  "Seçili": "Selected", "Bilinmiyor": "Unknown", "İş kaynağı": "Work source",
+  "Orkestratör": "Orchestrator", "Kod zekâsı": "Code intelligence", "Kaynak kontrol": "Source control",
+  "Tip": "Type", "Model / profil": "Model / profile", "Değişiklik": "Change", "Sağlayıcı": "Provider",
+  "Bağlantı": "Connection", "Yerel yürütücü": "Local executor", "AI yürütme aracı": "AI execution tool",
+  "Windows güvenli kasa": "Windows secure vault", "Ortam değişkenleri": "Environment variables",
+  "Bağlantı bilgisi bulunamadı.": "No connection information found.",
+  "Sağlayıcı bilgisi bulunamadı.": "No provider information found.", "Sağlayıcı yapılandırması": "Provider configuration",
+  "Detaylar yükleniyor...": "Loading details...", "Yükleniyor...": "Loading...", "İş Detayı": "Work item details",
+  "1. Work Item Özeti": "1. Work item summary", "Kanonik Durum": "Canonical status",
+  "Kaynak Sağlayıcı": "Source provider", "Otonom İlerlenebilir": "Autonomous eligible",
+  "Evet": "Yes", "Hayır": "No", "2. Orkestrasyon ve Planlama Kararı": "2. Orchestration and planning decision",
+  "Plan Parmak İzi": "Plan fingerprint", "İzinli Yollar": "Allowed paths", "Bağımlılıklar": "Dependencies",
+  "Bağımsız": "Independent", "3. Agent Kimliği (Registry)": "3. Agent identity (registry)",
+  "Canlı Registry Durumu": "Live registry status", "Canlı Registry Version": "Live registry version",
+  "Canlı Registry Hash": "Live registry hash", "Sabitlenmiş Sürüm Güncel": "Pinned version current",
+  "4. Yürütme Motoru ve Worktree": "4. Execution engine and worktree", "Çalışma Durumu": "Execution status",
+  "Deneme": "Attempt", "5. Reviewer ve Doğrulama Bulguları": "5. Reviewer and verification findings",
+  "Henüz verilmedi": "Not available yet", "İncelenen SHA": "Reviewed SHA",
+  "6. İnsan Kontrol ve Onay Kapısı": "6. Human control and approval gate", "Bekleyen Aksiyon": "Pending action",
+  "Yok": "None", "Onay Durumu": "Approval status", "🛑 Bloke Durumu ve Teşhis": "🛑 Blocked status and diagnosis",
+  "Gerekçe": "Reason", "Tekrar Denenebilir": "Retryable", "Onaylanabilir": "Approvable",
+  "7. Denetlenebilir Olay Zaman Çizelgesi": "7. Auditable event timeline", "Zaman çizelgesi boş.": "Timeline is empty.",
+  "Parentlar yüklenemedi": "Parents could not be loaded", "Parent epik bulunamadı": "No parent epic found",
+  "-- Parent Epik Seçin --": "-- Select parent epic --", "Toplam alt iş": "Total child work",
+  "Hemen başlayabilir": "Can start now", "Önceki işler tamamlanınca": "After previous work completes",
+  "Ön koşul": "Prerequisite", "Beklemeden başlayabilir": "Can start without waiting",
+  "Alt iş bulunamadı.": "No child work found.", "Bu Parent altında henüz alt iş bulunmuyor.": "This parent has no child work yet.",
+  "Henüz orchestration run yok": "No orchestration run yet", "Parent Epik": "Parent epic",
+  "Birleştirmeye hazır": "Ready to merge", "İnceleme bekliyor": "Waiting for review", "İncelemede": "Under review",
+  "Başarılı": "Successful", "Başarısız": "Failed", "döngü": "cycles", "Kuyrukta": "Queued",
+  "Filtreyi değiştirin veya bir": "Change the filter or dispatch an", "task dispatch edin.": "task.",
+  "Bu görünümde aktif veya kuyrukta iş yok.": "No active or queued work in this view.",
+  "Şu anda çalışan veya incelemede aktif işlem yok.": "There is no running or actively reviewed execution.",
+  "Şu anda onay bekleyen yürütme planı yok.": "There is no execution plan awaiting approval.",
+  "Henüz hareket kaydedilmedi.": "No activity has been recorded yet.", "Henüz PM mesajı yok.": "No PM messages yet.",
+  "Henüz kayıtlı karar yok.": "No recorded decisions yet.", "Bu filtrede iş bulunmuyor.": "No work found for this filter.",
+  "Issue adı veya anahtarı ara": "Search issue name or key", "Durum": "Status", "Tüm durumlar": "All statuses",
+  "Planlama bekliyor": "Needs planning", "Devam ediyor": "In progress", "Düzeltme gerekiyor": "Needs rework",
+  "Bloke": "Blocked", "İnsan onayı": "Human approval", "Tamamlandı": "Done", "İptal edildi": "Cancelled",
+  "Bilinmeyen durum": "Unknown status", "Sayfa boyutu": "Page size", "Önceki": "Previous", "Sonraki": "Next",
+  "İş detayını aç →": "Open work details →", "Bağlantı durumu bilinmiyor": "Connection status is unknown",
+  "Bağlantı durumunu kontrol edin.": "Check the connection status.", "Bağlantı durumunu test edin.": "Test the connection status.",
+  "Bağlantı hazır ve kullanılabilir.": "The connection is ready to use.", "Bağlan ve Güvenli Kaydet": "Connect and save securely",
+  "Bağlantıyı Aç": "Open connection", "Codex Girişini Aç": "Open Codex sign-in",
+  "Bağlantı test ediliyor…": "Testing connection…", "Bağlantı doğrulanıyor…": "Verifying connection…",
+  "Bağlantı kaldırılıyor…": "Removing connection…", "Yerel model yürütücü olarak seçiliyor…": "Selecting local model as executor…",
+  "Özel ağ sunucusu": "Private network server", "Güvenli kasa": "Secure vault", "Yürütme": "Execution",
+  "Çalışma yapılandırması": "Execution configuration", "Review yapılandırması": "Review configuration",
+  "Sabitlenmiş sürüm ve çalışma yapılandırması": "Pinned version and execution configuration",
+  "Kayıtlı agent bulunamadı.": "No registered agents found.", "Olay kaydı yok.": "No events recorded.",
+  "Provider telemetri verisi bulunamadı.": "No provider telemetry data found.",
+  "Seçilen zaman penceresinde yürütme kaydı yok.": "No executions in the selected time window.",
+  "Sağlık": "Health", "Başarı Oranı": "Success rate", "Ort. Süre": "Avg. duration",
+  "Kullanılabilir": "Available", "Başarılı / Başarısız": "Successful / failed",
+  "Yeniden deneme kuyruğunda": "Retry queued", "Review kuyruğunda": "Review queued",
+  "Review düzeltmesi bekliyor": "Waiting for review fix", "Entegrasyon Çatışması": "Integration conflict",
+  "İnsan Onayında": "Human approval", "Henüz başlatılmadı": "Not started",
+  "İşleniyor": "In progress", "Keşfedildi": "Discovered", "Hazırlanıyor": "Preparing",
+  "Sıraya alındı": "Queued", "Başlatıldı": "Started", "Model seçildi": "Model selected"
+});
+
+const UI_TEXT_TR = Object.freeze(Object.fromEntries(Object.entries(UI_TEXT_EN).map(([tr, en]) => [en, tr])));
+const TRANSLATION_TEXT_SOURCES = new WeakMap();
+const TRANSLATION_ATTRIBUTE_SOURCES = new WeakMap();
+const UI_MESSAGES = Object.freeze({
+  tr: {
+    workDetailTitle: "İş Detayı · {key}", detailsLoading: "Detaylar yükleniyor...", loading: "Yükleniyor...",
+    workDetailFailed: "İş detayı yüklenemedi", parentLoading: "Parent detayı yükleniyor...",
+    parentFailed: "Parent detayı yüklenemedi", requestTimedOut: "İstek zaman aşımına uğradı. Bağlantıyı kontrol edip tekrar deneyin.",
+    compatibilityCount: "{count} uyumluluk maddesi bulundu. Sistem güvenlik kapılarını otomatik olarak aşmaz.",
+    compatibilityChecking: "Uyumluluk yeniden değerlendiriliyor…",
+    compatibilityChecked: "İş güncel kurallarla yeniden yorumlandı; kalan maddeler aşağıda.",
+    compatibilityFailed: "Uyumluluk değerlendirilemedi: {error}"
+  },
+  en: {
+    workDetailTitle: "Work item details · {key}", detailsLoading: "Loading details...", loading: "Loading...",
+    workDetailFailed: "Work item details could not be loaded", parentLoading: "Loading parent details...",
+    parentFailed: "Parent details could not be loaded", requestTimedOut: "The request timed out. Check the connection and try again.",
+    compatibilityCount: "{count} compatibility items were found. The system never bypasses safety gates automatically.",
+    compatibilityChecking: "Re-evaluating compatibility…",
+    compatibilityChecked: "The work item was re-evaluated with the current rules; remaining items are below.",
+    compatibilityFailed: "Compatibility could not be evaluated: {error}"
+  }
+});
+
+function readStoredLanguage() {
+  try {
+    const value = localStorage.getItem("pacebuild-language");
+    return value === "en" ? "en" : "tr";
+  } catch {
+    return "tr";
+  }
+}
+
+function uiMessage(key, values = {}) {
+  const messages = UI_MESSAGES[state.language] || UI_MESSAGES.tr;
+  return String(messages[key] || UI_MESSAGES.tr[key] || key).replace(/\{(\w+)\}/g, (_match, name) => values[name] ?? "");
+}
+
+function translateUiText(value) {
+  const text = String(value ?? "");
+  return state.language === "en" ? (UI_TEXT_EN[text] || text) : (UI_TEXT_TR[text] || text);
+}
+
+function applyDocumentTranslations() {
+  if (typeof document === "undefined") return;
+  if (typeof document.createTreeWalker === "function" && typeof NodeFilter !== "undefined") {
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      const parentTag = node.parentElement?.tagName?.toLowerCase();
+      if (parentTag !== "script" && parentTag !== "style") {
+        const raw = node.nodeValue || "";
+        const trimmed = raw.trim();
+        const canonical = TRANSLATION_TEXT_SOURCES.get(node) || UI_TEXT_TR[trimmed] || trimmed;
+        if (UI_TEXT_EN[canonical]) {
+          TRANSLATION_TEXT_SOURCES.set(node, canonical);
+          node.nodeValue = raw.replace(trimmed, state.language === "en" ? UI_TEXT_EN[canonical] : canonical);
+        }
+      }
+      node = walker.nextNode();
+    }
+  }
+  document.querySelectorAll?.("[placeholder], [title], [aria-label]").forEach(node => {
+    const sources = TRANSLATION_ATTRIBUTE_SOURCES.get(node) || {};
+    for (const attr of ["placeholder", "title", "aria-label"]) {
+      if (!node.hasAttribute?.(attr)) continue;
+      const current = node.getAttribute(attr);
+      const canonical = sources[attr] || UI_TEXT_TR[current] || current;
+      if (!UI_TEXT_EN[canonical]) continue;
+      sources[attr] = canonical;
+      node.setAttribute(attr, state.language === "en" ? UI_TEXT_EN[canonical] : canonical);
+    }
+    TRANSLATION_ATTRIBUTE_SOURCES.set(node, sources);
+  });
+}
+
+function applyLanguage(language, { rerender = true } = {}) {
+  state.language = language === "en" ? "en" : "tr";
+  try { localStorage.setItem("pacebuild-language", state.language); } catch {}
+  if (typeof document !== "undefined" && document.documentElement) document.documentElement.lang = state.language;
+  Object.keys(STATUS_LABELS).forEach(key => delete STATUS_LABELS[key]);
+  Object.assign(STATUS_LABELS, state.language === "en" ? STATUS_LABELS_EN : STATUS_LABELS_TR);
+  if (typeof document !== "undefined") {
+    document.querySelectorAll?.("[data-language]").forEach(button => {
+      const active = button.dataset.language === state.language;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+  if (rerender && state.snapshot) {
+    updateTopbar(state.snapshot); renderOverview(state.snapshot); renderPmWorkspace();
+    renderConfigView(state.snapshot); renderAgentRegistry(); populateParentSelector();
+  }
+  if (rerender && state.currentWorkItemDetail) renderDecisionTraceDetail(state.currentWorkItemDetail);
+  if (rerender && state.currentParentDetail) renderParentDetail(state.currentParentDetail);
+  if (rerender && state.providerConnections) renderProviderConnections(state.providerConnections);
+  applyDocumentTranslations();
+}
 
 const PERSONA_INITIALS = {
   "frontend-engineer": "FE",
@@ -139,13 +430,13 @@ function element(tag, className, text) {
   if (typeof document === "undefined") return {};
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = text;
+  if (text !== undefined && text !== null) node.textContent = translateUiText(text);
   return node;
 }
 
 function formatNumber(value) {
   if (value === null || value === undefined) return "—";
-  return new Intl.NumberFormat("tr-TR", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
+  return new Intl.NumberFormat(state.language === "en" ? "en-US" : "tr-TR", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
 }
 
 function formatDuration(seconds) {
@@ -170,7 +461,7 @@ function formatTime(value, includeDate = false) {
     const options = includeDate
       ? { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }
       : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
-    return new Intl.DateTimeFormat("tr-TR", options).format(new Date(value));
+    return new Intl.DateTimeFormat(state.language === "en" ? "en-US" : "tr-TR", options).format(new Date(value));
   } catch {
     return String(value);
   }
@@ -504,6 +795,18 @@ function renderActiveWorkTable(tasks) {
       openDetail();
     });
     appendNode(actionCell, detail);
+    const canStop = state.snapshot?.capabilities?.execution?.stopEnabled === true &&
+      run.stateKind === "active" &&
+      Boolean(run.id);
+    if (canStop) {
+      const stop = element("button", "pm-btn pm-btn-reject", "Durdur");
+      stop.type = "button";
+      stop.addEventListener?.("click", event => {
+        event.stopPropagation();
+        stopRunExecution(run.id, stop);
+      });
+      appendNode(actionCell, stop);
+    }
     appendNode(row, actionCell);
     appendNode(tbody, row);
   });
@@ -600,10 +903,16 @@ function syncUrlState(replace = false) {
   const currentUrl = `${window.location.pathname}${window.location.search}`;
 
   if (newUrl !== currentUrl) {
+    const historyState = {
+      view: state.currentView || "overview-view",
+      parent: state.selectedParentKey || null,
+      issue: state.selectedWorkItemKey || null,
+      run: state.selectedRunId || null
+    };
     if (replace) {
-      window.history.replaceState({ ...state }, "", newUrl);
+      window.history.replaceState(historyState, "", newUrl);
     } else {
-      window.history.pushState({ ...state }, "", newUrl);
+      window.history.pushState(historyState, "", newUrl);
     }
   }
 }
@@ -683,12 +992,14 @@ function switchView(targetViewId, fromHistory = false) {
 
   if (targetViewId === "parents-view") {
     populateParentSelector();
+    refreshWorkSourceCatalog(false);
     if (state.selectedParentKey) fetchParentDetail(state.selectedParentKey);
     else clearParentDetail();
   } else if (targetViewId === "observability-view") {
     fetchObservabilitySummary();
   } else if (targetViewId === "pm-view") {
     renderPmWorkspace();
+    refreshWorkSourceCatalog(false);
   }
 
   if (!fromHistory) syncUrlState(false);
@@ -888,16 +1199,104 @@ function renderActivityFeed(activity) {
   });
 }
 
+// Connected Work-Source Catalog
+function catalogOperationalGroup(canonicalState) {
+  const value = String(canonicalState || "").toLowerCase();
+  if (value === "ready") return "ready";
+  if (value === "in_progress" || value === "executing") return "executing";
+  if (value === "review") return "inReview";
+  if (value === "rework") return "needsRework";
+  if (value === "blocked") return "blocked";
+  if (value === "human_approval") return "humanApproval";
+  if (value === "done") return "done";
+  if (value === "cancelled") return "cancelled";
+  return "needsPlanning";
+}
+
+function mergedWorkSourceGroups(localGroups = {}) {
+  const names = ["needsPlanning", "awaitingApproval", "ready", "executing", "inReview", "needsRework", "blocked", "humanApproval", "done", "cancelled"];
+  const groups = Object.fromEntries(names.map(name => [name, [...(localGroups[name] || [])]]));
+  const seen = new Set(Object.values(groups).flat().map(item => item.issueKey));
+  for (const item of state.workSourceCatalog?.items || []) {
+    if (!item?.key || seen.has(item.key)) continue;
+    const operationalGroup = catalogOperationalGroup(item.canonicalState);
+    groups[operationalGroup].push({
+      issueKey: item.key,
+      summary: item.summary,
+      canonicalState: item.canonicalState,
+      currentRunState: item.status || "not_started",
+      operationalGroup,
+      persona: null,
+      taskAgent: null,
+      risk: null,
+      sourceProvider: item.sourceProvider,
+      sourceUrl: item.sourceUrl,
+      createdAt: null,
+      updatedAt: state.workSourceCatalog.syncedAt,
+      providerOnly: true
+    });
+    seen.add(item.key);
+  }
+  return groups;
+}
+
+function setWorkSourceSyncStatus(message, kind = "") {
+  const target = getElem("work-source-sync-status");
+  if (!target) return;
+  target.textContent = message;
+  target.className = "read-only-badge" + (kind ? " is-" + kind : "");
+}
+
+async function refreshWorkSourceCatalog(force = false) {
+  if (state.workSourceCatalogLoading) return state.workSourceCatalog;
+  if (state.workSourceCatalog && !force) {
+    renderPmWorkspace();
+    populateParentSelector();
+    return state.workSourceCatalog;
+  }
+  state.workSourceCatalogLoading = true;
+  state.workSourceCatalogError = null;
+  setWorkSourceSyncStatus("İş kaynağı yükleniyor…", "loading");
+  const refreshButton = getElem("work-source-refresh-btn");
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const response = await fetch("/api/work-source/catalog" + (force ? "?refresh=1" : ""));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    state.workSourceCatalog = data;
+    state.workItemPage = 1;
+    if (data.demo) {
+      setWorkSourceSyncStatus("Demo modu · Jira okunmuyor", "warning");
+    } else {
+      setWorkSourceSyncStatus((data.provider || "İş kaynağı") + " · " + data.items.length + " iş · " + data.parents.length + " parent", "success");
+    }
+    renderPmWorkspace();
+    populateParentSelector();
+    return data;
+  } catch (error) {
+    state.workSourceCatalogError = error.message;
+    setWorkSourceSyncStatus("İş kaynağı yüklenemedi: " + error.message, "error");
+    renderPmWorkspace();
+    populateParentSelector();
+    return null;
+  } finally {
+    state.workSourceCatalogLoading = false;
+    if (refreshButton) refreshButton.disabled = false;
+  }
+}
+
 // PM Workspace Rendering
 function renderPmWorkspace() {
   const pm = state.snapshot?.pmWorkspace;
   if (!pm) return;
 
-  const counts = pm.counts || {};
+  const groups = mergedWorkSourceGroups(pm.groups || {});
+  const counts = Object.fromEntries(Object.entries(groups).map(([name, items]) => [name, items.length]));
   const attentionCount = (counts.blocked || 0) + (counts.needsRework || 0);
   const updates = {
     "pm-badge-attention": attentionCount,
     "pm-badge-approvals": counts.awaitingApproval || 0,
+    "pm-badge-questions": (state.snapshot?.operatorInbox || []).filter(item => item.status === "open" || item.status === "resume_failed").length,
     "pm-stat-approvals": counts.awaitingApproval || 0,
     "pm-stat-blocked": counts.blocked || 0,
     "pm-stat-executing": counts.executing || 0,
@@ -920,16 +1319,20 @@ function renderPmWorkspace() {
   }
 
   const inbox = getElem("pm-inbox-section");
+  const operator = getElem("pm-operator-section");
   const approvals = getElem("pm-approvals-section");
   const attention = getElem("pm-attention-section");
   const journal = getElem("pm-journal-section");
   const isJournal = state.currentPmFilter === "journal";
-  if (inbox) inbox.hidden = isJournal;
+  const isQuestions = state.currentPmFilter === "questions";
+  if (inbox) inbox.hidden = isJournal || isQuestions;
+  if (operator) operator.hidden = !isQuestions;
   if (approvals) approvals.hidden = true;
   if (attention) attention.hidden = true;
   if (journal) journal.hidden = !isJournal;
   if (isJournal) renderPmJournal();
-  else renderPmInbox(pm.groups || {}, state.currentPmFilter);
+  else if (isQuestions) renderOperatorInbox();
+  else renderPmInbox(groups, state.currentPmFilter);
 }
 
 function pmItemsForFilter(groups, filter) {
@@ -946,11 +1349,52 @@ function pmItemsForFilter(groups, filter) {
   return byFilter[filter] || all;
 }
 
+function normalizedWorkSearch(value) {
+  return String(value || "").trim().toLocaleLowerCase("tr-TR");
+}
+
+function filteredPmItems(groups, filter) {
+  const query = normalizedWorkSearch(state.workItemQuery);
+  const selectedState = String(state.workItemState || "all");
+  return pmItemsForFilter(groups, filter).filter(item => {
+    const matchesQuery = !query || [item.issueKey, item.summary]
+      .some(value => normalizedWorkSearch(value).includes(query));
+    const canonicalState = String(item.canonicalState || "unknown").toLowerCase();
+    const matchesState = selectedState === "all" || canonicalState === selectedState;
+    return matchesQuery && matchesState;
+  });
+}
+
+function updateWorkPagination(totalItems, totalPages, page, startIndex, endIndex) {
+  const summary = getElem("work-pagination-summary");
+  const indicator = getElem("work-page-indicator");
+  const previous = getElem("work-page-prev");
+  const next = getElem("work-page-next");
+  if (summary) {
+    summary.textContent = state.language === "en"
+      ? `${startIndex}-${endIndex} of ${totalItems} work items`
+      : `${totalItems} işten ${startIndex}-${endIndex} gösteriliyor`;
+  }
+  if (indicator) indicator.textContent = `${page} / ${totalPages}`;
+  if (previous) previous.disabled = page <= 1;
+  if (next) next.disabled = page >= totalPages;
+}
+
 function renderPmInbox(groups = {}, filter = "inbox") {
   const container = getElem("pm-queue-container");
   if (!container) return;
   container.innerHTML = "";
-  const items = pmItemsForFilter(groups, filter);
+  const matchingItems = filteredPmItems(groups, filter);
+  const pageSize = [25, 50, 100].includes(Number(state.workItemPageSize))
+    ? Number(state.workItemPageSize)
+    : 25;
+  const totalPages = Math.max(1, Math.ceil(matchingItems.length / pageSize));
+  state.workItemPage = Math.max(1, Math.min(Number(state.workItemPage) || 1, totalPages));
+  const offset = (state.workItemPage - 1) * pageSize;
+  const items = matchingItems.slice(offset, offset + pageSize);
+  const startIndex = matchingItems.length === 0 ? 0 : offset + 1;
+  const endIndex = matchingItems.length === 0 ? 0 : offset + items.length;
+  updateWorkPagination(matchingItems.length, totalPages, state.workItemPage, startIndex, endIndex);
 
   if (items.length === 0) {
     const row = element("tr");
@@ -1111,6 +1555,102 @@ function createPmItemCard(item, styleClass, showActions = false) {
   return card;
 }
 
+function renderOperatorInbox() {
+  const host = getElem("pm-operator-list");
+  if (!host) return;
+  host.innerHTML = "";
+  const requests = [...(state.snapshot?.operatorInbox || [])].sort((a, b) => {
+    const rank = value => value.status === "open" ? 0 : value.status === "resume_failed" ? 1 : 2;
+    return rank(a) - rank(b) || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+  if (requests.length === 0) {
+    host.appendChild(element("div", "empty-state", "Agentlardan bekleyen bir soru yok."));
+    return;
+  }
+
+  const canRespond = state.snapshot?.capabilities?.execution?.operatorResponseEnabled === true;
+  requests.forEach(request => {
+    const card = element("article", "operator-question-card status-" + request.status);
+    const header = element("div", "operator-question-header");
+    header.appendChild(element("span", "badge badge-key", request.issueKey || "—"));
+    const statusLabels = {
+      open: "Yanıt bekliyor",
+      answered: "Yanıtlandı",
+      resuming: "Agent devam ediyor",
+      resume_failed: "Devam başlatılamadı"
+    };
+    header.appendChild(element("span", "state-badge " + (request.status === "open" ? "approval" : "ready"), statusLabels[request.status] || request.status));
+    card.appendChild(header);
+    card.appendChild(element("h4", "operator-question-title", request.question || "Agent operatör girdisi bekliyor."));
+    const meta = element("p", "operator-question-meta", [
+      request.taskAgent || "agent",
+      formatTime(request.createdAt, true)
+    ].join(" · "));
+    card.appendChild(meta);
+
+    if (request.answer) {
+      const answered = element("div", "operator-answer-summary");
+      answered.appendChild(element("span", null, "Yanıtınız"));
+      answered.appendChild(element("strong", null, request.answer));
+      card.appendChild(answered);
+    }
+
+    if (request.status === "open") {
+      const form = element("form", "operator-answer-form");
+      const label = element("label", null, "Yanıtınız");
+      const input = element("textarea", "operator-answer-input");
+      input.rows = 3;
+      input.maxLength = 4000;
+      input.required = true;
+      input.placeholder = "Agentın devam etmesi için net ve kısa bir yanıt yazın.";
+      label.appendChild(input);
+      const footer = element("div", "operator-answer-actions");
+      const status = element("p", "operator-answer-status", canRespond ? "Yanıt kaydedildikten sonra agent aynı planla otomatik devam eder." : "Yanıt servisi şu anda etkin değil.");
+      const submit = element("button", "pm-btn pm-btn-approve", "Yanıtla ve devam ettir");
+      submit.type = "submit";
+      submit.disabled = !canRespond;
+      footer.appendChild(status);
+      footer.appendChild(submit);
+      form.appendChild(label);
+      form.appendChild(footer);
+      form.addEventListener?.("submit", event => {
+        event.preventDefault();
+        submitOperatorAnswer(request, input, submit, status);
+      });
+      card.appendChild(form);
+    } else if (request.status === "resume_failed") {
+      card.appendChild(element("p", "operator-answer-status is-error", request.resume?.error || "Agent otomatik devam ettirilemedi; run detayını kontrol edin."));
+    }
+    host.appendChild(card);
+  });
+  applyDocumentTranslations();
+}
+
+async function submitOperatorAnswer(request, input, button, status) {
+  const answer = String(input?.value || "").trim();
+  if (!answer || !request?.requestId) return;
+  button.disabled = true;
+  input.disabled = true;
+  status.className = "operator-answer-status is-loading";
+  status.textContent = "Yanıt kaydediliyor ve agent devam ettiriliyor…";
+  try {
+    const response = await fetch("/api/control-plane/operator-requests/" + encodeURIComponent(request.requestId) + "/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    status.className = "operator-answer-status is-success";
+    status.textContent = "Yanıt kaydedildi. Agent arka planda devam ediyor.";
+    await fetchSnapshot();
+  } catch (error) {
+    status.className = "operator-answer-status is-error";
+    status.textContent = "Yanıt gönderilemedi: " + error.message;
+    button.disabled = false;
+    input.disabled = false;
+  }
+}
 function renderPmJournal() {
   const messagesEl = getElem("pm-messages");
   const decisionsEl = getElem("pm-decisions");
@@ -1155,42 +1695,341 @@ function renderPmJournal() {
 }
 
 // Work Item Decision Trace Drawer
+async function fetchJsonWithTimeout(url, timeoutMs = 15000) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller && typeof setTimeout === "function" ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+    if (!response.ok) throw new Error("HTTP " + response.status + (response.statusText ? ": " + response.statusText : ""));
+    return await response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(uiMessage("requestTimedOut"));
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function renderDetailError(summaryEl, body, heading, error) {
+  if (summaryEl) summaryEl.textContent = heading;
+  if (!body) return;
+  const banner = element("div", "error-banner");
+  banner.setAttribute?.("role", "alert");
+  banner.appendChild(element("strong", null, heading));
+  banner.appendChild(element("span", null, error?.message ? " " + error.message : ""));
+  body.replaceChildren?.(banner);
+}
+
 async function openDecisionTrace(issueKey, fromHistory = false, triggerElement = null) {
   if (!issueKey) return;
+  const requestId = ++state.workItemDetailRequestId;
+  if (state.selectedWorkItemKey !== issueKey) state.pendingExecutionPlan = null;
   state.selectedWorkItemKey = issueKey;
-
+  state.currentWorkItemDetail = null;
   const modal = getElem("decision-trace-modal");
   const title = getElem("trace-drawer-title");
   const pill = getElem("trace-issue-pill");
   const summaryEl = getElem("trace-issue-summary");
   const body = getElem("trace-drawer-body");
-
   if (!modal || !body) return;
 
   if (pill) pill.textContent = issueKey;
-  if (title) title.textContent = `Work Item Decision Trace · ${issueKey}`;
-  if (summaryEl) summaryEl.textContent = "Detaylar yükleniyor...";
-  body.innerHTML = '<div class="loading-spinner">Yükleniyor...</div>';
-
-  openModal("decision-trace-modal", triggerElement);
-
-  if (!fromHistory) {
-    syncUrlState(false);
-  }
+  if (title) title.textContent = uiMessage("workDetailTitle", { key: issueKey });
+  if (summaryEl) summaryEl.textContent = uiMessage("detailsLoading");
+  body.replaceChildren(element("div", "loading-spinner", uiMessage("loading")));
 
   try {
-    const res = await fetch(`/api/pm/work-items/${encodeURIComponent(issueKey)}`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    }
-    const data = await res.json();
+    openModal("decision-trace-modal", triggerElement);
+    if (!fromHistory) syncUrlState(false);
+    const data = await fetchJsonWithTimeout("/api/pm/work-items/" + encodeURIComponent(issueKey));
+    if (requestId !== state.workItemDetailRequestId) return;
+    if (!data || !data.workItem) throw new Error("The server returned an incomplete work item response.");
     renderDecisionTraceDetail(data);
-  } catch (err) {
-    body.innerHTML = `<div class="error-banner">Karar izi yüklenemedi: ${safeHtml(err.message)}</div>`;
+  } catch (error) {
+    if (requestId !== state.workItemDetailRequestId) return;
+    renderDetailError(summaryEl, body, uiMessage("workDetailFailed"), error);
   }
 }
 
+function renderExecutionLauncher(data) {
+  const workItem = data.workItem || {};
+  const execution = data.execution || {};
+  const capability = state.snapshot?.capabilities?.execution || {};
+  const section = element("section", "trace-section execution-launcher");
+  section.appendChild(element("h3", "trace-section-title", "Agentı Çalıştır"));
+  section.appendChild(element("p", "execution-launcher-copy", "Önce güvenli planı hazırlayın; agent, gösterilen rol ve dosya kapsamıyla ancak ikinci adımda başlar."));
+
+  const controls = element("div", "execution-launcher-actions");
+  const status = element("p", "execution-launcher-status", "");
+  const preview = element("div", "execution-plan-preview");
+
+  const planButton = element("button", "pm-btn pm-btn-view", "Planı hazırla");
+  planButton.type = "button";
+  planButton.disabled = capability.planEnabled !== true;
+  planButton.addEventListener?.("click", () => prepareWorkItemPlan(workItem.key, preview, planButton, status));
+  controls.appendChild(planButton);
+
+  const activeStates = new Set(["claimed", "prepared", "queued", "started", "model_selected", "progress", "executing"]);
+  if (data.providerOnly !== true && workItem.id && activeStates.has(execution.currentRunState) && capability.stopEnabled === true) {
+    const stopButton = element("button", "pm-btn pm-btn-reject", "Agentı durdur");
+    stopButton.type = "button";
+    stopButton.addEventListener?.("click", () => stopRunExecution(workItem.id, stopButton, status));
+    controls.appendChild(stopButton);
+  }
+
+  if (capability.planEnabled !== true) {
+    status.className = "execution-launcher-status is-warning";
+    status.textContent = "Dashboard’dan çalıştırma kapalı veya canlı süreç yeniden başlatılmalı.";
+  }
+  section.appendChild(controls);
+  section.appendChild(status);
+  section.appendChild(preview);
+
+  if (state.pendingExecutionPlan?.issue === workItem.key) {
+    renderPlanPreview(state.pendingExecutionPlan, preview, status);
+  }
+  return section;
+}
+
+function renderPlanPreview(plan, host, status, options = {}) {
+  host.innerHTML = "";
+  const grid = element("div", "plan-preview-grid");
+  grid.appendChild(createTraceCell("Agent", plan.taskAgent || plan.persona || "—"));
+  grid.appendChild(createTraceCell("Provider / Model", (plan.execution?.provider || "—") + " / " + (plan.execution?.model || "varsayılan")));
+  grid.appendChild(createTraceCell("Risk", plan.risk || "normal"));
+  grid.appendChild(createTraceCell("Base", (plan.baseRef || "—") + (plan.baseSha ? " @ " + plan.baseSha.slice(0, 10) : "")));
+  grid.appendChild(createTraceCell("İzinli yollar", (plan.allowedPaths || []).join(", ") || "—"));
+  grid.appendChild(createTraceCell("Plan parmak izi", plan.planFingerprint ? plan.planFingerprint.slice(0, 16) + "…" : "—"));
+  host.appendChild(grid);
+
+  if (!plan.eligible) {
+    const reasons = element("div", "plan-ineligible");
+    reasons.appendChild(element("strong", null, "Uyumluluk gerekiyor"));
+    const count = plan.compatibility?.items?.length || plan.eligibilityReasons?.length || 0;
+    reasons.appendChild(element("p", null, uiMessage("compatibilityCount", { count })));
+    const compatibilityButton = element("button", "pm-btn pm-btn-view compatibility-button", "İşi uyumlu hale getir");
+    compatibilityButton.type = "button";
+    compatibilityButton.addEventListener?.("click", () => recheckWorkItemCompatibility(plan.issue, host, compatibilityButton, status));
+    reasons.appendChild(compatibilityButton);
+    host.appendChild(reasons);
+    if (options.showCompatibility === true) renderCompatibilityPreview(plan.compatibility, host);
+    return;
+  }
+
+  const startButton = element("button", "pm-btn pm-btn-approve execution-start-button", "Agentı başlat");
+  startButton.type = "button";
+  startButton.disabled = state.snapshot?.capabilities?.execution?.startEnabled !== true;
+  startButton.addEventListener?.("click", () => startWorkItemExecution(plan, startButton, status));
+  host.appendChild(startButton);
+  status.className = "execution-launcher-status is-success";
+  status.textContent = "Plan hazır. Kapsamı kontrol edip Agentı başlat düğmesine basın.";
+}
+
+const COMPATIBILITY_COPY = {
+  labels: {
+    tr: ["Gerekli iş kaynağı etiketleri eksik", "Listelenen etiketleri bağlı iş kaynağına ekleyin ve planı yeniden hazırlayın."],
+    en: ["Required work-source labels are missing", "Add the listed labels in the connected work source, then prepare the plan again."]
+  },
+  agent: {
+    tr: ["Seçilen agent kayıtlı değil", "Yerleşik agent kayıtlarını yenileyin veya kayıtlı bir route seçin."],
+    en: ["The selected agent is not registered", "Refresh the built-in agent registry or select a registered route."]
+  },
+  "agent-state": {
+    tr: ["Seçilen agent iş alamıyor", "Agent tanımını inceleyin; iş alması gerekiyorsa açıkça etkinleştirin."],
+    en: ["The selected agent cannot receive work", "Review the agent definition and enable it explicitly if it should receive work."]
+  },
+  scope: {
+    tr: ["İstenen dosya kapsamı yetkili değil", "Ticket kapsamını, kalıcı agent tanımını ve hard policy kesişimini inceleyin. Kapsam otomatik genişletilmez."],
+    en: ["The requested file scope is not authorized", "Review the ticket scope, durable agent definition, and hard policy intersection. Scope is never widened automatically."]
+  },
+  "base-ref": {
+    tr: ["İstenen Git tabanı bulunmuyor", "Amaçlanan parent/integration branch'ini açıkça oluşturun veya seçin. Sistem otomatik fallback seçmez."],
+    en: ["The requested Git base does not exist", "Create or select the intended parent/integration branch explicitly. No fallback branch is chosen automatically."]
+  },
+  "acceptance-criteria": {
+    tr: ["Kabul kriterleri eksik", "İşe test edilebilir kabul kriterleri ekleyin ve planı yeniden hazırlayın."],
+    en: ["Acceptance criteria are missing", "Add testable acceptance criteria to the work item, then prepare the plan again."]
+  },
+  "workflow-mapping": {
+    tr: ["Provider durumu eşlenmemiş", "Provider durumunu yerel iş kaynağı yapılandırmasında kanonik bir duruma eşleyin."],
+    en: ["The provider status is not mapped", "Map the provider status to a canonical state in the local work-source configuration."]
+  },
+  policy: {
+    tr: ["Bir politika kapısı ilgi gerektiriyor", "Bu kapıyı açıkça inceleyin; dashboard politikayı atlamaz."],
+    en: ["A policy gate requires attention", "Review this gate explicitly; the dashboard will not bypass it."]
+  }
+};
+
+function compatibilityCode(entry = {}) {
+  return String(entry.id || "policy").split(":")[0];
+}
+
+function compatibilityCategory(category) {
+  const labels = {
+    work_source: ["İş kaynağı", "Work source"],
+    agent: ["Agent", "Agent"],
+    scope: ["Dosya kapsamı", "File scope"],
+    source_control: ["Kaynak kontrolü", "Source control"],
+    policy: ["Politika", "Policy"]
+  };
+  return (labels[category] || labels.policy)[state.language === "en" ? 1 : 0];
+}
+
+function compatibilityText(entry = {}) {
+  const copy = COMPATIBILITY_COPY[compatibilityCode(entry)] || COMPATIBILITY_COPY.policy;
+  const localized = copy[state.language] || copy.tr;
+  return { title: localized[0], resolution: localized[1] };
+}
+
+function compatibilityValue(value) {
+  const translations = {
+    "No effective path": ["Etkin dosya yolu yok", "No effective path"],
+    "A reviewed, narrow path scope": ["İncelenmiş, dar bir dosya kapsamı", "A reviewed, narrow path scope"],
+    "An existing, reviewed integration base": ["Var olan, incelenmiş bir integration tabanı", "An existing, reviewed integration base"],
+    "Testable acceptance criteria": ["Test edilebilir kabul kriterleri", "Testable acceptance criteria"],
+    "A canonical workflow state": ["Kanonik bir workflow durumu", "A canonical workflow state"],
+    "Satisfied policy gate": ["Karşılanmış politika kapısı", "Satisfied policy gate"]
+  };
+  const mapped = translations[String(value || "")];
+  return mapped ? mapped[state.language === "en" ? 1 : 0] : String(value || "—");
+}
+
+function renderCompatibilityPreview(compatibility, host) {
+  const panel = element("section", "compatibility-preview");
+  panel.appendChild(element("h4", "compatibility-preview-title", "Uyumluluk önizlemesi"));
+  const list = element("div", "compatibility-list");
+  for (const entry of compatibility?.items || []) {
+    const copy = compatibilityText(entry);
+    const card = element("article", "compatibility-card");
+    const header = element("div", "compatibility-card-header");
+    header.appendChild(element("span", "status-pill", compatibilityCategory(entry.category)));
+    header.appendChild(element("strong", null, copy.title));
+    card.appendChild(header);
+    const values = element("dl", "compatibility-values");
+    for (const [label, value] of [
+      ["Mevcut", entry.current],
+      ["Önerilen", entry.proposed],
+      ["Yapılması gereken", copy.resolution]
+    ]) {
+      values.appendChild(element("dt", null, label));
+      values.appendChild(element("dd", null, compatibilityValue(value)));
+    }
+    card.appendChild(values);
+    list.appendChild(card);
+  }
+  panel.appendChild(list);
+  host.appendChild(panel);
+}
+
+async function recheckWorkItemCompatibility(issueKey, host, button, status) {
+  button.disabled = true;
+  status.className = "execution-launcher-status is-loading";
+  status.textContent = uiMessage("compatibilityChecking");
+  try {
+    const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(issueKey) + "/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    state.pendingExecutionPlan = data.plan;
+    renderPlanPreview(data.plan, host, status, { showCompatibility: true });
+    if (!data.plan.eligible) {
+      status.className = "execution-launcher-status is-warning";
+      status.textContent = uiMessage("compatibilityChecked");
+    }
+  } catch (error) {
+    status.className = "execution-launcher-status is-error";
+    status.textContent = uiMessage("compatibilityFailed", { error: error.message });
+    button.disabled = false;
+  }
+}
+
+async function prepareWorkItemPlan(issueKey, host, button, status) {
+  if (!issueKey) return;
+  button.disabled = true;
+  status.className = "execution-launcher-status is-loading";
+  status.textContent = "Plan hazırlanıyor…";
+  try {
+    const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(issueKey) + "/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    state.pendingExecutionPlan = data.plan;
+    renderPlanPreview(data.plan, host, status);
+  } catch (error) {
+    status.className = "execution-launcher-status is-error";
+    status.textContent = "Plan hazırlanamadı: " + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function startWorkItemExecution(plan, button, status) {
+  if (!plan?.issue || !plan?.planFingerprint) return;
+  button.disabled = true;
+  status.className = "execution-launcher-status is-loading";
+  status.textContent = "Agent güvenli worktree üzerinde başlatılıyor…";
+  try {
+    const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(plan.issue) + "/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planFingerprint: plan.planFingerprint })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data.plan) {
+      state.pendingExecutionPlan = data.plan;
+      throw new Error("Plan değişti. Güncel planı tekrar kontrol edin.");
+    }
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    status.className = "execution-launcher-status is-success";
+    status.textContent = "Agent başlatıldı. İlerlemeyi Genel Bakış ekranından izleyebilirsiniz.";
+    state.pendingExecutionPlan = null;
+    await fetchSnapshot();
+  } catch (error) {
+    status.className = "execution-launcher-status is-error";
+    status.textContent = "Agent başlatılamadı: " + error.message;
+    button.disabled = false;
+  }
+}
+
+async function stopRunExecution(runId, button, status = null) {
+  if (!runId) return;
+  if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm("Bu agent çalışmasını durdurmak istiyor musunuz?")) return;
+  button.disabled = true;
+  if (status) {
+    status.className = "execution-launcher-status is-loading";
+    status.textContent = "Durdurma isteği gönderiliyor…";
+  }
+  try {
+    const response = await fetch("/api/control-plane/runs/" + encodeURIComponent(runId) + "/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    if (status) {
+      status.className = "execution-launcher-status is-success";
+      status.textContent = "Durdurma isteği kabul edildi.";
+    }
+    await fetchSnapshot();
+  } catch (error) {
+    if (status) {
+      status.className = "execution-launcher-status is-error";
+      status.textContent = "Agent durdurulamadı: " + error.message;
+    } else if (typeof window !== "undefined" && typeof window.alert === "function") {
+      window.alert("Agent durdurulamadı: " + error.message);
+    }
+    button.disabled = false;
+  }
+}
 function renderDecisionTraceDetail(data) {
+  state.currentWorkItemDetail = data;
   const summaryEl = getElem("trace-issue-summary");
   const body = getElem("trace-drawer-body");
   if (!body) return;
@@ -1207,6 +2046,8 @@ function renderDecisionTraceDetail(data) {
 
   if (summaryEl) summaryEl.textContent = wi.summary || "Açıklama yok";
 
+  body.appendChild(renderExecutionLauncher(data));
+
   // 1. Work Item Summary
   const wiSection = element("div", "trace-section");
   wiSection.appendChild(element("h3", "trace-section-title", "1. Work Item Özeti"));
@@ -1216,6 +2057,7 @@ function renderDecisionTraceDetail(data) {
   wiGrid.appendChild(createTraceCell("Kaynak Sağlayıcı", wi.sourceProvider || "jira"));
   wiGrid.appendChild(createTraceCell("Otonom İlerlenebilir", wi.autonomousEligible ? "Evet" : "Hayır"));
   wiSection.appendChild(wiGrid);
+  if (wi.description) wiSection.appendChild(element("p", "trace-description", wi.description));
   body.appendChild(wiSection);
 
   // 2. Orchestration Decision
@@ -1363,6 +2205,7 @@ function renderDecisionTraceDetail(data) {
     histSection.appendChild(timeline);
   }
   body.appendChild(histSection);
+  applyDocumentTranslations();
 }
 
 function createTraceCell(label, value) {
@@ -1559,6 +2402,7 @@ async function submitRejection() {
 
 // Parent Orchestration & Child DAG
 function clearParentDetail() {
+  state.currentParentDetail = null;
   const keyBadge = getElem("parent-key-badge");
   const summaryText = getElem("parent-summary-text");
   const statePillEl = getElem("parent-state-pill");
@@ -1593,11 +2437,13 @@ function populateParentSelector() {
   const select = getElem("parent-select");
   if (!select) return;
 
-  const parents = state.snapshot?.parentExecutions || [];
+  const parentMap = new Map((state.workSourceCatalog?.parents || []).map(parent => [parent.key, parent]));
+  for (const parent of state.snapshot?.parentExecutions || []) parentMap.set(parent.parentKey || parent.key, parent);
+  const parents = [...parentMap.values()];
   select.innerHTML = "";
 
   if (parents.length === 0) {
-    const opt = element("option", null, "Kayıtlı parent epik bulunamadı");
+    const opt = element("option", null, state.workSourceCatalogError ? "Parentlar yüklenemedi" : "Parent epik bulunamadı");
     opt.value = "";
     select.appendChild(opt);
     return;
@@ -1626,25 +2472,50 @@ function populateParentSelector() {
 
 async function fetchParentDetail(parentKey) {
   if (!parentKey) return;
+  const requestId = ++state.parentDetailRequestId;
   state.selectedParentKey = parentKey;
-
+  state.currentParentDetail = null;
   const select = getElem("parent-select");
-  if (select && select.value !== parentKey) {
-    select.value = parentKey;
+  const refresh = getElem("parent-refresh-btn");
+  const summaryText = getElem("parent-summary-text");
+  const keyBadge = getElem("parent-key-badge");
+  const dag = getElem("parent-dag-container");
+  const lane = getElem("parent-integration-lane");
+  const findings = getElem("parent-review-findings");
+  if (select) { select.value = parentKey; select.disabled = true; }
+  if (refresh) refresh.disabled = true;
+  if (keyBadge) keyBadge.textContent = parentKey;
+  if (summaryText) summaryText.textContent = uiMessage("parentLoading");
+  for (const host of [dag, lane, findings]) {
+    if (host) host.replaceChildren(element("div", "loading-spinner", uiMessage("loading")));
   }
 
   try {
-    const res = await fetch(`/api/pm/parents/${encodeURIComponent(parentKey)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    renderParentDetail(data.parent || data);
-  } catch (err) {
-    const summaryText = getElem("parent-summary-text");
-    if (summaryText) summaryText.textContent = `Parent yüklenemedi: ${err.message}`;
+    const data = await fetchJsonWithTimeout("/api/pm/parents/" + encodeURIComponent(parentKey));
+    if (requestId !== state.parentDetailRequestId) return;
+    const detail = data?.parent || data;
+    if (!detail || (!detail.parent && !detail.key && !detail.parentKey)) {
+      throw new Error("The server returned an incomplete parent response.");
+    }
+    renderParentDetail(detail);
+  } catch (error) {
+    if (requestId !== state.parentDetailRequestId) return;
+    clearParentDetail();
+    if (keyBadge) keyBadge.textContent = parentKey;
+    if (summaryText) summaryText.textContent = uiMessage("parentFailed") + ": " + error.message;
+    for (const host of [dag, lane, findings]) {
+      if (host) renderDetailError(null, host, uiMessage("parentFailed"), error);
+    }
+  } finally {
+    if (requestId === state.parentDetailRequestId) {
+      if (select) select.disabled = false;
+      if (refresh) refresh.disabled = false;
+    }
   }
 }
 
 function renderParentDetail(data) {
+  state.currentParentDetail = data;
   const detail = (data && data.ok && data.parent) ? data.parent : (data || {});
   const parent = detail.parent || {};
   const stateVal = detail.state || "active";
@@ -1667,7 +2538,7 @@ function renderParentDetail(data) {
     statePillEl.textContent = STATUS_LABELS[stateVal] || stateVal.toUpperCase();
     statePillEl.className = `state-pill ${stateVal}`;
   }
-  if (baseSha) baseSha.textContent = detail.baseSha ? `${detail.baseRef || "develop"} @ ${detail.baseSha.slice(0, 8)}` : (detail.baseRef || "develop");
+  if (baseSha) baseSha.textContent = detail.readOnly ? "Henüz orchestration run yok" : (detail.baseSha ? `${detail.baseRef || "develop"} @ ${detail.baseSha.slice(0, 8)}` : (detail.baseRef || "develop"));
   if (intBranch) intBranch.textContent = detail.integrationBranch || "—";
   if (intHeadSha) intHeadSha.textContent = detail.integrationHeadSha ? detail.integrationHeadSha.slice(0, 8) : "—";
   if (graphFp) graphFp.textContent = detail.graphFingerprint ? detail.graphFingerprint.slice(0, 12) + "..." : "—";
@@ -1703,6 +2574,81 @@ function renderParentDetail(data) {
   renderChildDag(children);
   renderIntegrationLane(children, detail.integrationBranch);
   renderParentReviewFindings(detail);
+  applyDocumentTranslations();
+}
+
+function childIssueKey(child = {}) {
+  return String(child.issueKey || child.key || "").trim();
+}
+
+function childDependencies(child = {}) {
+  return Array.isArray(child.dependencies)
+    ? child.dependencies.map(String).filter(Boolean)
+    : [];
+}
+
+function childVisualState(child = {}) {
+  const integration = String(child.integrationState || "").toLowerCase();
+  const runtime = String(child.canonicalState || child.runtimeState || child.orchestrationState || "").toLowerCase();
+  if (integration === "integrated" || child.integratedSha || ["integrated", "done", "completed"].includes(runtime)) return "done";
+  if (runtime.includes("blocked") || runtime.includes("conflict") || runtime.includes("failed")) return "blocked";
+  if (child.reviewedSha || runtime.includes("review") || runtime === "verifying") return "review";
+  if (["in_progress", "executing", "started", "progress", "running"].includes(runtime) || runtime.includes("in progress")) return "running";
+  return "ready";
+}
+
+function childStatusLabel(child = {}) {
+  return {
+    done: "Tamamlandı",
+    blocked: "Engelli",
+    review: "İncelemede",
+    running: "Çalışıyor",
+    ready: "Hazır"
+  }[childVisualState(child)];
+}
+
+function buildExecutionStages(children = []) {
+  const ordered = [];
+  const seen = new Set();
+  for (const child of children) {
+    const key = childIssueKey(child);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ordered.push(child);
+  }
+
+  const knownKeys = new Set(ordered.map(childIssueKey));
+  const remaining = new Map(ordered.map(child => [childIssueKey(child), child]));
+  const placed = new Set();
+  const stages = [];
+
+  while (remaining.size > 0) {
+    const ready = [...remaining.values()].filter(child => {
+      const dependencies = childDependencies(child);
+      return dependencies.every(dependency => knownKeys.has(dependency) && placed.has(dependency));
+    });
+
+    if (ready.length === 0) {
+      stages.push({ index: stages.length, unresolved: true, children: [...remaining.values()] });
+      break;
+    }
+
+    stages.push({ index: stages.length, unresolved: false, children: ready });
+    for (const child of ready) {
+      const key = childIssueKey(child);
+      placed.add(key);
+      remaining.delete(key);
+    }
+  }
+
+  return stages;
+}
+
+function createChildFlowStat(value, label, tone) {
+  const stat = element("div", `child-flow-stat ${tone || ""}`.trim());
+  stat.appendChild(element("strong", null, String(value)));
+  stat.appendChild(element("span", null, label));
+  return stat;
 }
 
 function renderChildDag(children = []) {
@@ -1712,80 +2658,100 @@ function renderChildDag(children = []) {
   container.innerHTML = "";
 
   if (children.length === 0) {
-    container.appendChild(element("div", "empty-state", "Bu parent epikte child task yok."));
-    if (textFallback) textFallback.textContent = "Child task bulunamadı.";
+    container.appendChild(element("div", "empty-state", "Bu Parent altında henüz alt iş bulunmuyor."));
+    if (textFallback) textFallback.textContent = "Alt iş bulunamadı.";
     return;
   }
 
   if (textFallback) {
-    const lines = children.map(c => {
-      const deps = c.dependencies && c.dependencies.length > 0 ? ` (Bağımlı: ${c.dependencies.join(", ")})` : " (Bağımsız / Paralel)";
-      return `• ${c.issueKey}: ${c.summary || "Task"} | Durum: ${c.runtimeState || c.orchestrationState || "eligible"} | Entegrasyon: ${c.integrationState || "not-queued"}${deps}`;
+    const lines = children.map(child => {
+      const dependencies = childDependencies(child);
+      const dependencyText = dependencies.length > 0
+        ? `Önce tamamlanması gereken: ${dependencies.join(", ")}`
+        : "Beklemeden başlayabilir";
+      return `• ${childIssueKey(child)}: ${child.summary || "İş"} | ${childStatusLabel(child)} | ${dependencyText}`;
     });
     textFallback.textContent = lines.join("\n");
   }
 
-  const independent = children.filter(c => !c.dependencies || c.dependencies.length === 0);
-  const dependent = children.filter(c => c.dependencies && c.dependencies.length > 0);
+  const stages = buildExecutionStages(children);
+  const completedCount = children.filter(child => childVisualState(child) === "done").length;
+  const blockedCount = children.filter(child => childVisualState(child) === "blocked").length;
+  const readyNow = stages[0]?.unresolved ? 0 : (stages[0]?.children.length || 0);
 
-  const wave1Box = element("div", "dag-wave");
-  wave1Box.appendChild(element("h4", "dag-wave-title", "Dalga 1 (Paralel / Bağımsız Tasklar)"));
-  const wave1Grid = element("div", "dag-nodes-grid");
-  independent.forEach(c => wave1Grid.appendChild(createDagNode(c)));
-  wave1Box.appendChild(wave1Grid);
-  container.appendChild(wave1Box);
+  const summary = element("div", "child-flow-summary");
+  summary.appendChild(createChildFlowStat(children.length, "Toplam alt iş", "is-total"));
+  summary.appendChild(createChildFlowStat(readyNow, "Hemen başlayabilir", "is-ready"));
+  summary.appendChild(createChildFlowStat(completedCount, "Tamamlandı", "is-done"));
+  summary.appendChild(createChildFlowStat(blockedCount, "Engelli", "is-blocked"));
+  container.appendChild(summary);
 
-  if (dependent.length > 0) {
-    const wave2Box = element("div", "dag-wave");
-    wave2Box.appendChild(element("h4", "dag-wave-title", "Dalga 2+ (Sıralı / Bağımlı Tasklar)"));
-    const wave2Grid = element("div", "dag-nodes-grid");
-    dependent.forEach(c => wave2Grid.appendChild(createDagNode(c)));
-    wave2Box.appendChild(wave2Grid);
-    container.appendChild(wave2Box);
-  }
+  const flow = element("div", "child-flow-stages");
+  stages.forEach((stage, stageIndex) => {
+    const stageBox = element("section", `child-flow-stage${stage.unresolved ? " is-unresolved" : ""}`);
+    const header = element("div", "child-flow-stage-header");
+    const number = element("span", "child-flow-stage-number", stage.unresolved ? "!" : String(stageIndex + 1));
+    const copy = element("div", "child-flow-stage-copy");
+    const title = stage.unresolved
+      ? "Bağımlılığı kontrol edilmeli"
+      : stageIndex === 0
+        ? "Hemen başlayabilir"
+        : "Önceki işler tamamlanınca";
+    const description = stage.unresolved
+      ? "Bu işlerde eksik veya döngüsel bir bağımlılık var."
+      : stageIndex === 0
+        ? "Bu işler birbirini beklemez; uygun kapasite varsa aynı anda çalışabilir."
+        : "Bu aşama, kendisinden önce gereken işler tamamlandığında açılır.";
+    copy.appendChild(element("h4", null, title));
+    copy.appendChild(element("p", null, description));
+    header.appendChild(number);
+    header.appendChild(copy);
+    header.appendChild(element("span", "child-flow-stage-count", `${stage.children.length} iş`));
+    stageBox.appendChild(header);
+
+    const grid = element("div", "child-flow-grid");
+    stage.children.forEach(child => grid.appendChild(createDagNode(child)));
+    stageBox.appendChild(grid);
+    flow.appendChild(stageBox);
+  });
+  container.appendChild(flow);
 }
 
 function createDagNode(child) {
-  const node = element("button", "dag-node-btn");
+  const issueKey = childIssueKey(child);
+  const visualState = childVisualState(child);
+  const node = element("button", `dag-node-btn child-flow-card is-${visualState}`);
   node.type = "button";
   node.dataset = node.dataset || {};
-  node.dataset.issueKey = child.issueKey;
-
-  let stateClass = "state-ready";
-  if (child.integrationState === "integrated") stateClass = "state-integrated";
-  else if (child.runtimeState === "blocked" || child.runtimeState === "blocked-conflict") stateClass = "state-conflict";
-  else if (child.runtimeState === "executing") stateClass = "state-executing";
-  else if (child.runtimeState === "verifying" || child.reviewedSha) stateClass = "state-review";
-
-  if (node.classList && typeof node.classList.add === "function") {
-    node.classList.add(stateClass);
+  node.dataset.issueKey = issueKey;
+  if (typeof node.setAttribute === "function") {
+    node.setAttribute("aria-label", `${issueKey}: ${child.summary || "İş"}. ${childStatusLabel(child)}. Detayını aç.`);
   }
 
-  const top = element("div", "dag-node-top");
-  const key = element("strong", "dag-node-key", child.issueKey);
-  const badge = element("span", "badge-dag", child.integrationState === "integrated" ? "ENTEGRE" : (child.reviewedSha ? "REVIEWED" : (STATUS_LABELS[child.runtimeState] || child.runtimeState)));
+  const top = element("div", "child-flow-card-top");
+  const key = element("strong", "child-flow-key", issueKey);
+  const badge = element("span", `child-flow-status is-${visualState}`, childStatusLabel(child));
   top.appendChild(key);
   top.appendChild(badge);
 
-  const title = element("p", "dag-node-title", child.summary || "Task");
-
-  const meta = element("div", "dag-node-meta");
-  if (child.dependencies && child.dependencies.length > 0) {
-    meta.appendChild(element("small", null, `← Bağımlı: ${child.dependencies.join(", ")} (${child.dependencyState})`));
-  } else {
-    meta.appendChild(element("small", null, "✓ Bağımsız / Paralel"));
-  }
-  if (child.childBaseSha) {
-    meta.appendChild(element("small", "code-cell", `Base SHA: ${child.childBaseSha.slice(0, 8)}`));
-  }
+  const title = element("p", "child-flow-title", child.summary || "İş");
+  const dependencies = childDependencies(child);
+  const dependency = element("div", "child-flow-dependency");
+  dependency.appendChild(element("span", "child-flow-dependency-label", dependencies.length > 0 ? "Ön koşul" : "Başlangıç"));
+  dependency.appendChild(element("strong", null, dependencies.length > 0 ? `${dependencies.join(", ")} tamamlanmalı` : "Beklemeden başlayabilir"));
 
   node.appendChild(top);
   node.appendChild(title);
-  node.appendChild(meta);
+  node.appendChild(dependency);
+
+  if (child.childBaseSha) {
+    node.appendChild(element("small", "child-flow-tech", `Base: ${child.childBaseSha.slice(0, 8)}`));
+  }
+  node.appendChild(element("span", "child-flow-open", "İş detayını aç →"));
 
   if (typeof node.addEventListener === "function") {
     node.addEventListener("click", () => {
-      openDecisionTrace(child.issueKey);
+      openDecisionTrace(issueKey);
     });
   }
 
@@ -1798,23 +2764,36 @@ function renderIntegrationLane(children = [], branchName) {
   lane.innerHTML = "";
 
   if (children.length === 0) {
-    lane.appendChild(element("div", "empty-state", "Entegrasyon kuyruğu boş."));
+    lane.appendChild(element("div", "empty-state", "Birleştirilecek alt iş bulunmuyor."));
     return;
   }
 
-  children.forEach((c, idx) => {
-    const item = element("div", "integration-item");
-    const num = element("span", "int-seq", String(idx + 1));
+  children.forEach((child, index) => {
+    const integrated = Boolean(child.integratedSha) || child.integrationState === "integrated";
+    const reviewed = Boolean(child.reviewedSha);
+    const tone = integrated ? "is-integrated" : reviewed ? "is-ready" : "is-pending";
+    const item = element("div", `integration-item ${tone}`);
+    const number = element("span", "int-seq", String(index + 1));
     const content = element("div", "int-content");
-    const hdr = element("strong", null, `${c.issueKey} · ${c.summary || "Task"}`);
+    const top = element("div", "int-content-top");
+    top.appendChild(element("strong", null, `${childIssueKey(child)} · ${child.summary || "İş"}`));
+    top.appendChild(element("span", `integration-status ${tone}`, integrated ? "Parent'a eklendi" : reviewed ? "Birleştirmeye hazır" : "İnceleme bekliyor"));
 
-    const diffStatus = element("div", "int-badges");
-    diffStatus.appendChild(element("span", `badge ${c.reviewedSha ? "badge-clean" : "badge-pending"}`, c.reviewedSha ? `Reviewed: ${c.reviewedSha.slice(0, 8)}` : "Review Bekliyor"));
-    diffStatus.appendChild(element("span", `badge ${c.integratedSha ? "badge-integrated" : "badge-not-integrated"}`, c.integratedSha ? `Integrated: ${c.integratedSha.slice(0, 8)}` : "Henüz Entegre Edilmedi"));
+    const explanation = element("p", "integration-explanation", integrated
+      ? "Bu değişiklik Parent dalına güvenle alındı."
+      : reviewed
+        ? "İnceleme tamamlandı; sırası geldiğinde Parent dalına alınabilir."
+        : "Önce işin tamamlanması ve incelemeden geçmesi gerekiyor.");
 
-    content.appendChild(hdr);
-    content.appendChild(diffStatus);
-    item.appendChild(num);
+    const evidence = element("div", "integration-evidence");
+    if (child.reviewedSha) evidence.appendChild(element("small", null, `İnceleme: ${child.reviewedSha.slice(0, 8)}`));
+    if (child.integratedSha) evidence.appendChild(element("small", null, `Birleştirme: ${child.integratedSha.slice(0, 8)}`));
+    if (!child.reviewedSha && !child.integratedSha) evidence.appendChild(element("small", null, branchName ? `Hedef: ${branchName}` : "Henüz commit kanıtı yok"));
+
+    content.appendChild(top);
+    content.appendChild(explanation);
+    content.appendChild(evidence);
+    item.appendChild(number);
     item.appendChild(content);
     lane.appendChild(item);
   });
@@ -2643,10 +3622,69 @@ function renderConfigView(data) {
 const PROVIDER_CONNECTION_STATUS_LABELS = {
   connected: "Bağlı",
   configured: "Yapılandırıldı",
+  installed: "Kurulu",
+  selected: "Seçili",
+  not_running: "Çalışmıyor",
+  no_models: "Model yok",
   not_authenticated: "Oturum gerekli",
   not_installed: "Kurulu değil",
   not_configured: "Bağlı değil"
 };
+
+const TOKEN_PROVIDER_IDS = new Set(["github", "notion", "linear"]);
+const LOCAL_PROVIDER_IDS = new Set(["ollama", "lmstudio"]);
+
+function localEndpointNeedsTrust(endpoint) {
+  try {
+    const host = new URL(String(endpoint || "")).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return !(host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127."));
+  } catch {
+    return true;
+  }
+}
+
+function populateLocalModelOptions(models, selectedModel = "") {
+  const select = getElem("local-model-select");
+  if (!select) return;
+  select.replaceChildren();
+  (models || []).forEach(model => {
+    const option = element("option", null, model);
+    option.value = model;
+    select.appendChild(option);
+  });
+  select.value = selectedModel || models?.[0] || "";
+  select.disabled = !models?.length;
+}
+
+function syncLocalEndpointApproval(clearModels = false) {
+  const endpoint = getElem("local-endpoint-input")?.value;
+  const trustRow = getElem("local-endpoint-trust-row");
+  const trust = getElem("local-endpoint-trust-input");
+  const remote = localEndpointNeedsTrust(endpoint);
+  if (trustRow) trustRow.hidden = !remote;
+  if (trust && (!remote || clearModels)) trust.checked = false;
+  if (clearModels) {
+    populateLocalModelOptions([]);
+    const connect = getElem("provider-connection-connect-btn");
+    if (connect && LOCAL_PROVIDER_IDS.has(state.activeProviderConnectionId)) connect.disabled = true;
+  }
+}
+
+function providerConnectionCategory(connection) {
+  if (connection.category) return connection.category;
+  return connection.kind === "work-source" ? "work-tools" : "ai-tools";
+}
+
+function setProviderConnectionCategory(category) {
+  if (!["work-tools", "ai-tools", "local-ai"].includes(category)) return;
+  state.activeProviderConnectionCategory = category;
+  document.querySelectorAll?.("[data-provider-category]").forEach(button => {
+    const active = button.dataset.providerCategory === category;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  renderProviderConnections(state.providerConnections || { connections: [] });
+}
 
 function renderProviderConnections(data) {
   state.providerConnections = data || { connections: [] };
@@ -2658,7 +3696,8 @@ function renderProviderConnections(data) {
   }
   if (!host) return;
   host.innerHTML = "";
-  const connections = Array.isArray(data?.connections) ? data.connections : [];
+  const connections = (Array.isArray(data?.connections) ? data.connections : [])
+    .filter(connection => providerConnectionCategory(connection) === state.activeProviderConnectionCategory);
   if (connections.length === 0) {
     host.appendChild(element("div", "empty-state", "Bağlantı bilgisi bulunamadı."));
     return;
@@ -2668,7 +3707,14 @@ function renderProviderConnections(data) {
     const header = element("div", "provider-connection-card-header");
     const identity = element("div", "provider-connection-identity");
     identity.appendChild(element("strong", null, connection.displayName || connection.id));
-    identity.appendChild(element("span", "provider-connection-kind", connection.kind === "work-source" ? "İş kaynağı" : "Yürütme aracı"));
+    const kindLabel = connection.kind === "work-source"
+      ? "İş kaynağı"
+      : connection.kind === "integration"
+        ? "Bağlantı"
+        : connection.category === "local-ai"
+          ? "Yerel yürütücü"
+          : "AI yürütme aracı";
+    identity.appendChild(element("span", "provider-connection-kind", kindLabel));
     const badge = element("span", `provider-connection-status status-${connection.status || "unknown"}`, PROVIDER_CONNECTION_STATUS_LABELS[connection.status] || "Bilinmiyor");
     header.append(identity, badge);
     card.appendChild(header);
@@ -2679,6 +3725,10 @@ function renderProviderConnections(data) {
       meta.appendChild(element("span", null, connection.credentialSource === "environment" ? "Ortam değişkenleri" : "Güvenli kasa"));
     }
     if (connection.selected) meta.appendChild(element("span", "badge badge-key", "Seçili"));
+    if (connection.selectedModel) meta.appendChild(element("span", null, connection.selectedModel));
+    if (connection.endpoint) meta.appendChild(element("span", null, connection.endpoint));
+    if (connection.remote) meta.appendChild(element("span", "badge", "Özel ağ sunucusu"));
+    if (connection.runtimeAvailable === false) meta.appendChild(element("span", "badge", "Bağlantı katmanı"));
     card.appendChild(meta);
     const actions = element("div", "provider-connection-card-actions");
     const manage = element("button", "pm-btn pm-btn-view", connection.status === "connected" ? "Detay" : "Bağlantıyı Aç");
@@ -2687,7 +3737,8 @@ function renderProviderConnections(data) {
     actions.appendChild(manage);
     const test = element("button", "pm-btn pm-btn-approve", "Test Et");
     test.type = "button";
-    test.disabled = connection.installed === false || (connection.id === "jira" && !connection.configured);
+    const credentialRequired = connection.id === "jira" || TOKEN_PROVIDER_IDS.has(connection.id);
+    test.disabled = (!LOCAL_PROVIDER_IDS.has(connection.id) && connection.installed === false && !connection.connected) || (credentialRequired && !connection.configured);
     test.addEventListener?.("click", () => {
       openProviderConnectionDrawer(connection, test);
       testProviderConnection(connection.id, test);
@@ -2707,8 +3758,10 @@ function setProviderConnectionMessage(kind, message) {
 }
 
 function clearProviderConnectionSecret() {
-  const token = getElem("jira-token-input");
-  if (token) token.value = "";
+  ["jira-token-input", "provider-token-input"].forEach(id => {
+    const token = getElem(id);
+    if (token) token.value = "";
+  });
 }
 
 function openProviderConnectionDrawer(connection, trigger = null) {
@@ -2718,33 +3771,64 @@ function openProviderConnectionDrawer(connection, trigger = null) {
   const title = getElem("provider-connection-title");
   const summary = getElem("provider-connection-summary");
   const guidance = getElem("provider-connection-guidance");
-  const fields = getElem("jira-connection-fields");
+  const jiraFields = getElem("jira-connection-fields");
+  const tokenFields = getElem("token-connection-fields");
+  const localFields = getElem("local-model-fields");
   const form = getElem("provider-connection-form");
   const connect = getElem("provider-connection-connect-btn");
   const test = getElem("provider-connection-test-btn");
+  const select = getElem("provider-connection-select-btn");
   const disconnect = getElem("provider-connection-disconnect-btn");
   const status = getElem("provider-connection-status");
   if (pill) pill.textContent = connection.displayName || connection.id;
   if (title) title.textContent = `${connection.displayName || connection.id} bağlantısı`;
   if (summary) summary.textContent = PROVIDER_CONNECTION_STATUS_LABELS[connection.status] || "Bağlantı durumu bilinmiyor";
   if (guidance) guidance.textContent = connection.guidance || "Bağlantı durumunu test edin.";
-  if (fields) fields.hidden = connection.id !== "jira";
+  if (jiraFields) jiraFields.hidden = connection.id !== "jira";
+  if (tokenFields) tokenFields.hidden = !TOKEN_PROVIDER_IDS.has(connection.id);
+  if (localFields) localFields.hidden = !LOCAL_PROVIDER_IDS.has(connection.id);
   if (form) form.dataset.providerId = connection.id;
   if (status) status.hidden = true;
   const site = getElem("jira-site-input");
   const email = getElem("jira-email-input");
   if (site) site.value = connection.site || "";
   if (email) email.value = "";
+  const tokenLabel = getElem("provider-token-label");
+  if (tokenLabel) tokenLabel.textContent = `${connection.displayName || connection.id} API token`;
+  const endpointInput = getElem("local-endpoint-input");
+  if (endpointInput) endpointInput.value = connection.endpoint || "";
+  const trustInput = getElem("local-endpoint-trust-input");
+  if (trustInput) trustInput.checked = connection.remoteEndpointApproved === true;
+  populateLocalModelOptions(connection.models || [], connection.selectedModel);
+  syncLocalEndpointApproval(false);
+  const endpoint = getElem("local-model-endpoint");
+  if (endpoint) endpoint.textContent = connection.endpoint
+    ? `Yerel sunucu: ${connection.endpoint}`
+    : "Yerel sunucu adresi otomatik algılanır.";
   clearProviderConnectionSecret();
-  const canStartLogin = connection.id === "jira" ? connection.canConnect : connection.loginSupported;
+  const canStartLogin = connection.id === "jira" || TOKEN_PROVIDER_IDS.has(connection.id) || LOCAL_PROVIDER_IDS.has(connection.id)
+    ? connection.canConnect
+    : connection.loginSupported;
   if (connect) {
     connect.hidden = !canStartLogin;
-    connect.disabled = !mutationEnabled || connection.installed === false;
-    connect.textContent = connection.id === "codex" ? "Codex Girişini Aç" : "Bağlan ve Güvenli Kaydet";
+    connect.disabled = !mutationEnabled || (LOCAL_PROVIDER_IDS.has(connection.id) && !(connection.models || []).length) || (!LOCAL_PROVIDER_IDS.has(connection.id) && connection.installed === false && !connection.connected);
+    connect.textContent = connection.id === "codex"
+      ? "Codex Girişini Aç"
+      : LOCAL_PROVIDER_IDS.has(connection.id)
+        ? "Modeli Kaydet"
+        : "Bağlan ve Güvenli Kaydet";
   }
-  if (test) test.disabled = connection.installed === false || (connection.id === "jira" && !connection.configured);
+  const credentialRequired = connection.id === "jira" || TOKEN_PROVIDER_IDS.has(connection.id);
+  if (test) {
+    test.disabled = (!LOCAL_PROVIDER_IDS.has(connection.id) && connection.installed === false && !connection.connected) || (credentialRequired && !connection.configured);
+    test.textContent = LOCAL_PROVIDER_IDS.has(connection.id) ? "Modelleri Getir" : "Test Et";
+  }
+  if (select) {
+    select.hidden = !LOCAL_PROVIDER_IDS.has(connection.id) || connection.selected || !connection.canSelect;
+    select.disabled = !mutationEnabled;
+  }
   if (disconnect) {
-    disconnect.hidden = !(connection.id === "jira" && connection.credentialSource === "vault");
+    disconnect.hidden = !((connection.id === "jira" || TOKEN_PROVIDER_IDS.has(connection.id)) && connection.credentialSource === "vault");
     disconnect.disabled = !mutationEnabled;
   }
   if (!mutationEnabled && canStartLogin && guidance) {
@@ -2799,15 +3883,35 @@ async function submitProviderConnection(event) {
   if (connect) connect.disabled = true;
   setProviderConnectionMessage("loading", id === "codex" ? "Codex giriş ekranı açılıyor…" : "Bağlantı doğrulanıyor…");
   try {
-    const payload = id === "jira" ? {
-      baseUrl: getElem("jira-site-input")?.value,
-      email: getElem("jira-email-input")?.value,
-      token: getElem("jira-token-input")?.value
-    } : {};
+    const payload = id === "jira"
+      ? {
+          baseUrl: getElem("jira-site-input")?.value,
+          email: getElem("jira-email-input")?.value,
+          token: getElem("jira-token-input")?.value
+        }
+      : TOKEN_PROVIDER_IDS.has(id)
+        ? { token: getElem("provider-token-input")?.value }
+        : LOCAL_PROVIDER_IDS.has(id)
+          ? {
+              endpoint: getElem("local-endpoint-input")?.value,
+              model: getElem("local-model-select")?.value,
+              trustRemoteEndpoint: getElem("local-endpoint-trust-input")?.checked === true
+            }
+          : {};
     const result = await providerConnectionRequest(id, "connect", payload);
     clearProviderConnectionSecret();
     setProviderConnectionMessage("success", result.guidance || "Bağlantı doğrulandı ve güvenli biçimde kaydedildi.");
     await fetchProviderConnections();
+    const refreshed = state.providerConnections?.connections?.find(connection => connection.id === id);
+    if (refreshed) {
+      const test = getElem("provider-connection-test-btn");
+      if (test) test.disabled = false;
+      const select = getElem("provider-connection-select-btn");
+      if (select) {
+        select.hidden = !LOCAL_PROVIDER_IDS.has(id) || refreshed.selected || !refreshed.canSelect;
+        select.disabled = !state.providerConnections?.mutationEnabled;
+      }
+    }
   } catch (error) {
     clearProviderConnectionSecret();
     setProviderConnectionMessage("error", `Bağlantı kurulamadı: ${error.message}`);
@@ -2821,9 +3925,23 @@ async function testProviderConnection(id = state.activeProviderConnectionId, tri
   if (trigger) trigger.disabled = true;
   if (state.activeProviderConnectionId === id) setProviderConnectionMessage("loading", "Bağlantı test ediliyor…");
   try {
-    await providerConnectionRequest(id, "test");
-    if (state.activeProviderConnectionId === id) setProviderConnectionMessage("success", "Bağlantı hazır ve kullanılabilir.");
-    await fetchProviderConnections();
+    const local = LOCAL_PROVIDER_IDS.has(id);
+    const payload = local
+      ? {
+          endpoint: getElem("local-endpoint-input")?.value,
+          trustRemoteEndpoint: getElem("local-endpoint-trust-input")?.checked === true
+        }
+      : undefined;
+    const result = await providerConnectionRequest(id, "test", payload);
+    if (local) {
+      populateLocalModelOptions(result.models || []);
+      const connect = getElem("provider-connection-connect-btn");
+      if (connect) connect.disabled = !(result.models || []).length || !state.providerConnections?.mutationEnabled;
+    }
+    if (state.activeProviderConnectionId === id) {
+      setProviderConnectionMessage("success", result.guidance || (local ? `${(result.models || []).length} model bulundu.` : (result.status === "installed" ? "Araç kurulu ve çalıştırılabilir." : "Bağlantı hazır ve kullanılabilir.")));
+    }
+    if (!local) await fetchProviderConnections();
   } catch (error) {
     if (state.activeProviderConnectionId === id) setProviderConnectionMessage("error", `Test başarısız: ${error.message}`);
   } finally {
@@ -2833,16 +3951,34 @@ async function testProviderConnection(id = state.activeProviderConnectionId, tri
 
 async function disconnectProviderConnection() {
   const id = state.activeProviderConnectionId;
-  if (!id || !confirm("Dashboard tarafından güvenli kasada tutulan Jira bağlantısı kaldırılsın mı?")) return;
+  if (!id || !confirm("Dashboard tarafından güvenli kasada tutulan bu bağlantı kaldırılsın mı?")) return;
   const button = getElem("provider-connection-disconnect-btn");
   if (button) button.disabled = true;
   setProviderConnectionMessage("loading", "Bağlantı kaldırılıyor…");
   try {
     await providerConnectionRequest(id, "disconnect");
-    setProviderConnectionMessage("success", "Yerel Jira bağlantısı kaldırıldı.");
+    setProviderConnectionMessage("success", "Güvenli kasadaki bağlantı kaldırıldı.");
     await fetchProviderConnections();
   } catch (error) {
     setProviderConnectionMessage("error", `Bağlantı kaldırılamadı: ${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function selectProviderConnection() {
+  const id = state.activeProviderConnectionId;
+  if (!id || !LOCAL_PROVIDER_IDS.has(id)) return;
+  const button = getElem("provider-connection-select-btn");
+  if (button) button.disabled = true;
+  setProviderConnectionMessage("loading", "Yerel model yürütücü olarak seçiliyor…");
+  try {
+    const result = await providerConnectionRequest(id, "select");
+    setProviderConnectionMessage("success", `${result.model || id} gelecek çalıştırmalar için seçildi.`);
+    await fetchProviderConnections();
+    if (button) button.hidden = true;
+  } catch (error) {
+    setProviderConnectionMessage("error", `Yürütücü seçilemedi: ${error.message}`);
   } finally {
     if (button) button.disabled = false;
   }
@@ -3005,6 +4141,7 @@ async function fetchSnapshot() {
     if (state.currentView === "parents-view") {
       populateParentSelector();
     }
+    applyDocumentTranslations();
   } catch (err) {
     state.connected = false;
     const errBanner = getElem("error-banner");
@@ -3019,6 +4156,10 @@ async function fetchSnapshot() {
 // Global Event Listeners & Setup
 function setupEventListeners() {
   if (typeof document === "undefined") return;
+
+  document.querySelectorAll?.("[data-language]").forEach(button => {
+    button.addEventListener("click", () => applyLanguage(button.dataset.language));
+  });
 
   const navButtons = document.querySelectorAll(".nav-item");
   navButtons.forEach(btn => {
@@ -3050,6 +4191,10 @@ function setupEventListeners() {
   pmFilterBtns.forEach(btn => {
     btn.addEventListener("click", () => {
       state.currentPmFilter = btn.dataset.pmFilter || "inbox";
+      state.workItemState = "all";
+      state.workItemPage = 1;
+      const stateFilter = getElem("work-item-state-filter");
+      if (stateFilter) stateFilter.value = "all";
       renderPmWorkspace();
     });
   });
@@ -3110,6 +4255,46 @@ function setupEventListeners() {
     });
   }
 
+  const workSourceRefreshBtn = getElem("work-source-refresh-btn");
+  if (workSourceRefreshBtn) workSourceRefreshBtn.addEventListener("click", () => refreshWorkSourceCatalog(true));
+
+  const workItemSearch = getElem("work-item-search");
+  if (workItemSearch) {
+    workItemSearch.addEventListener("input", event => {
+      state.workItemQuery = event.target.value;
+      state.workItemPage = 1;
+      renderPmWorkspace();
+    });
+  }
+
+  const workItemStateFilter = getElem("work-item-state-filter");
+  if (workItemStateFilter) {
+    workItemStateFilter.addEventListener("change", event => {
+      state.workItemState = event.target.value || "all";
+      state.currentPmFilter = "inbox";
+      state.workItemPage = 1;
+      renderPmWorkspace();
+    });
+  }
+
+  const workItemPageSize = getElem("work-item-page-size");
+  if (workItemPageSize) {
+    workItemPageSize.addEventListener("change", event => {
+      state.workItemPageSize = Number(event.target.value) || 25;
+      state.workItemPage = 1;
+      renderPmWorkspace();
+    });
+  }
+
+  getElem("work-page-prev")?.addEventListener("click", () => {
+    state.workItemPage = Math.max(1, state.workItemPage - 1);
+    renderPmWorkspace();
+  });
+  getElem("work-page-next")?.addEventListener("click", () => {
+    state.workItemPage += 1;
+    renderPmWorkspace();
+  });
+
   const parentSelect = getElem("parent-select");
   if (parentSelect) {
     parentSelect.addEventListener("change", (e) => {
@@ -3124,12 +4309,10 @@ function setupEventListeners() {
 
   const parentRefreshBtn = getElem("parent-refresh-btn");
   if (parentRefreshBtn) {
-    parentRefreshBtn.addEventListener("click", () => {
-      if (state.selectedParentKey) {
-        fetchParentDetail(state.selectedParentKey);
-      } else {
-        populateParentSelector();
-      }
+    parentRefreshBtn.addEventListener("click", async () => {
+      await refreshWorkSourceCatalog(true);
+      if (state.selectedParentKey) fetchParentDetail(state.selectedParentKey);
+      else populateParentSelector();
     });
   }
 
@@ -3198,6 +4381,13 @@ function setupEventListeners() {
   if (providerConnectionTestBtn) providerConnectionTestBtn.addEventListener("click", () => testProviderConnection());
   const providerConnectionDisconnectBtn = getElem("provider-connection-disconnect-btn");
   if (providerConnectionDisconnectBtn) providerConnectionDisconnectBtn.addEventListener("click", disconnectProviderConnection);
+  const providerConnectionSelectBtn = getElem("provider-connection-select-btn");
+  if (providerConnectionSelectBtn) providerConnectionSelectBtn.addEventListener("click", selectProviderConnection);
+  const localEndpointInput = getElem("local-endpoint-input");
+  if (localEndpointInput) localEndpointInput.addEventListener("input", () => syncLocalEndpointApproval(true));
+  document.querySelectorAll?.("[data-provider-category]").forEach(button => {
+    button.addEventListener("click", () => setProviderConnectionCategory(button.dataset.providerCategory));
+  });
 
   const traceCloseBtn = getElem("trace-close-btn");
   if (traceCloseBtn) {
@@ -3280,6 +4470,7 @@ function setupEventListeners() {
 
 // Initialization
 async function init() {
+  applyLanguage(state.language, { rerender: false });
   setupEventListeners();
   await fetchSnapshot();
   readUrlState();
@@ -3325,12 +4516,18 @@ if (typeof module !== "undefined" && module.exports) {
     renderCapacity,
     renderOverview,
     renderPmWorkspace,
+    refreshWorkSourceCatalog,
+    mergedWorkSourceGroups,
     renderParentDetail,
+    renderChildDag,
+    buildExecutionStages,
     clearParentDetail,
     populateParentSelector,
     renderObservability,
     renderConfigView,
     renderProviderConnections,
+    renderPlanPreview,
+    renderCompatibilityPreview,
     fetchProviderConnections,
     renderAgentRegistry,
     createPmItemCard,

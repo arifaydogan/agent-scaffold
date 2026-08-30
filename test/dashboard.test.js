@@ -120,8 +120,9 @@ test("dashboard exposes localhost-only provider connection lifecycle endpoints",
   const calls = [];
   const providerConnections = {
     async list() { return { mutationEnabled: true, secureStore: { supported: true }, connections: [{ id: "jira" }] }; },
-    async test(id) { calls.push(["test", id]); return { ok: true, status: "connected" }; },
+    async test(id, body) { calls.push(["test", id, body]); return { ok: true, status: "connected" }; },
     async connect(id, body) { calls.push(["connect", id, body]); return { ok: true, status: "connected" }; },
+    async select(id) { calls.push(["select", id]); return { ok: true, status: "selected" }; },
     async disconnect(id) { calls.push(["disconnect", id]); return { ok: true, removed: true }; },
     safeError(error) { return error.message; }
   };
@@ -139,6 +140,14 @@ test("dashboard exposes localhost-only provider connection lifecycle endpoints",
     assert.equal(tested.status, 200);
     await tested.json();
 
+    const remoteTest = await fetch(`${dashboard.url}/api/provider-connections/ollama/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "http://10.0.0.5:11434", trustRemoteEndpoint: true })
+    });
+    assert.equal(remoteTest.status, 200);
+    await remoteTest.json();
+
     const connected = await fetch(`${dashboard.url}/api/provider-connections/jira/connect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -147,12 +156,17 @@ test("dashboard exposes localhost-only provider connection lifecycle endpoints",
     assert.equal(connected.status, 202);
     await connected.json();
 
+    const selected = await fetch(`${dashboard.url}/api/provider-connections/ollama/select`, { method: "POST" });
+    assert.equal(selected.status, 200);
+    await selected.json();
+
     const disconnected = await fetch(`${dashboard.url}/api/provider-connections/jira`, { method: "DELETE" });
     assert.equal(disconnected.status, 200);
     await disconnected.json();
     assert.deepEqual(calls.map(call => call.slice(0, 2)), [
-      ["test", "jira"], ["connect", "jira"], ["disconnect", "jira"]
+      ["test", "jira"], ["test", "ollama"], ["connect", "jira"], ["select", "ollama"], ["disconnect", "jira"]
     ]);
+    assert.deepEqual(calls[1][2], { endpoint: "http://10.0.0.5:11434", trustRemoteEndpoint: true });
   } finally {
     dashboard.server.closeAllConnections?.();
     await new Promise(resolve => dashboard.server.close(resolve));

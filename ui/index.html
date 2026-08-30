@@ -39,6 +39,10 @@
               <span><strong id="supervisor-heartbeat">—</strong></span>
             </div>
           </div>
+          <div class="language-switcher" role="group" aria-label="Dil / Language">
+            <button class="language-btn is-active" type="button" data-language="tr" aria-pressed="true" title="Türkçe">TR</button>
+            <button class="language-btn" type="button" data-language="en" aria-pressed="false" title="English">EN</button>
+          </div>
           <div class="connection-pill" role="status" aria-live="polite">
             <span id="connection-dot" class="connection-dot"></span>
             <span id="connection-label">Bağlanıyor</span>
@@ -202,18 +206,55 @@
               <h2>İşler</h2>
               <p>Operasyonel iş kuyruğu, onaylar ve karar günlüğü.</p>
             </div>
+            <div class="work-source-sync-actions">
+              <span id="work-source-sync-status" class="read-only-badge">İş kaynağı bekleniyor</span>
+              <button id="work-source-refresh-btn" class="pm-btn pm-btn-view" type="button">İş Kaynağından Yenile</button>
+            </div>
           </div>
 
           <nav class="filter-bar pm-sub-nav" aria-label="İş kuyruğu filtreleri">
             <button class="pm-filter-btn is-active" data-pm-filter="inbox">Tümü</button>
             <button class="pm-filter-btn" data-pm-filter="attention">İlgi Gereken <span id="pm-badge-attention" class="badge-count">0</span></button>
             <button class="pm-filter-btn" data-pm-filter="approvals">Onaylar <span id="pm-badge-approvals" class="badge-count">0</span></button>
+            <button class="pm-filter-btn" data-pm-filter="questions">Sorular <span id="pm-badge-questions" class="badge-count">0</span></button>
             <button class="pm-filter-btn" data-pm-filter="review">Review</button>
             <button class="pm-filter-btn" data-pm-filter="rework">Rework</button>
             <button class="pm-filter-btn" data-pm-filter="ready">Hazır</button>
             <button class="pm-filter-btn" data-pm-filter="human">İnsan Onayı</button>
             <button class="pm-filter-btn" data-pm-filter="journal">Journal</button>
           </nav>
+
+          <div class="work-catalog-toolbar" role="search" aria-label="İşlerde ara ve filtrele">
+            <label class="search-box work-catalog-search">
+              <span class="sr-only">Issue adı veya anahtarı ara</span>
+              <span aria-hidden="true">⌕</span>
+              <input id="work-item-search" type="search" placeholder="Issue adı veya anahtarı ara" autocomplete="off" />
+            </label>
+            <label class="work-catalog-field">
+              <span>Durum</span>
+              <select id="work-item-state-filter">
+                <option value="all">Tüm durumlar</option>
+                <option value="backlog">Planlama bekliyor</option>
+                <option value="ready">Hazır</option>
+                <option value="in_progress">Devam ediyor</option>
+                <option value="review">İncelemede</option>
+                <option value="rework">Düzeltme gerekiyor</option>
+                <option value="blocked">Bloke</option>
+                <option value="human_approval">İnsan onayı</option>
+                <option value="done">Tamamlandı</option>
+                <option value="cancelled">İptal edildi</option>
+                <option value="unknown">Bilinmeyen durum</option>
+              </select>
+            </label>
+            <label class="work-catalog-field work-page-size-field">
+              <span>Sayfa boyutu</span>
+              <select id="work-item-page-size">
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+          </div>
 
           <div id="pm-inbox-section" class="pm-section">
             <div class="panel work-queue-panel">
@@ -223,7 +264,23 @@
                   <tbody id="pm-queue-container"></tbody>
                 </table>
               </div>
+              <div id="work-pagination" class="work-pagination" aria-label="İş listesi sayfalama">
+                <span id="work-pagination-summary" class="work-pagination-summary">0 iş</span>
+                <div class="work-pagination-actions">
+                  <button id="work-page-prev" class="pm-btn pm-btn-view" type="button">← Önceki</button>
+                  <span id="work-page-indicator" class="work-page-indicator" aria-live="polite">1 / 1</span>
+                  <button id="work-page-next" class="pm-btn pm-btn-view" type="button">Sonraki →</button>
+                </div>
+              </div>
             </div>
+          </div>
+
+          <div id="pm-operator-section" class="pm-section" hidden>
+            <div class="pm-section-header">
+              <h3>Agent Soruları</h3>
+              <p class="section-desc">Agent bir iş kararına ihtiyaç duyduğunda sorusu burada görünür. Yanıtınız kaydedilir ve aynı güvenli planla çalışma otomatik devam eder.</p>
+            </div>
+            <div id="pm-operator-list" class="operator-question-list" aria-live="polite"></div>
           </div>
 
           <div id="pm-approvals-section" class="pm-section" hidden>
@@ -276,15 +333,28 @@
           <div class="page-header">
             <div>
               <h2>Parentlar</h2>
-              <p>Hiyerarşik teslimat, child DAG ve entegrasyon hattı.</p>
+              <p>Birden fazla işi tek teslimat hedefi altında yönetin.</p>
             </div>
             <div class="parent-picker-container">
-              <label for="parent-select" class="sr-only">Parent Epik Seçin</label>
+              <label for="parent-select" class="parent-picker-label">Parent seç</label>
               <select id="parent-select" class="parent-select-input">
                 <option value="">Parent Epik Yükleniyor...</option>
               </select>
-              <button id="parent-refresh-btn" class="pm-btn pm-btn-view" title="Yenile">⟳</button>
+              <button id="parent-refresh-btn" class="pm-btn pm-btn-view" type="button" title="Yenile" aria-label="Parent listesini yenile">⟳</button>
             </div>
+          </div>
+
+          <div class="parent-context-guide" aria-label="İş ve parent farkı">
+            <div class="parent-context-item">
+              <span class="parent-context-icon">İ</span>
+              <div><strong>İş</strong><p>Tek başına planlanıp çalıştırılabilen Jira kaydıdır.</p></div>
+            </div>
+            <span class="parent-context-arrow" aria-hidden="true">→</span>
+            <div class="parent-context-item is-parent">
+              <span class="parent-context-icon">P</span>
+              <div><strong>Parent</strong><p>Aynı teslimatın altındaki işleri ve bağımlılıklarını bir arada yönetir.</p></div>
+            </div>
+            <p class="parent-context-tip"><strong>Kullanım:</strong> Önce İşler sekmesinde görevleri inceleyin; bir Epic seçtiğinizde burada alt işlerin hangi sırayla çalışacağını ve ne zaman birleştirileceğini görün.</p>
           </div>
 
           <!-- Parent Summary -->
@@ -333,32 +403,42 @@
             </div>
           </div>
 
-          <!-- Two-Column: DAG + Integration Lane -->
-          <div class="parent-two-col">
-            <div>
-              <section class="parent-section" aria-labelledby="dag-heading">
-                <div class="parent-section-header">
-                  <h3 id="dag-heading">Child DAG</h3>
-                  <p class="section-desc">Bağımsız ve sıralı child taskların yürütme akışı.</p>
-                </div>
-                <div id="parent-dag-container" class="dag-container"></div>
-                <div id="parent-dag-text-fallback" class="dag-text-fallback" aria-label="Bağımlılık listesi"></div>
-              </section>
+          <section class="parent-section parent-flow-section" aria-labelledby="dag-heading">
+            <div class="parent-section-header parent-flow-header">
+              <div>
+                <span class="section-kicker">Çalışma planı</span>
+                <h3 id="dag-heading">Alt İşlerin Yürütme Sırası</h3>
+                <p class="section-desc">Birbirini beklemeyen işler birlikte, bağımlı işler ise gereken iş tamamlandıktan sonra başlar.</p>
+              </div>
+              <div class="child-flow-legend" aria-label="Durum açıklamaları">
+                <span><i class="legend-dot is-ready"></i> Hazır</span>
+                <span><i class="legend-dot is-running"></i> Çalışıyor</span>
+                <span><i class="legend-dot is-done"></i> Tamamlandı</span>
+                <span><i class="legend-dot is-blocked"></i> Engelli</span>
+              </div>
             </div>
+            <div id="parent-dag-container" class="dag-container"></div>
+            <div id="parent-dag-text-fallback" class="sr-only" aria-live="polite" aria-label="Bağımlılık listesi"></div>
+          </section>
+
+          <!-- Integration and final review -->
+          <div class="parent-two-col parent-two-col-secondary">
             <div>
               <section class="parent-section" aria-labelledby="int-heading">
                 <div class="parent-section-header">
-                  <h3 id="int-heading">Entegrasyon Hattı</h3>
-                  <p class="section-desc">Reviewed commitlerin parent worktree'sine sıralı entegrasyonu.</p>
+                  <span class="section-kicker">Teslimat</span>
+                  <h3 id="int-heading">Birleştirme Sırası</h3>
+                  <p class="section-desc">İncelemesi tamamlanan alt işlerin Parent dalına alınma durumu.</p>
                 </div>
                 <div id="parent-integration-lane" class="integration-lane-container"></div>
               </section>
-
-              <!-- Aggregate Review -->
+            </div>
+            <div>
               <section class="parent-section aggregate-review-section" aria-labelledby="agg-review-heading">
                 <div class="parent-section-header">
-                  <h3 id="agg-review-heading">Aggregate Review</h3>
-                  <p class="section-desc">Birleştirilmiş diff incelemesi ve doğrulama durumu.</p>
+                  <span class="section-kicker">Kalite kapısı</span>
+                  <h3 id="agg-review-heading">Toplu Son Kontrol</h3>
+                  <p class="section-desc">Birleştirilen değişikliklerin test ve inceleme sonucu.</p>
                 </div>
                 <div id="parent-review-findings" class="parent-review-findings-box"></div>
               </section>
@@ -522,9 +602,14 @@
             <div class="provider-connections-heading">
               <div>
                 <h3 id="provider-connections-title">Bağlantılar</h3>
-                <p>Jira ve yürütme araçlarının oturum durumunu tek yerden yönetin.</p>
+                <p>İş kaynaklarını, AI araçlarını ve model sunucularını ayrı kategorilerde yönetin.</p>
               </div>
               <span id="provider-connections-security" class="badge">Yerel ve güvenli</span>
+            </div>
+            <div class="provider-category-tabs" role="tablist" aria-label="Bağlantı kategorileri">
+              <button class="provider-category-tab is-active" type="button" role="tab" aria-selected="true" data-provider-category="work-tools">İş Araçları</button>
+              <button class="provider-category-tab" type="button" role="tab" aria-selected="false" data-provider-category="ai-tools">AI Araçları</button>
+              <button class="provider-category-tab" type="button" role="tab" aria-selected="false" data-provider-category="local-ai">Model Sunucuları</button>
             </div>
             <div id="provider-connections-grid" class="provider-connections-grid" aria-live="polite">
               <div class="empty-state">Bağlantı durumları yükleniyor…</div>
@@ -730,10 +815,34 @@
                 <small>Token ekranda tekrar gösterilmez ve yapılandırma dosyasına yazılmaz.</small>
               </div>
             </div>
+            <div id="token-connection-fields" class="provider-connection-fields" hidden>
+              <div class="form-group">
+                <label id="provider-token-label" for="provider-token-input">API token</label>
+                <input id="provider-token-input" class="form-input" type="password" autocomplete="new-password" placeholder="Token yalnızca güvenli kasaya kaydedilir" />
+                <small>Token ekranda tekrar gösterilmez ve yapılandırma dosyasına yazılmaz.</small>
+              </div>
+            </div>
+            <div id="local-model-fields" class="provider-connection-fields" hidden>
+              <div class="form-group">
+                <label for="local-endpoint-input">Model sunucusu adresi</label>
+                <input id="local-endpoint-input" class="form-input" type="url" inputmode="url" autocomplete="url" placeholder="http://192.168.1.50:11434" />
+                <small>Localhost, özel ağ/VPN IP adresi veya <code>.local</code> hostname kullanın.</small>
+              </div>
+              <label id="local-endpoint-trust-row" class="local-endpoint-trust" hidden>
+                <input id="local-endpoint-trust-input" type="checkbox" />
+                <span>Bu güvenilir özel ağ sunucusuna görev metni ve ilgili kod bağlamının gönderilebileceğini onaylıyorum.</span>
+              </label>
+              <div class="form-group">
+                <label for="local-model-select">Model</label>
+                <select id="local-model-select" class="form-input" disabled></select>
+                <small id="local-model-endpoint">Önce “Modelleri Getir” ile sunucuyu doğrulayın.</small>
+              </div>
+            </div>
             <div id="provider-connection-status" class="modal-status-msg" hidden aria-live="polite"></div>
             <div class="drawer-actions provider-connection-actions">
               <button id="provider-connection-connect-btn" class="pm-btn pm-btn-approve" type="submit">Bağlan</button>
               <button id="provider-connection-test-btn" class="pm-btn pm-btn-view" type="button">Test Et</button>
+              <button id="provider-connection-select-btn" class="pm-btn pm-btn-approve" type="button" hidden>Yürütücü Olarak Kullan</button>
               <button id="provider-connection-disconnect-btn" class="pm-btn pm-btn-reject" type="button" hidden>Bağlantıyı Kaldır</button>
             </div>
           </form>

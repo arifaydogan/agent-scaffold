@@ -98,6 +98,38 @@ test("executor command redacts the prompt from telemetry", () => {
   assert.ok(!built.redactedCommand.includes("secret task packet"));
 });
 
+test("Codex local executor command targets Ollama with the selected model", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-executor-local-"));
+  const configured = settings(directory);
+  configured.data.executor.defaultProvider = "ollama";
+  configured.data.executor.providers.ollama = {
+    enabled: true,
+    localProvider: "ollama",
+    endpoint: "http://10.0.0.25:11434",
+    remoteEndpointApproved: true,
+    command: [
+      "codex", "exec",
+      "-c", "model_provider=\"agent_scaffold_ollama\"",
+      "-c", "model_providers.agent_scaffold_ollama.base_url=\"{endpoint}/v1\"",
+      "-m", "{model}", "-C", "{worktree}", "{prompt}"
+    ],
+    defaultModel: "qwen3:8b",
+    modelProfiles: { medium: "qwen3:8b" }
+  };
+  const profile = selectExecutionProfile(configured, { labels: [] }, { persona: "backend-engineer", risk: "normal" });
+  const built = buildExecutorCommand({
+    settings: configured,
+    profile,
+    prepared: { worktree: path.join(directory, "worktree") },
+    prompt: "local secret task",
+    runId: "run-local"
+  });
+  assert.ok(built.command.includes("model_provider=\"agent_scaffold_ollama\""));
+  assert.ok(built.command.includes("model_providers.agent_scaffold_ollama.base_url=\"http://10.0.0.25:11434/v1\""));
+  assert.ok(built.command.includes("qwen3:8b"));
+  assert.equal(built.redactedCommand.includes("local secret task"), false);
+});
+
 test("Antigravity JSON output exposes usage and permission failures", () => {
   const success = parseExecutionOutput(
     "antigravity",

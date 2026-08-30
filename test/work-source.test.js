@@ -123,6 +123,31 @@ test("work source factory can use Jira credentials from the secure provider vaul
   assert.equal(jira.baseUrl, "https://vault.atlassian.net");
 });
 
+test("work source factory can use a GitHub token from the secure provider vault", () => {
+  const settings = {
+    source: "C:/repo/agent-scaffold.json",
+    projectKey: "AS",
+    data: {
+      workSource: {
+        defaultProvider: "github-issues",
+        providers: {
+          "github-issues": {
+            type: "github-issues",
+            owner: "arifaydogan",
+            repo: "agent-scaffold",
+            tokenEnv: "GITHUB_TOKEN"
+          }
+        }
+      }
+    }
+  };
+  const github = createWorkSourceProvider(settings, {}, {
+    vault: { read: id => id === "github" ? { token: "vault-github-token" } : null }
+  });
+  assert.ok(github instanceof GitHubIssuesWorkSourceProvider);
+  assert.equal(github.token, "vault-github-token");
+});
+
 test("Jira adapter constructs JQL with canonicalStates forwarding for ready, review, rework, human_approval", async () => {
   const jira = new JiraClient(
     {
@@ -183,6 +208,73 @@ test("Jira adapter constructs JQL with canonicalStates forwarding for ready, rev
   assert.equal(items.length, 2);
   assert.equal(items[0].canonicalState, "ready");
   assert.equal(items[1].canonicalState, "review");
+});
+
+test("Jira catalog and child searches shape full results without one request per issue", async () => {
+  const jira = new JiraClient(
+    {
+      baseUrl: "https://example.atlassian.net",
+      emailEnv: "EMAIL",
+      tokenEnv: "TOKEN"
+    },
+    { EMAIL: "agent@example.com", TOKEN: "secret" }
+  );
+
+  let requestCount = 0;
+  jira.request = async (method, route) => {
+    requestCount += 1;
+    assert.equal(method, "GET");
+    assert.match(route, /fields=key,summary,description,issuetype,status,labels,parent,assignee/);
+    return {
+      issues: [{
+        id: "1",
+        key: "PACE-1",
+        fields: {
+          summary: "Issue 1",
+          description: "",
+          issuetype: { name: "Task" },
+          status: { name: "To Do" },
+          labels: ["agent-ready"],
+          parent: { key: "PACE-100" },
+          assignee: { displayName: "Operator" }
+        }
+      }]
+    };
+  };
+
+  const catalog = await jira.listWorkItems({ projectKey: "PACE", limit: 100 });
+  const children = await jira.getChildren("PACE-100");
+
+  assert.equal(requestCount, 2);
+  assert.equal(catalog[0].summary, "Issue 1");
+  assert.equal(catalog[0].parentKey, "PACE-100");
+  assert.equal(catalog[0].assignee, "Operator");
+  assert.equal(children[0].key, "PACE-1");
+});
+
+test("Jira catalog follows enhanced-search nextPageToken pages up to the requested limit", async () => {
+  const jira = new JiraClient(
+    { baseUrl: "https://example.atlassian.net", emailEnv: "EMAIL", tokenEnv: "TOKEN" },
+    { EMAIL: "agent@example.com", TOKEN: "secret" }
+  );
+  const routes = [];
+  const issue = number => ({
+    id: String(number), key: `PACE-${number}`,
+    fields: { summary: `Issue ${number}`, issuetype: { name: "Task" }, status: { name: "To Do" }, labels: [] }
+  });
+  jira.request = async (_method, route) => {
+    routes.push(route);
+    return routes.length === 1
+      ? { issues: [issue(1), issue(2)], isLast: false, nextPageToken: "page-2" }
+      : { issues: [issue(3), issue(4)], isLast: true };
+  };
+
+  const items = await jira.listWorkItems({ projectKey: "PACE", limit: 3, includeDescription: false });
+
+  assert.equal(routes.length, 2);
+  assert.match(routes[1], /nextPageToken=page-2/);
+  assert.doesNotMatch(routes[0], /description/);
+  assert.deepEqual(items.map(item => item.key), ["PACE-1", "PACE-2", "PACE-3"]);
 });
 
 test("GitHub Issues adapter performs OR discovery across canonical states and deduplicates", async () => {
