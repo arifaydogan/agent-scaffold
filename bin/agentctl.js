@@ -11,9 +11,14 @@ import { startDashboardServer } from "../lib/dashboard.js";
 import { getStore, issuePlan, runIssue, runIssueLocal, runIssueWithPlan } from "../lib/runtime.js";
 import { dispatchOnce } from "../lib/dispatcher.js";
 import { runSupervisor } from "../lib/supervisor.js";
-import { recordReviewerOutcome, tick } from "../lib/reconciler.js";
+import { reconcileWorkers, recordReviewerOutcome, tick } from "../lib/reconciler.js";
 import { backfillExternalRun, requestExternalRetry } from "../lib/external-run.js";
 import { computePlanFingerprint } from "../lib/policy.js";
+import {
+  listProjectBaseRefs,
+  resolveProjectProfile,
+  settingsForProjectProfile
+} from "../lib/project-profiles.js";
 
 function usage() {
   console.error(
@@ -56,7 +61,13 @@ const DASHBOARD_ACTIVE_RUN_STATES = new Set([
   "claimed", "prepared", "queued", "started", "model_selected", "progress", "executing"
 ]);
 
-function spawnDashboardRun(settings, { issueKey, planFingerprint, operatorRequestId = null }) {
+function spawnDashboardRun(settings, {
+  issueKey,
+  planFingerprint,
+  operatorRequestId = null,
+  projectProfileId = null,
+  baseRef = null
+}) {
   if (!planFingerprint) throw new Error("A verified plan fingerprint is required");
   const args = [
     fileURLToPath(import.meta.url),
@@ -68,11 +79,16 @@ function spawnDashboardRun(settings, { issueKey, planFingerprint, operatorReques
     "--expected-plan-fingerprint",
     planFingerprint
   ];
+  if (projectProfileId) args.push("--project-profile", projectProfileId);
+  if (baseRef) args.push("--base-ref", baseRef);
   if (operatorRequestId) args.push("--operator-request-id", operatorRequestId);
   const child = spawn(process.execPath, args, {
     cwd: path.dirname(settings.source),
     env: process.env,
     stdio: "ignore",
+    // Keep the worker alive when the dashboard terminal/server is restarted.
+    // The durable run/lease and explicit stop endpoint remain authoritative.
+    detached: true,
     windowsHide: true
   });
   if (!Number.isInteger(child.pid) || child.pid < 1) throw new Error("Agent runner could not be started");
@@ -94,8 +110,21 @@ function spawnDashboardRun(settings, { issueKey, planFingerprint, operatorReques
 function stopDashboardRun(settings, { runId }) {
   const store = getStore(settings);
   try {
-    const run = store.getRun(String(runId || ""));
+    let run = store.getRun(String(runId || ""));
     if (!DASHBOARD_ACTIVE_RUN_STATES.has(run.state)) throw new Error("Run is not active");
+
+    // A dashboard may be restarted long after its worker disappeared. Recover
+    // only lease-expired workers through the durable reconciler; this avoids
+    // trusting a missing/reused PID and releases the matching issue lock.
+    const recovery = reconcileWorkers(settings, store);
+    if (recovery.recovered.includes(run.id)) {
+      store.addPmDecision(run.issue_key, "stale_worker_recovered", {
+        runId: run.id,
+        previousState: run.state
+      });
+      return { accepted: true, runId: run.id, pid: null, recovered: true };
+    }
+    run = store.getRun(run.id);
     const eventPid = [...run.events].reverse()
       .map(event => Number(event.payload?.pid))
       .find(pid => Number.isInteger(pid) && pid > 0);
@@ -178,6 +207,14 @@ async function main() {
   if (parsed.command === "dashboard") {
     const port = numericArgument(parsed.args, "--port", 4317);
     const demo = parsed.args.includes("--demo");
+    if (!demo) {
+      const store = getStore(settings);
+      try {
+        reconcileWorkers(settings, store);
+      } finally {
+        store.database.close();
+      }
+    }
     const dashboard = await startDashboardServer(settings, {
       port,
       demo,
@@ -491,8 +528,63 @@ async function main() {
     return 1;
   }
   const issue = await workSource.getWorkItem(issueKey);
+  const requestedProfileId = stringArgument(parsed.args, "--project-profile");
+  const requestedBaseRef = stringArgument(parsed.args, "--base-ref");
+  const issueStore = getStore(settings);
+  const savedProjectProfileId = key => [...(issueStore.getPmDecisions?.(key) || [])]
+    .reverse()
+    .find(decision => decision.type === "project_profile_selected")
+    ?.payload?.projectProfileId || null;
+  const savedBaseRef = (key, projectProfileId) => [...(issueStore.getPmDecisions?.(key) || [])]
+    .reverse()
+    .find(decision =>
+      decision.type === "base_ref_selected" &&
+      decision.payload?.projectProfileId === projectProfileId
+    )?.payload?.baseRef || null;
+  const parentIssue = issue?.parentKey && typeof workSource.getWorkItem === "function"
+    ? await workSource.getWorkItem(issue.parentKey)
+    : null;
+  const projectResolution = resolveProjectProfile(settings, issue, {
+    requestedProfileId,
+    savedProfileId: savedProjectProfileId(issueKey),
+    parentIssue,
+    savedParentProfileId: issue?.parentKey ? savedProjectProfileId(issue.parentKey) : null
+  });
+  if (projectResolution.status !== "resolved") {
+    console.error(JSON.stringify({
+      error: "Project selection is required before planning",
+      code: "project_selection_required",
+      projectResolution
+    }, null, 2));
+    return 2;
+  }
+  const issueSettings = settingsForProjectProfile(
+    { ...settings, _store: issueStore },
+    projectResolution.profile.id
+  );
+  const availableBaseRefs = listProjectBaseRefs(issueSettings);
+  const baseRefOverride = requestedBaseRef
+    || savedBaseRef(issueKey, projectResolution.profile.id)
+    || null;
+  if (baseRefOverride && !availableBaseRefs.some(candidate => candidate.ref === baseRefOverride)) {
+    console.error(JSON.stringify({
+      error: "Selected Git base ref does not exist in the chosen repository",
+      code: "base_ref_selection_required",
+      availableBaseRefs
+    }, null, 2));
+    return 2;
+  }
+  const planningIssue = baseRefOverride ? { ...issue, baseRef: baseRefOverride } : issue;
+  const attachProjectProfile = planned => ({
+    ...planned,
+    projectProfileId: projectResolution.profile.id,
+    projectProfile: projectResolution.profile,
+    projectResolutionSource: projectResolution.source,
+    baseRefOverride,
+    availableBaseRefs
+  });
   if (parsed.command === "plan") {
-    const planned = issuePlan(settings, issue);
+    const planned = attachProjectProfile(issuePlan(issueSettings, planningIssue));
     console.log(JSON.stringify({
       ...planned,
       planFingerprint: computePlanFingerprint(planned)
@@ -500,7 +592,7 @@ async function main() {
     return 0;
   }
   if (parsed.command === "run") {
-    const planned = issuePlan(settings, issue);
+    const planned = attachProjectProfile(issuePlan(issueSettings, planningIssue));
     const planFingerprint = computePlanFingerprint(planned);
     const expectedPlanFingerprint = stringArgument(parsed.args, "--expected-plan-fingerprint");
     if (expectedPlanFingerprint && expectedPlanFingerprint !== planFingerprint) {
@@ -513,8 +605,8 @@ async function main() {
     }
     const operatorRequestId = stringArgument(parsed.args, "--operator-request-id");
     const result = await Promise.resolve(runIssueWithPlan(
-      settings,
-      issue,
+      issueSettings,
+      planningIssue,
       { ...planned, planFingerprint },
       parsed.args.includes("--execute"),
       undefined,

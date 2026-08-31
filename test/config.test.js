@@ -66,6 +66,18 @@ test("supervisor config: executeEnabled can be set to true", () => {
   assert.equal(settings.data.supervisor.executeEnabled, true);
 });
 
+test("control-plane hidden issue keys are normalized and validated", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
+  const configPath = writeConfig(dir, {
+    controlPlane: { hiddenIssueKeys: [" pace-354 ", "PACE-354", "pace-364"] }
+  });
+  const settings = loadSettings(configPath);
+  assert.deepEqual(settings.data.controlPlane.hiddenIssueKeys, ["PACE-354", "PACE-364"]);
+
+  const invalidPath = writeConfig(dir, { controlPlane: { hiddenIssueKeys: [""] } });
+  assert.throws(() => loadSettings(invalidPath), /hiddenIssueKeys/);
+});
+
 test("supervisor config: rejects non-boolean executeEnabled", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-config-"));
   const configPath = writeConfig(dir, {

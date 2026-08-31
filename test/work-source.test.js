@@ -224,7 +224,7 @@ test("Jira catalog and child searches shape full results without one request per
   jira.request = async (method, route) => {
     requestCount += 1;
     assert.equal(method, "GET");
-    assert.match(route, /fields=key,summary,description,issuetype,status,labels,parent,assignee/);
+    assert.match(route, /fields=key,summary,description,issuetype,status,labels,components,parent,assignee/);
     return {
       issues: [{
         id: "1",
@@ -235,6 +235,7 @@ test("Jira catalog and child searches shape full results without one request per
           issuetype: { name: "Task" },
           status: { name: "To Do" },
           labels: ["agent-ready"],
+          components: [{ name: "Houndvision" }],
           parent: { key: "PACE-100" },
           assignee: { displayName: "Operator" }
         }
@@ -248,6 +249,7 @@ test("Jira catalog and child searches shape full results without one request per
   assert.equal(requestCount, 2);
   assert.equal(catalog[0].summary, "Issue 1");
   assert.equal(catalog[0].parentKey, "PACE-100");
+  assert.deepEqual(catalog[0].components, ["Houndvision"]);
   assert.equal(catalog[0].assignee, "Operator");
   assert.equal(children[0].key, "PACE-1");
 });

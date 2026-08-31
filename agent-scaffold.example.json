@@ -6,6 +6,28 @@
     "baseBranch": "epic/provider-neutral-control-plane",
     "operatingMode": "autonomous"
   },
+  "projectProfiles": {
+    "agent-scaffold": {
+      "name": "AgentScaffold",
+      "repoPath": ".",
+      "worktreeRoot": "../agent-worktrees",
+      "baseBranch": "epic/provider-neutral-control-plane",
+      "match": {
+        "labels": ["agent-scaffold"],
+        "components": ["AgentScaffold"]
+      }
+    },
+    "houndvision": {
+      "name": "Houndvision",
+      "repoPath": "../houndvision",
+      "worktreeRoot": "../houndvision-worktrees",
+      "baseBranch": "develop",
+      "match": {
+        "labels": ["houndvision"],
+        "components": ["Houndvision"]
+      }
+    }
+  },
   "policy": {
     "autonomy": {
       "discovery": "auto",
@@ -169,14 +191,38 @@
   },
   "executor": {
     "defaultProvider": "codex",
+    "adaptiveRouting": {
+      "enabled": true,
+      "providerOrder": ["codex", "antigravity", "ollama", "lmstudio"],
+      "modelFallbackProfiles": ["medium", "low"],
+      "maxAttempts": 4,
+      "maxCandidates": 8,
+      "taskProfiles": {
+        "architect": "high",
+        "security-engineer": "high",
+        "pm-analyst": "low",
+        "backend-engineer": "medium",
+        "frontend-engineer": "medium",
+        "devops-engineer": "medium",
+        "data-engineer": "medium",
+        "cv-engineer": "medium",
+        "qa-engineer": "medium"
+      }
+    },
     "providers": {
       "codex": {
         "type": "cli",
         "command": [
           "codex",
           "exec",
+          "-m",
+          "{model}",
+          "-c",
+          "model_reasoning_effort=\"{effort}\"",
           "-C",
           "{worktree}",
+          "--output-schema",
+          "{resultSchema}",
           "{prompt}"
         ],
         "defaultModel": "gpt-5.6-terra",
@@ -185,10 +231,19 @@
           "luna": "gpt-5.6-luna",
           "terra": "gpt-5.6-terra",
           "sol": "gpt-5.6-sol",
-          "low": "gpt-5.6-terra",
+          "low": "gpt-5.6-luna",
           "medium": "gpt-5.6-terra",
-          "high": "gpt-5.6-sol"
+          "high": "gpt-5.6-sol",
+          "mechanical": "gpt-5.6-luna"
         },
+        "effortProfiles": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "mechanical": "low"
+        },
+        "supportedEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "resultSchema": "adapters/antigravity/execution-result.schema.json",
         "timeoutSeconds": 3600
       },
       "antigravity": {
@@ -226,6 +281,13 @@
           "claude-review": "claude-sonnet-4-6",
           "mechanical": "gpt-oss-120b-medium",
           "ux": "gemini-3.1-pro-high"
+        },
+        "effortProfiles": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "mechanical": "medium",
+          "ux": "high"
         },
         "resultSchema": "adapters/antigravity/execution-result.schema.json",
         "timeoutSeconds": 3600
@@ -323,6 +385,7 @@
     "providerConnectionMutationEnabled": false,
     "executionMutationEnabled": false,
     "operatorInteractionMutationEnabled": false,
+    "hiddenIssueKeys": [],
     "trustedModelEndpoints": []
   }
 }

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startDashboardServer } from "../lib/dashboard.js";
@@ -94,6 +95,112 @@ test("dashboard plans, fingerprint-checks, and starts one work item without bloc
     assert.equal((await startedResponse.json()).pid, 41234);
     assert.equal(starts.length, 1);
     assert.equal(starts[0].planFingerprint, planned.plan.planFingerprint);
+  } finally {
+    dashboard.server.closeAllConnections?.();
+    await new Promise(resolve => dashboard.server.close(resolve));
+    store.database.close();
+  }
+});
+
+test("dashboard auto-matches repositories and requires a local manual selection when unmatched", async () => {
+  const { directory, store, settings } = fixture();
+  const houndvisionRepo = path.join(directory, "houndvision");
+  fs.mkdirSync(houndvisionRepo, { recursive: true });
+  for (const args of [
+    ["init"],
+    ["config", "user.email", "test@example.com"],
+    ["config", "user.name", "Test User"]
+  ]) {
+    assert.equal(spawnSync("git", args, { cwd: houndvisionRepo, stdio: "ignore" }).status, 0);
+  }
+  fs.writeFileSync(path.join(houndvisionRepo, "README.md"), "fixture\n", "utf8");
+  assert.equal(spawnSync("git", ["add", "README.md"], { cwd: houndvisionRepo, stdio: "ignore" }).status, 0);
+  assert.equal(spawnSync("git", ["commit", "-m", "fixture"], { cwd: houndvisionRepo, stdio: "ignore" }).status, 0);
+  assert.equal(spawnSync("git", ["branch", "-M", "develop"], { cwd: houndvisionRepo, stdio: "ignore" }).status, 0);
+  settings.projectProfiles = [
+    {
+      id: "agent-scaffold", name: "AgentScaffold", repoPath: directory,
+      worktreeRoot: path.join(directory, "agent-worktrees"), rawRepoPath: ".",
+      rawWorktreeRoot: "agent-worktrees", baseBranch: "epic/provider-neutral-control-plane",
+      match: { labels: ["agent-scaffold"], components: ["AgentScaffold"] }, legacyDefault: false
+    },
+    {
+      id: "houndvision", name: "Houndvision", repoPath: houndvisionRepo,
+      worktreeRoot: path.join(directory, "houndvision-worktrees"), rawRepoPath: "houndvision",
+      rawWorktreeRoot: "houndvision-worktrees", baseBranch: "develop",
+      match: { labels: ["houndvision"], components: ["Houndvision"] }, legacyDefault: false
+    }
+  ];
+  const items = new Map([
+    ["PACE-364", { key: "PACE-364", labels: ["agent-scaffold"], components: [] }],
+    ["PACE-257", { key: "PACE-257", labels: [], components: [] }]
+  ]);
+  const starts = [];
+  const dashboard = await startDashboardServer(settings, {
+    port: 0,
+    store,
+    workSource: { getWorkItem: async key => items.get(key) || null },
+    planHandler: async ({ issueKey, issue, settings: selectedSettings }) => ({
+      ...plan(issueKey),
+      baseRef: issue?.baseRef || `epic/missing-from-${selectedSettings.data.project.baseBranch}`
+    }),
+    startHandler: async request => {
+      starts.push(request);
+      return { accepted: true, pid: 42345 };
+    }
+  });
+  try {
+    const automatic = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-364/plan`);
+    assert.equal(automatic.status, 200);
+    assert.equal((await automatic.json()).plan.projectProfileId, "agent-scaffold");
+
+    const required = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-257/plan`);
+    assert.equal(required.status, 409);
+    const requiredBody = await required.json();
+    assert.equal(requiredBody.code, "project_selection_required");
+    assert.deepEqual(
+      requiredBody.projectResolution.profiles.map(profile => profile.id),
+      ["agent-scaffold", "houndvision"]
+    );
+
+    const selected = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-257/plan`, {
+      projectProfileId: "houndvision"
+    });
+    assert.equal(selected.status, 200);
+    const selectedBody = await selected.json();
+    assert.equal(selectedBody.plan.projectProfileId, "houndvision");
+    assert.equal(selectedBody.plan.projectProfile.repository, "houndvision");
+    assert.equal(selectedBody.plan.baseRef, "epic/missing-from-develop");
+    assert.ok(selectedBody.plan.availableBaseRefs.some(candidate => candidate.ref === "develop"));
+    assert.equal(
+      store.getPmDecisions("PACE-257").at(-1).type,
+      "project_profile_selected"
+    );
+
+    const selectedBase = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-257/plan`, {
+      projectProfileId: "houndvision",
+      baseRef: "develop"
+    });
+    assert.equal(selectedBase.status, 200);
+    const selectedBaseBody = await selectedBase.json();
+    assert.equal(selectedBaseBody.plan.baseRef, "develop");
+    assert.equal(selectedBaseBody.plan.baseRefOverride, "develop");
+    assert.equal(store.getPmDecisions("PACE-257").at(-1).type, "base_ref_selected");
+
+    const started = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-257/start`, {
+      planFingerprint: selectedBaseBody.plan.planFingerprint,
+      projectProfileId: "houndvision",
+      baseRef: "develop"
+    });
+    assert.equal(started.status, 202);
+    assert.equal(starts[0].projectProfileId, "houndvision");
+    assert.equal(starts[0].baseRef, "develop");
+
+    const conflict = await jsonPost(`${dashboard.url}/api/control-plane/work-items/PACE-364/plan`, {
+      projectProfileId: "houndvision"
+    });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).projectResolution.reason, "selection_conflicts_with_work_item");
   } finally {
     dashboard.server.closeAllConnections?.();
     await new Promise(resolve => dashboard.server.close(resolve));

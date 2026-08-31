@@ -74,6 +74,23 @@ test("dashboard snapshot exposes operational metadata without prompts", () => {
   assert.equal(JSON.stringify(snapshot).includes("secret prompt content"), false);
 });
 
+test("dashboard snapshot hides locally archived trial issues without deleting history", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-dashboard-hidden-"));
+  const store = new RunStore(path.join(directory, "runs.sqlite3"));
+  for (const issueKey of ["PACE-323", "PACE-354", "PACE-364"]) {
+    store.createRun(issueKey, { summary: issueKey, taskAgent: "backend-engineer", execution: { provider: "codex" } });
+  }
+  const localSettings = settings(directory);
+  localSettings.data.controlPlane = { hiddenIssueKeys: ["PACE-354", "PACE-364"] };
+
+  const snapshot = buildDashboardSnapshot(localSettings, { store });
+  assert.deepEqual([...new Set(snapshot.runs.map(run => run.issue))], ["PACE-323"]);
+  assert.equal(snapshot.activity.every(event => event.issue === "PACE-323"), true);
+  assert.deepEqual(snapshot.pmWorkspace.groups.needsPlanning || [], []);
+  assert.equal(store.listRuns(10).length, 3, "visibility filtering must not delete audit history");
+  store.database.close();
+});
+
 test("demo snapshot contains visible active, review, and blocked states", () => {
   const snapshot = buildDemoSnapshot(settings("."), "2026-08-09T16:00:00.000Z");
   assert.equal(snapshot.mode, "demo");

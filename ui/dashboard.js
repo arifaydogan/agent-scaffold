@@ -153,6 +153,15 @@ const UI_TEXT_EN = Object.freeze({
   "Agent Soruları": "Agent Questions",
   "Agent bir iş kararına ihtiyaç duyduğunda sorusu burada görünür. Yanıtınız kaydedilir ve aynı güvenli planla çalışma otomatik devam eder.": "When an agent needs a work decision, its question appears here. Your answer is recorded and work resumes automatically with the same safe plan.",
   "Agentı Çalıştır": "Run Agent", "Planı hazırla": "Prepare plan", "Agentı başlat": "Start agent", "Agentı durdur": "Stop agent",
+  "Proje seçimi gerekli": "Project selection required", "Proje / Repo": "Project / Repository",
+  "Bu Jira işinin hangi repoda planlanacağını seçin. Seçim yalnızca yerel olarak saklanır; Jira değiştirilmez.": "Select which repository should be used to plan this Jira work item. The selection is stored locally; Jira is not changed.",
+  "Proje": "Project", "Bir proje seçin": "Select a project", "Bu projeyle planla": "Plan with this project",
+  "Git tabanı seç": "Select Git base", "Mevcut bir dal seçin": "Select an existing branch",
+  "Bu Git tabanıyla planla": "Plan with this Git base",
+  "İstenen parent dalı bulunamadı. Seçilen repodaki mevcut ve incelenmiş bir dalı açıkça seçin.": "The requested parent branch was not found. Explicitly select an existing, reviewed branch in the chosen repository.",
+  "Repo eşleştirmesi bulunamadı.": "No repository match was found.",
+  "Birden fazla repo eşleşti; devam etmek için birini seçin.": "Multiple repositories matched; select one to continue.",
+  "Ticket üzerindeki repo eşleştirmesi bu seçimle çelişiyor.": "The repository mapping on the ticket conflicts with this selection.",
   "Uyumluluk gerekiyor": "Compatibility required", "İşi uyumlu hale getir": "Make work item compatible",
   "Uyumluluk önizlemesi": "Compatibility preview", "Mevcut": "Current", "Önerilen": "Proposed",
   "Yapılması gereken": "Required action", "İş kaynağı": "Work source", "Dosya kapsamı": "File scope",
@@ -251,8 +260,26 @@ const UI_TEXT_EN = Object.freeze({
   "Henüz verilmedi": "Not available yet", "İncelenen SHA": "Reviewed SHA",
   "6. İnsan Kontrol ve Onay Kapısı": "6. Human control and approval gate", "Bekleyen Aksiyon": "Pending action",
   "Yok": "None", "Onay Durumu": "Approval status", "🛑 Bloke Durumu ve Teşhis": "🛑 Blocked status and diagnosis",
-  "Gerekçe": "Reason", "Tekrar Denenebilir": "Retryable", "Onaylanabilir": "Approvable",
-  "7. Denetlenebilir Olay Zaman Çizelgesi": "7. Auditable event timeline", "Zaman çizelgesi boş.": "Timeline is empty.",
+  "Gerekçe": "Reason", "Teknik ayrıntı": "Technical detail", "Hata kategorisi": "Failure category", "Otomatik geçiş uygunluğu": "Automatic failover eligibility", "Tekrar Denenebilir": "Retryable", "Onaylanabilir": "Approvable",
+  "Yedek rota": "Fallback route", "Otomatik geçiş": "Automatic failover", "Geçiş kaynağı": "Switched from",
+  "Etkin": "Enabled", "Kapalı": "Disabled",
+  "7. Denetlenebilir Olay Zaman Çizelgesi": "7. Auditable event timeline", "7. Çalışma zaman çizelgesi": "7. Work timeline", "Zaman çizelgesi boş.": "Timeline is empty.",
+  "Son önemli adımlar gösteriliyor. Tekrarlanan teknik olaylar aşağıda kapalıdır.": "The latest important steps are shown. Repeated technical events are collapsed below.",
+  "Teknik ayrıntı": "Technical detail", "Canlı ara rapor": "Live progress report", "Ara raporu aç": "Open progress report",
+  "Canlı agent raporu": "Live agent report", "Ara raporu yenile": "Refresh progress report", "Son sinyal:": "Last signal:", "henüz alınmadı": "not received yet",
+  "Agent çalışıyor; henüz ayrıntılı bir ilerleme mesajı alınmadı.": "The agent is running; no detailed progress message has been received yet.",
+  "Agent oturumu başlatıldı ve çalışma alanı hazırlandı.": "The agent session started and the workspace is ready.",
+  "İş talimatları alındı; agent analiz ve uygulama aşamasına geçti.": "The task instructions were received; the agent moved to analysis and implementation.",
+  "Agent adımı güncellendi:": "Agent step updated:", "Agent araç kullanıyor:": "Agent is using a tool:",
+  "Agent çalışıyor:": "Agent is working:", "Agent çalışıyor; yeni bir çalışma olayı alındı.": "The agent is working; a new progress event was received.",
+  "İş kaydı alındı": "Work item received", "Çalıştırma koşulları doğrulandı": "Execution conditions verified",
+  "Agent işi sahiplendi": "Agent claimed the work", "Güvenli çalışma alanı hazırlandı": "Safe workspace prepared",
+  "Agent sıraya alındı": "Agent queued", "Agent başlatıldı": "Agent started", "Model seçildi": "Model selected",
+  "Agent çalışıyor": "Agent is working", "Agent uygulamayı yürütüyor": "Agent is implementing",
+  "Doğrulama başladı": "Verification started", "İnceleme sıraya alındı": "Review queued",
+  "İnceleme temiz tamamlandı": "Review completed cleanly", "İncelemede düzeltme istendi": "Review requested changes",
+  "İş dikkat gerektiriyor": "Work needs attention", "Deneme başarısız; yeniden denenebilir": "Attempt failed; retry is available",
+  "Dosya kapsamı ihlali nedeniyle durdu": "Stopped because of a file-scope violation", "Çalışma başarısız oldu": "Execution failed", "Çalışma olayı": "Work event",
   "Parentlar yüklenemedi": "Parents could not be loaded", "Parent epik bulunamadı": "No parent epic found",
   "-- Parent Epik Seçin --": "-- Select parent epic --", "Toplam alt iş": "Total child work",
   "Hemen başlayabilir": "Can start now", "Önceki işler tamamlanınca": "After previous work completes",
@@ -504,6 +531,77 @@ function metaRow(label, value) {
   return row;
 }
 
+function formatAgentProgress(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return translateUiText("Agent çalışıyor; henüz ayrıntılı bir ilerleme mesajı alınmadı.");
+  try {
+    const parsed = JSON.parse(raw);
+    const event = String(parsed.event || parsed.type || "").toLowerCase();
+    if (event === "init") return translateUiText("Agent oturumu başlatıldı ve çalışma alanı hazırlandı.");
+    if (event === "step_update") {
+      const update = parsed.step_update || {};
+      const type = String(update.step_type || "step").replaceAll("_", " ");
+      const status = String(update.state || "running").toUpperCase();
+      if (type === "user input" && status === "DONE") {
+        return translateUiText("İş talimatları alındı; agent analiz ve uygulama aşamasına geçti.");
+      }
+      return translateUiText("Agent adımı güncellendi:") + ` ${type} · ${status}`;
+    }
+    const toolName = parsed.tool?.name || parsed.tool_name || parsed.name;
+    if (event.includes("tool") && toolName) return translateUiText("Agent araç kullanıyor:") + ` ${toolName}`;
+    const message = parsed.message?.text || parsed.message?.content || parsed.text || parsed.delta?.text;
+    if (typeof message === "string" && message.trim()) return message.trim().slice(0, 600);
+    if (event) return translateUiText("Agent çalışıyor:") + ` ${event.replaceAll("_", " ")}`;
+    return translateUiText("Agent çalışıyor; yeni bir çalışma olayı alındı.");
+  } catch {
+    return raw.length > 600 ? raw.slice(0, 600) + "…" : raw;
+  }
+}
+
+const FRIENDLY_TIMELINE_LABELS = Object.freeze({
+  discovered: "İş kaydı alındı",
+  eligible: "Çalıştırma koşulları doğrulandı",
+  claimed: "Agent işi sahiplendi",
+  preparation: "Güvenli çalışma alanı hazırlandı",
+  prepared: "Güvenli çalışma alanı hazırlandı",
+  queued: "Agent sıraya alındı",
+  started: "Agent başlatıldı",
+  model_selected: "Model seçildi",
+  progress: "Agent çalışıyor",
+  execution: "Agent uygulamayı yürütüyor",
+  executing: "Agent uygulamayı yürütüyor",
+  verifying: "Doğrulama başladı",
+  review_queued: "İnceleme sıraya alındı",
+  review_clean: "İnceleme temiz tamamlandı",
+  review_failed: "İncelemede düzeltme istendi",
+  blocked: "İş dikkat gerektiriyor",
+  "failed-retryable": "Deneme başarısız; yeniden denenebilir",
+  "failed-scope": "Dosya kapsamı ihlali nedeniyle durdu",
+  failed: "Çalışma başarısız oldu"
+});
+
+function friendlyTimelineLabel(item) {
+  const stage = String(item?.stage || item?.state || "event");
+  return translateUiText(FRIENDLY_TIMELINE_LABELS[stage] || item?.label || "Çalışma olayı");
+}
+
+function compactAuditHistory(history) {
+  const keepOne = new Set([
+    "discovered", "eligible", "claimed", "preparation", "prepared", "queued",
+    "started", "model_selected", "progress", "execution", "executing"
+  ]);
+  const seen = new Set();
+  const compact = [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    const item = history[index];
+    const stage = String(item?.stage || item?.state || "event");
+    if (keepOne.has(stage) && seen.has(stage)) continue;
+    if (keepOne.has(stage)) seen.add(stage);
+    compact.push(item);
+  }
+  return compact.reverse().slice(-8);
+}
+
 function normalizeRole(role) {
   const value = String(role || "worker").toLowerCase();
   if (["review", "reviewer", "qa"].includes(value)) return "reviewer";
@@ -645,6 +743,17 @@ function taskCard(group) {
   if (typeof meta.append === "function") {
     meta.append(metaRow("Model", displayModel(run)), metaRow("Çalışma", formatDuration(run.durationSeconds)));
     card.append(meta);
+  }
+
+  if (run.stateKind === "active") {
+    const liveReport = element("div", "live-agent-card-report");
+    liveReport.appendChild(element("strong", null, "Canlı ara rapor"));
+    liveReport.appendChild(element("span", null, formatAgentProgress(run.progressText)));
+    const reportButton = element("button", "pm-btn pm-btn-view", "Ara raporu aç");
+    reportButton.type = "button";
+    reportButton.addEventListener?.("click", () => openDecisionTrace(run.issue || run.issueKey));
+    liveReport.appendChild(reportButton);
+    card.append(liveReport);
   }
 
   const footer = element("footer", "agent-card-footer");
@@ -1794,8 +1903,18 @@ function renderExecutionLauncher(data) {
 function renderPlanPreview(plan, host, status, options = {}) {
   host.innerHTML = "";
   const grid = element("div", "plan-preview-grid");
+  const projectLabel = plan.projectProfile
+    ? `${plan.projectProfile.name} · ${plan.projectProfile.repository}`
+    : "—";
+  grid.appendChild(createTraceCell("Proje / Repo", projectLabel));
   grid.appendChild(createTraceCell("Agent", plan.taskAgent || plan.persona || "—"));
   grid.appendChild(createTraceCell("Provider / Model", (plan.execution?.provider || "—") + " / " + (plan.execution?.model || "varsayılan")));
+  const fallbackCandidates = (plan.executionCandidates || []).slice(1);
+  if (fallbackCandidates.length > 0) {
+    grid.appendChild(createTraceCell("Yedek rota", fallbackCandidates
+      .map(candidate => `${candidate.provider} / ${candidate.model || candidate.modelProfile || "varsayılan"}`)
+      .join(" → ")));
+  }
   grid.appendChild(createTraceCell("Risk", plan.risk || "normal"));
   grid.appendChild(createTraceCell("Base", (plan.baseRef || "—") + (plan.baseSha ? " @ " + plan.baseSha.slice(0, 10) : "")));
   grid.appendChild(createTraceCell("İzinli yollar", (plan.allowedPaths || []).join(", ") || "—"));
@@ -1809,10 +1928,24 @@ function renderPlanPreview(plan, host, status, options = {}) {
     reasons.appendChild(element("p", null, uiMessage("compatibilityCount", { count })));
     const compatibilityButton = element("button", "pm-btn pm-btn-view compatibility-button", "İşi uyumlu hale getir");
     compatibilityButton.type = "button";
-    compatibilityButton.addEventListener?.("click", () => recheckWorkItemCompatibility(plan.issue, host, compatibilityButton, status));
+    compatibilityButton.addEventListener?.("click", () => recheckWorkItemCompatibility(
+      plan.issue,
+      host,
+      compatibilityButton,
+      status,
+      plan.projectProfileId,
+      plan.baseRefOverride
+    ));
     reasons.appendChild(compatibilityButton);
     host.appendChild(reasons);
     if (options.showCompatibility === true) renderCompatibilityPreview(plan.compatibility, host);
+    if (
+      plan.compatibility?.items?.some(entry => compatibilityCode(entry) === "base-ref") &&
+      Array.isArray(plan.availableBaseRefs) &&
+      plan.availableBaseRefs.length > 0
+    ) {
+      renderBaseRefSelection(plan, host, status);
+    }
     return;
   }
 
@@ -1921,7 +2054,95 @@ function renderCompatibilityPreview(compatibility, host) {
   host.appendChild(panel);
 }
 
-async function recheckWorkItemCompatibility(issueKey, host, button, status) {
+function projectSelectionReason(reason) {
+  if (reason === "ambiguous_match") return "Birden fazla repo eşleşti; devam etmek için birini seçin.";
+  if (reason === "selection_conflicts_with_work_item") return "Ticket üzerindeki repo eşleştirmesi bu seçimle çelişiyor.";
+  return "Repo eşleştirmesi bulunamadı.";
+}
+
+function renderProjectSelection(issueKey, resolution, host, status) {
+  host.innerHTML = "";
+  const panel = element("section", "project-selection-panel");
+  panel.appendChild(element("h4", "project-selection-title", "Proje seçimi gerekli"));
+  panel.appendChild(element("p", "project-selection-reason", projectSelectionReason(resolution?.reason)));
+  panel.appendChild(element(
+    "p",
+    "project-selection-copy",
+    "Bu Jira işinin hangi repoda planlanacağını seçin. Seçim yalnızca yerel olarak saklanır; Jira değiştirilmez."
+  ));
+
+  const label = element("label", "project-selection-label", "Proje");
+  const select = element("select", "form-input project-profile-select");
+  select.setAttribute?.("aria-label", translateUiText("Proje"));
+  const placeholder = element("option", null, "Bir proje seçin");
+  placeholder.value = "";
+  select.appendChild(placeholder);
+  for (const profile of resolution?.profiles || []) {
+    const option = element(
+      "option",
+      null,
+      `${profile.name} · ${profile.repository} · ${profile.baseBranch}`
+    );
+    option.value = profile.id;
+    select.appendChild(option);
+  }
+  label.appendChild(select);
+  panel.appendChild(label);
+
+  const submit = element("button", "pm-btn pm-btn-approve project-selection-submit", "Bu projeyle planla");
+  submit.type = "button";
+  submit.disabled = true;
+  select.addEventListener?.("change", () => { submit.disabled = !select.value; });
+  submit.addEventListener?.("click", () => {
+    if (select.value) prepareWorkItemPlan(issueKey, host, submit, status, select.value);
+  });
+  panel.appendChild(submit);
+  host.appendChild(panel);
+  status.className = "execution-launcher-status is-warning";
+  status.textContent = translateUiText(projectSelectionReason(resolution?.reason));
+}
+
+function renderBaseRefSelection(plan, host, status) {
+  const panel = element("section", "project-selection-panel base-ref-selection-panel");
+  panel.appendChild(element("h4", "project-selection-title", "Git tabanı seç"));
+  panel.appendChild(element(
+    "p",
+    "project-selection-copy",
+    "İstenen parent dalı bulunamadı. Seçilen repodaki mevcut ve incelenmiş bir dalı açıkça seçin."
+  ));
+  const label = element("label", "project-selection-label", "Mevcut bir dal seçin");
+  const select = element("select", "form-input base-ref-select");
+  const placeholder = element("option", null, "Mevcut bir dal seçin");
+  placeholder.value = "";
+  select.appendChild(placeholder);
+  for (const candidate of plan.availableBaseRefs || []) {
+    const option = element("option", null, `${candidate.ref} · ${candidate.sha.slice(0, 10)}`);
+    option.value = candidate.ref;
+    select.appendChild(option);
+  }
+  label.appendChild(select);
+  panel.appendChild(label);
+  const submit = element("button", "pm-btn pm-btn-approve base-ref-selection-submit", "Bu Git tabanıyla planla");
+  submit.type = "button";
+  submit.disabled = true;
+  select.addEventListener?.("change", () => { submit.disabled = !select.value; });
+  submit.addEventListener?.("click", () => {
+    if (select.value) {
+      prepareWorkItemPlan(plan.issue, host, submit, status, plan.projectProfileId, select.value);
+    }
+  });
+  panel.appendChild(submit);
+  host.appendChild(panel);
+}
+
+async function recheckWorkItemCompatibility(
+  issueKey,
+  host,
+  button,
+  status,
+  projectProfileId = null,
+  baseRef = null
+) {
   button.disabled = true;
   status.className = "execution-launcher-status is-loading";
   status.textContent = uiMessage("compatibilityChecking");
@@ -1929,9 +2150,16 @@ async function recheckWorkItemCompatibility(issueKey, host, button, status) {
     const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(issueKey) + "/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}"
+      body: JSON.stringify({
+        ...(projectProfileId ? { projectProfileId } : {}),
+        ...(baseRef ? { baseRef } : {})
+      })
     });
     const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data.code === "project_selection_required") {
+      renderProjectSelection(issueKey, data.projectResolution, host, status);
+      return;
+    }
     if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
     state.pendingExecutionPlan = data.plan;
     renderPlanPreview(data.plan, host, status, { showCompatibility: true });
@@ -1946,7 +2174,14 @@ async function recheckWorkItemCompatibility(issueKey, host, button, status) {
   }
 }
 
-async function prepareWorkItemPlan(issueKey, host, button, status) {
+async function prepareWorkItemPlan(
+  issueKey,
+  host,
+  button,
+  status,
+  projectProfileId = null,
+  baseRef = null
+) {
   if (!issueKey) return;
   button.disabled = true;
   status.className = "execution-launcher-status is-loading";
@@ -1955,9 +2190,16 @@ async function prepareWorkItemPlan(issueKey, host, button, status) {
     const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(issueKey) + "/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}"
+      body: JSON.stringify({
+        ...(projectProfileId ? { projectProfileId } : {}),
+        ...(baseRef ? { baseRef } : {})
+      })
     });
     const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data.code === "project_selection_required") {
+      renderProjectSelection(issueKey, data.projectResolution, host, status);
+      return;
+    }
     if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
     state.pendingExecutionPlan = data.plan;
     renderPlanPreview(data.plan, host, status);
@@ -1978,7 +2220,11 @@ async function startWorkItemExecution(plan, button, status) {
     const response = await fetch("/api/control-plane/work-items/" + encodeURIComponent(plan.issue) + "/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ planFingerprint: plan.planFingerprint })
+      body: JSON.stringify({
+        planFingerprint: plan.planFingerprint,
+        ...(plan.projectProfileId ? { projectProfileId: plan.projectProfileId } : {}),
+        ...(plan.baseRefOverride ? { baseRef: plan.baseRefOverride } : {})
+      })
     });
     const data = await response.json().catch(() => ({}));
     if (response.status === 409 && data.plan) {
@@ -2099,7 +2345,34 @@ function renderDecisionTraceDetail(data) {
   execGrid.appendChild(createTraceCell("Worktree", exec.worktree || "—"));
   execGrid.appendChild(createTraceCell("Commit SHA", exec.commit || "—"));
   execGrid.appendChild(createTraceCell("Deneme", exec.attempt != null && exec.maxAttempts != null ? `${exec.attempt} / ${exec.maxAttempts}` : String(exec.attempt ?? "0")));
+  execGrid.appendChild(createTraceCell("Otomatik geçiş", exec.adaptiveRoutingEnabled ? "Etkin" : "Kapalı"));
+  if (exec.failoverContext) {
+    execGrid.appendChild(createTraceCell(
+      "Geçiş kaynağı",
+      `${exec.failoverContext.fromProvider || "—"} / ${exec.failoverContext.fromModel || "varsayılan"} · ${exec.failoverContext.category || "—"}`
+    ));
+  }
+  if (Array.isArray(exec.candidates) && exec.candidates.length > 1) {
+    execGrid.appendChild(createTraceCell("Yedek rota", exec.candidates.slice(1)
+      .map(candidate => `${candidate.provider} / ${candidate.model || candidate.modelProfile || "varsayılan"}`)
+      .join(" → ")));
+  }
   execSection.appendChild(execGrid);
+  if (exec.workerStatus === "running" || exec.currentActivity) {
+    const report = element("div", "live-agent-report");
+    report.appendChild(element("h4", null, "Canlı agent raporu"));
+    report.appendChild(element("p", "live-agent-activity", formatAgentProgress(exec.currentActivity)));
+    report.appendChild(element(
+      "small",
+      "live-agent-updated",
+      `${translateUiText("Son sinyal:")} ${exec.lastActivityAt ? formatTime(exec.lastActivityAt) : translateUiText("henüz alınmadı")}`
+    ));
+    const refreshButton = element("button", "pm-btn pm-btn-view", "Ara raporu yenile");
+    refreshButton.type = "button";
+    refreshButton.addEventListener?.("click", () => openDecisionTrace(wi.key, true, refreshButton));
+    report.appendChild(refreshButton);
+    execSection.appendChild(report);
+  }
   body.appendChild(execSection);
 
   // 5. Reviewer & Findings
@@ -2143,66 +2416,83 @@ function renderDecisionTraceDetail(data) {
     blkSection.appendChild(element("h3", "trace-section-title", "🛑 Bloke Durumu ve Teşhis"));
     const blkGrid = element("div", "trace-grid");
     blkGrid.appendChild(createTraceCell("Gerekçe", blk.reason || "Bilinmiyor"));
+    if (blk.detail) blkGrid.appendChild(createTraceCell("Teknik ayrıntı", blk.detail));
+    if (blk.failureCategory) blkGrid.appendChild(createTraceCell("Hata kategorisi", blk.failureCategory));
+    blkGrid.appendChild(createTraceCell("Otomatik geçiş uygunluğu", blk.autoFailoverEligible ? "Evet" : "Hayır"));
     blkGrid.appendChild(createTraceCell("Tekrar Denenebilir", blk.canRetry ? "Evet" : "Hayır"));
     blkGrid.appendChild(createTraceCell("Onaylanabilir", blk.canApprove ? "Evet" : "Hayır"));
     blkSection.appendChild(blkGrid);
     body.appendChild(blkSection);
   }
 
-  // 8. History Timeline — uses label/actor/details, not message/payload
+  // 8. History Timeline — concise milestones by default, full audit on demand.
   const histSection = element("div", "trace-section");
-  histSection.appendChild(element("h3", "trace-section-title", "7. Denetlenebilir Olay Zaman Çizelgesi"));
+  histSection.appendChild(element("h3", "trace-section-title", "7. Çalışma zaman çizelgesi"));
   if (history.length === 0) {
     histSection.appendChild(element("p", "empty-text", "Zaman çizelgesi boş."));
   } else {
-    const timeline = element("div", "trace-timeline");
-    history.forEach(item => {
-      const step = element("div", "timeline-step");
-      const dot = element("span", "timeline-dot");
-      const content = element("div", "timeline-content");
-      const time = element("small", null, formatTime(item.timestamp || item.createdAt));
-      const stage = element("strong", null, `${item.stage || item.state || "event"}: `);
-      const label = item.label || item.message || "";
-      let actorStr = "";
-      if (item.actor) {
-        if (typeof item.actor === "object") {
-          const type = item.actor.type || item.actor.role || "";
-          const id = item.actor.id || item.actor.name || item.actor.agentId || "";
-          if (type && id) actorStr = ` [${type} · ${id}]`;
-          else if (id) actorStr = ` [${id}]`;
-          else if (type) actorStr = ` [${type}]`;
-        } else {
-          actorStr = ` [${item.actor}]`;
+    const renderTimeline = (items, technical = false) => {
+      const timeline = element("div", `trace-timeline${technical ? " trace-timeline-technical" : " trace-timeline-summary"}`);
+      items.forEach(item => {
+        const step = element("div", "timeline-step");
+        const dot = element("span", "timeline-dot");
+        const content = element("div", "timeline-content");
+        const time = element("small", null, formatTime(item.timestamp || item.createdAt));
+        const title = technical
+          ? String(item.stage || item.state || "event").replaceAll("_", " ")
+          : friendlyTimelineLabel(item);
+        const stage = element("strong", null, title);
+        let actorStr = "";
+        if (item.actor) {
+          if (typeof item.actor === "object") {
+            const type = item.actor.type || item.actor.role || "";
+            const id = item.actor.id || item.actor.name || item.actor.agentId || "";
+            if (type && id) actorStr = `[${type} · ${id}]`;
+            else if (id || type) actorStr = `[${id || type}]`;
+          } else {
+            actorStr = `[${String(item.actor)}]`;
+          }
         }
-      }
-      let safeDetails = "";
-      if (item.details) {
-        if (typeof item.details === "string") {
-          safeDetails = item.details;
-        } else if (typeof item.details === "object") {
-          const clean = { ...item.details };
-          delete clean.rawPrompt;
-          delete clean.prompt;
-          delete clean.stdout;
-          delete clean.stderr;
-          delete clean.apiKey;
-          delete clean.token;
-          delete clean.secret;
-          delete clean.raw;
-          const s = JSON.stringify(clean);
-          if (s !== "{}") safeDetails = s;
+        let safeDetails = null;
+        if (technical && item.details) {
+          if (typeof item.details === "string") {
+            safeDetails = item.details.slice(0, 2000);
+          } else if (typeof item.details === "object") {
+            const clean = { ...item.details };
+            delete clean.rawPrompt;
+            delete clean.prompt;
+            delete clean.stdout;
+            delete clean.stderr;
+            delete clean.apiKey;
+            delete clean.token;
+            delete clean.secret;
+            delete clean.raw;
+            const serialized = JSON.stringify(clean);
+            if (serialized !== "{}") safeDetails = serialized.slice(0, 2000);
+          }
         }
-      }
-      const descText = [label, actorStr, safeDetails].filter(Boolean).join(" ") || "—";
-      const desc = element("span", null, descText);
-      content.appendChild(time);
-      content.appendChild(stage);
-      content.appendChild(desc);
-      step.appendChild(dot);
-      step.appendChild(content);
-      timeline.appendChild(step);
-    });
-    histSection.appendChild(timeline);
+        content.appendChild(time);
+        content.appendChild(stage);
+        if (actorStr) content.appendChild(element("span", "timeline-actor", actorStr));
+        if (technical && item.label && item.label !== title) content.appendChild(element("span", null, item.label));
+        if (safeDetails) {
+          const detail = element("details", "timeline-event-detail");
+          detail.appendChild(element("summary", null, "Teknik ayrıntı"));
+          detail.appendChild(element("pre", "timeline-detail-json", safeDetails));
+          content.appendChild(detail);
+        }
+        step.appendChild(dot);
+        step.appendChild(content);
+        timeline.appendChild(step);
+      });
+      return timeline;
+    };
+    histSection.appendChild(element("p", "timeline-help", "Son önemli adımlar gösteriliyor. Tekrarlanan teknik olaylar aşağıda kapalıdır."));
+    histSection.appendChild(renderTimeline(compactAuditHistory(history)));
+    const allEvents = element("details", "timeline-all-events");
+    allEvents.appendChild(element("summary", null, `${state.language === "en" ? "Show all technical events" : "Tüm teknik olayları göster"} (${history.length})`));
+    allEvents.appendChild(renderTimeline(history, true));
+    histSection.appendChild(allEvents);
   }
   body.appendChild(histSection);
   applyDocumentTranslations();

@@ -372,6 +372,35 @@ test("command construction: --effort is stripped for claude-sonnet-4-6", () => {
   assert.ok(!built.redactedCommand.includes("--effort"), "--effort must not appear in redacted command");
 });
 
+test("command construction: --effort is stripped for Antigravity Claude Opus aliases", () => {
+  const dir = tempDir();
+  const settings = baseSettings(dir);
+  settings.data.executor.providers.antigravity.command = [
+    "agy", "--agent", "{agent}",
+    "--model", "{model}",
+    "--effort", "{effort}",
+    "--mode", "{mode}",
+    "-p", "{prompt}"
+  ];
+  const profile = {
+    ...selectExecutionProfile(settings, { labels: ["provider-antigravity"] }, { persona: "backend-engineer", risk: "high" }),
+    provider: "antigravity",
+    model: "claude-opus-4-6-thinking",
+    effort: "high"
+  };
+
+  const built = buildExecutorCommand({
+    settings,
+    profile,
+    prepared: { worktree: path.join(dir, "worktree") },
+    prompt: "do high-risk work",
+    runId: "run-opus-effort-test"
+  });
+
+  assert.ok(!built.command.includes("--effort"), "Claude Opus must not receive --effort");
+  assert.ok(!built.redactedCommand.includes("--effort"), "redacted command must match execution semantics");
+});
+
 // ─── Test 5: command construction – --add-dir is injected for antigravity ─────
 
 test("command construction: --add-dir worktree is injected before -p for antigravity", () => {

@@ -77,6 +77,19 @@ test("technical governance work ignores Jira skill metadata and migration used o
   assert.ok(route.reasons.some(reason => reason.includes("worktree")));
 });
 
+test("FastAPI implementation is not misrouted by generic requirements prose", () => {
+  const route = routeIssue({
+    summary: "Introduce FastAPI app factory and dependency seams",
+    description: [
+      "Implement the backend application factory.",
+      "Requirements and acceptance criteria are listed below.",
+      "Allowed: backend/app/**, backend/tests/**"
+    ].join("\n")
+  });
+  assert.equal(route.persona, "backend-engineer");
+  assert.ok(route.reasons.some(reason => reason.includes("fastapi")));
+});
+
 test("declared allowed paths are extracted only from explicit scope and verification sections", () => {
   const paths = extractDeclaredAllowedPaths([
     "## Allowed and forbidden scope",

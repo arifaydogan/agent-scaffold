@@ -47,7 +47,7 @@ function loadUi({ fetchImpl, windowImpl } = {}) {
   const { elements, globalScope } = setupMockDOM();
   if (fetchImpl) globalScope.fetch = fetchImpl;
   if (windowImpl) globalScope.window = windowImpl;
-  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, STATUS_LABELS, translateUiText, applyLanguage, syncUrlState, openDecisionTrace, fetchParentDetail, renderRuns, renderOverview, renderPmWorkspace, renderPmInbox, renderProviderConnections, setProviderConnectionCategory, buildExecutionStages, renderChildDag, renderPlanPreview, switchView, openModal, closeModal };");
+  const runUI = new Function(...Object.keys(globalScope), code + "\nreturn { state, STATUS_LABELS, translateUiText, applyLanguage, syncUrlState, openDecisionTrace, fetchParentDetail, renderRuns, renderOverview, renderPmWorkspace, renderPmInbox, renderProviderConnections, setProviderConnectionCategory, buildExecutionStages, renderChildDag, renderPlanPreview, renderProjectSelection, switchView, openModal, closeModal };");
   return { ...runUI(...Object.values(globalScope)), elements };
 }
 
@@ -230,6 +230,62 @@ test("Work detail failures clear the loading state and show a useful error", asy
   assert.match(JSON.stringify(ui.elements["#trace-drawer-body"].children), /HTTP 503/);
 });
 
+test("Blocked work details expose the bounded technical failure cause", async () => {
+  const ui = loadUi({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        workItem: { key: "PACE-323", summary: "FastAPI app factory", canonicalState: "blocked" },
+        orchestratorDecision: {},
+        agentIdentity: {},
+        execution: {},
+        review: {},
+        humanControl: {},
+        blockedInfo: {
+          isBlocked: true,
+          reason: "Worktree setup failed",
+          detail: "fatal: branch is already used by another worktree",
+          failureCategory: "tool_host_unavailable",
+          autoFailoverEligible: true,
+          canRetry: true,
+          canApprove: false
+        },
+        history: []
+      })
+    })
+  });
+
+  await ui.openDecisionTrace("PACE-323");
+  assert.match(JSON.stringify(ui.elements["#trace-drawer-body"].children), /branch is already used by another worktree/);
+  assert.match(JSON.stringify(ui.elements["#trace-drawer-body"].children), /tool_host_unavailable/);
+});
+
+test("Plan preview exposes the approved automatic provider route", () => {
+  const ui = loadUi();
+  const host = ui.elements["#empty-state"];
+  const status = ui.elements["#connection-label"];
+  const collectText = node => {
+    let value = node?.textContent || node?.text || "";
+    for (const child of node?.children || []) value += " " + collectText(child);
+    return value;
+  };
+  ui.renderPlanPreview({
+    issue: "PACE-323",
+    eligible: true,
+    taskAgent: "backend-engineer",
+    risk: "high",
+    allowedPaths: ["backend/app/**"],
+    execution: { provider: "codex", model: "gpt-5.6-sol" },
+    executionCandidates: [
+      { provider: "codex", model: "gpt-5.6-sol" },
+      { provider: "antigravity", model: "claude-opus-4-6-thinking" }
+    ]
+  }, host, status);
+  assert.match(collectText(host), /Yedek rota/);
+  assert.match(collectText(host), /antigravity \/ claude-opus-4-6-thinking/);
+});
+
 test("Dashboard language can switch between Turkish and English", () => {
   const ui = loadUi();
   ui.applyLanguage("en", { rerender: false });
@@ -280,6 +336,81 @@ test("Ineligible plans render a categorized compatibility action in both languag
   assert.match(collectText(host), /Compatibility required/);
   assert.match(collectText(host), /Make work item compatible/);
   assert.match(collectText(host), /Required work-source labels are missing/);
+});
+
+test("Unmatched work renders a required local project selector in both languages", () => {
+  const ui = loadUi();
+  const host = ui.elements["#empty-state"];
+  const status = ui.elements["#connection-label"];
+  const resolution = {
+    reason: "no_match",
+    profiles: [
+      { id: "agent-scaffold", name: "AgentScaffold", repository: "agent-scaffold", baseBranch: "epic/provider-neutral-control-plane" },
+      { id: "houndvision", name: "Houndvision", repository: "houndvision", baseBranch: "develop" }
+    ]
+  };
+  const collectText = node => {
+    let value = node?.textContent || node?.text || "";
+    for (const child of node?.children || []) value += " " + collectText(child);
+    return value;
+  };
+
+  ui.renderProjectSelection("PACE-257", resolution, host, status);
+  assert.match(collectText(host), /Proje seçimi gerekli/);
+  assert.match(collectText(host), /Houndvision · houndvision · develop/);
+  const panel = host.children[0];
+  const select = panel.children.find(child => child.tag === "label").children[0];
+  const submit = panel.children.find(child => child.className.includes("project-selection-submit"));
+  assert.equal(submit.disabled, true);
+  select.value = "houndvision";
+  select.listeners.change();
+  assert.equal(submit.disabled, false);
+
+  ui.applyLanguage("en", { rerender: false });
+  ui.renderProjectSelection("PACE-257", resolution, host, status);
+  assert.match(collectText(host), /Project selection required/);
+  assert.match(collectText(host), /No repository match was found/);
+});
+
+test("Missing parent branch renders a selector populated only with existing Git refs", () => {
+  const ui = loadUi();
+  const host = ui.elements["#empty-state"];
+  const status = ui.elements["#connection-label"];
+  const plan = {
+    issue: "PACE-323",
+    projectProfileId: "houndvision",
+    projectProfile: { name: "Houndvision", repository: "houndvision" },
+    taskAgent: "backend-engineer",
+    execution: { provider: "codex" },
+    allowedPaths: ["backend/app/**", "backend/tests/**"],
+    eligible: false,
+    eligibilityReasons: ["Git base ref does not exist: epic/pace-254"],
+    compatibility: {
+      status: "needs_attention",
+      items: [{ id: "base-ref:epic/pace-254", category: "source_control" }]
+    },
+    availableBaseRefs: [
+      { ref: "develop", sha: "a".repeat(40) },
+      { ref: "master", sha: "b".repeat(40) }
+    ]
+  };
+  const collectText = node => {
+    let value = node?.textContent || node?.text || "";
+    for (const child of node?.children || []) value += " " + collectText(child);
+    return value;
+  };
+
+  ui.renderPlanPreview(plan, host, status);
+  assert.match(collectText(host), /Git tabanı seç/);
+  assert.match(collectText(host), /develop · aaaaaaaaaa/);
+  assert.doesNotMatch(collectText(host), /epic\/pace-254 ·/);
+  const panel = host.children.find(child => child.className.includes("base-ref-selection-panel"));
+  const select = panel.children.find(child => child.tag === "label").children[0];
+  const submit = panel.children.find(child => child.className.includes("base-ref-selection-submit"));
+  assert.equal(submit.disabled, true);
+  select.value = "develop";
+  select.listeners.change();
+  assert.equal(submit.disabled, false);
 });
 
 

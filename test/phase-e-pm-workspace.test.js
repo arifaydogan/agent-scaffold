@@ -98,6 +98,31 @@ function makeSettings(store, overrides = {}) {
   };
 }
 
+test("running work detail exposes bounded recent agent progress for on-demand reports", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store);
+  const runId = store.createRun("PACE-LIVE", {
+    issue: "PACE-LIVE",
+    summary: "Live progress",
+    taskAgent: "backend-engineer",
+    persona: "backend-engineer",
+    execution: { provider: "antigravity", model: "claude-opus" }
+  });
+  store.transition(runId, "eligible");
+  store.transition(runId, "claimed");
+  store.transition(runId, "prepared");
+  store.transition(runId, "queued", { provider: "antigravity" });
+  store.transition(runId, "started", { provider: "antigravity", pid: 1234 });
+  store.transition(runId, "progress", { provider: "antigravity", pid: 1234, text: '{"event":"step_update","step_update":{"state":"DONE","step_type":"user_input"}}' });
+
+  const detail = buildPmWorkItemDetail(settings, "PACE-LIVE", { store });
+  assert.equal(detail.execution.workerStatus, "running");
+  assert.match(detail.execution.currentActivity, /step_update/);
+  assert.equal(detail.execution.recentProgress.length, 1);
+  assert.ok(detail.execution.lastActivityAt);
+  store.database.close();
+});
+
 async function request(server, pathStr, options = {}) {
   const address = server.address();
   const host = options.host || "127.0.0.1";
@@ -156,6 +181,27 @@ test("1. Orchestrator rationale/reasons are never treated as blockers", () => {
   assert.equal(ws.counts.ready, 1, "Autonomous eligible task must appear in ready group");
   assert.equal(ws.groups.ready[0].issueKey, "PACE-100");
   assert.equal(ws.groups.ready[0].blockedReason, null);
+});
+
+test("blocked work details preserve the bounded runtime diagnostic", () => {
+  const store = makeTestStore();
+  const settings = makeSettings(store, { operatingMode: "autonomous" });
+  const runId = store.createRun("PACE-323", {
+    issue: "PACE-323",
+    summary: "FastAPI app factory",
+    persona: "backend-engineer",
+    taskAgent: "backend-engineer"
+  });
+  const diagnostic = "fatal: branch is already used by worktree at C:/repo/.agent-worktrees/pace-323";
+  store.transition(runId, "failed-retryable", {
+    reason: "Worktree setup failed",
+    error: diagnostic
+  });
+
+  const detail = buildPmWorkItemDetail(settings, "PACE-323", { store });
+  assert.equal(detail.blockedInfo.reason, "Worktree setup failed");
+  assert.equal(detail.blockedInfo.detail, diagnostic);
+  assert.equal(detail.blockedInfo.canRetry, true);
 });
 
 test("2. Real Phase A review outcome persistence shape & lossless findings integration", () => {
